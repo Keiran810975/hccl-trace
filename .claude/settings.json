@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C c:/Users/Admin/Desktop/ATC/hccl-trace/hcomm diff 2981ffa7..9e60ec27 -- src/common/debug/profiling/CMakeLists.txt src/algorithm/base/alg_template/component/CMakeLists.txt src/common/debug/profiling/task_profiling.cc)",
+      "Bash(git -C c:/Users/Admin/Desktop/ATC/hccl-trace/hccl diff 28946c2..4600cb6)",
+      "Bash(git -C c:/Users/Admin/Desktop/ATC/hccl-trace/hcomm log --oneline dev-innerDia -8)",
+      "Bash(git -C c:/Users/Admin/Desktop/ATC/hccl-trace/hcomm diff 9e60ec27..7db54477 --stat)",
+      "Bash(git -C c:/Users/Admin/Desktop/ATC/hccl-trace/hcomm diff 9e60ec27..7db54477)"
+    ]
+  }
+}

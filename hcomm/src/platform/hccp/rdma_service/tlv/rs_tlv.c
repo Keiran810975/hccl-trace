@@ -1,0 +1,155 @@
+/**
+ * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
+
+#include <errno.h>
+#include "securec.h"
+#include "hccp_tlv.h"
+#include "ra_rs_err.h"
+#include "ra_rs_comm.h"
+#include "rs_adp_nslb.h"
+#include "rs_inner.h"
+#include "rs_tlv.h"
+
+STATIC int RsGetTlvCb(uint32_t phyId, struct RsTlvCb **tlvCb)
+{
+    struct rs_cb *rsCb = NULL;
+    int ret;
+
+    ret = RsGetRsCb(phyId, &rsCb);
+    CHK_PRT_RETURN(ret != 0, hccp_err("rs_get_rs_cb failed, phyId(%u) invalid, ret(%d)", phyId, ret), ret);
+
+    *tlvCb = &rsCb->tlvCb;
+    return 0;
+}
+
+RS_ATTRI_VISI_DEF int RsTlvInit(unsigned int phyId, unsigned int *bufferSize)
+{
+    struct RsTlvCb *tlvCb = NULL;
+    struct rs_cb *rsCb = NULL;
+    int ret = 0;
+
+    CHK_PRT_RETURN(bufferSize == NULL, hccp_err("param error, buffer_size is NULL"), -EINVAL);
+
+    ret = RsGetRsCb(phyId, &rsCb);
+    CHK_PRT_RETURN(ret != 0, hccp_err("rs_get_rs_cb failed, phyId(%u) invalid, ret(%d)", phyId, ret), ret);
+    tlvCb = &rsCb->tlvCb;
+    CHK_PRT_RETURN(tlvCb->initFlag, hccp_err("rs_tlv init repeat, phyId(%u)", phyId), -EINVAL);
+
+    tlvCb->phyId = phyId;
+    ret = pthread_mutex_init(&tlvCb->mutex, NULL);
+    CHK_PRT_RETURN(ret != 0, hccp_err("rs_tlv mutex_init failed ret(%d)", ret), -ESYSFUNC);
+
+    tlvCb->bufInfo.buf = (char *)calloc(RS_TLV_BUFFER_SIZE, sizeof(char));
+    if (tlvCb->bufInfo.buf == NULL) {
+        hccp_err("rs_tlv calloc buf failed errno(%d)", errno);
+        (void)pthread_mutex_destroy(&tlvCb->mutex);
+        return -ENOMEM;
+    }
+
+    tlvCb->initFlag = true;
+    tlvCb->bufInfo.bufferSize = RS_TLV_BUFFER_SIZE;
+    *bufferSize = RS_TLV_BUFFER_SIZE;
+
+    hccp_run_info("rs_tlv_init successful, phyId(%u) bufferSize(%u)", phyId, *bufferSize);
+
+    return ret;
+}
+
+RS_ATTRI_VISI_DEF int RsTlvDeinit(unsigned int phyId)
+{
+    struct RsTlvCb *tlvCb = NULL;
+    int ret = 0;
+
+    ret = RsGetTlvCb(phyId, &tlvCb);
+    CHK_PRT_RETURN(ret != 0, hccp_err("rs_get_tlv_cb failed, ret(%d) phyId(%u)", ret, phyId), ret);
+
+    CHK_PRT_RETURN(!tlvCb->initFlag,
+        hccp_warn("rs_tlv not init or already deinit, phyId(%u)", phyId), 0);
+
+    RS_PTHREAD_MUTEX_LOCK(&tlvCb->mutex);
+    free(tlvCb->bufInfo.buf);
+    tlvCb->bufInfo.buf = NULL;
+    RS_PTHREAD_MUTEX_ULOCK(&tlvCb->mutex);
+    pthread_mutex_destroy(&tlvCb->mutex);
+
+    hccp_run_info("rs_tlv_deinit successful, phyId(%u)", phyId);
+    return ret;
+}
+
+STATIC int RsTlvAssembleSendData(struct TlvBufInfo *bufInfo, struct TlvRequestMsgHead *head, char *data,
+    bool *isSendFinish)
+{
+    int ret = 0;
+
+    *isSendFinish = false;
+    CHK_PRT_RETURN(head->offset >= bufInfo->bufferSize,
+        hccp_err("[recv][rs_tlv]param error, offset(%u) >= bufferSize(%u), phyId(%u)",
+        head->offset, bufInfo->bufferSize, head->phyId), -EINVAL);
+    CHK_PRT_RETURN(head->sendBytes > MAX_TLV_MSG_DATA_LEN,
+        hccp_err("[recv][rs_tlv]param error, sendBytes(%u) >= data size(%u), phyId(%u)",
+        head->sendBytes, MAX_TLV_MSG_DATA_LEN, head->phyId), -EINVAL);
+    CHK_PRT_RETURN((head->offset + head->sendBytes) > head->totalBytes,
+        hccp_err("[recv][rs_tlv]data overflow, offset(%u) + sendBytes(%u) > totalBytes(%u), phyId(%u)",
+        head->offset, head->sendBytes, head->totalBytes, head->phyId), -EINVAL);
+
+    if (head->offset == 0) {
+        (void)memset_s(bufInfo->buf, bufInfo->bufferSize, 0, bufInfo->bufferSize);
+    }
+
+    ret = memcpy_s(bufInfo->buf + head->offset, bufInfo->bufferSize - head->offset, data, head->sendBytes);
+    CHK_PRT_RETURN(ret != 0, hccp_err("[recv][rs_tlv]memcpy_s data failed, ret(%d) phyId(%u)",
+        ret, head->phyId), -ESAFEFUNC);
+
+    if (head->offset + head->sendBytes == head->totalBytes) {
+        *isSendFinish = true;
+    }
+
+    return 0;
+}
+
+RS_ATTRI_VISI_DEF int RsTlvRequest(struct TlvRequestMsgHead *head, char *data)
+{
+    struct RsTlvCb *tlvCb = NULL;
+    bool isSendFinish = false;
+    int ret = 0;
+
+    CHK_PRT_RETURN(head == NULL || data == NULL, hccp_err("param error, head or data is NULL"), -EINVAL);
+
+    ret = RsGetTlvCb(head->phyId, &tlvCb);
+    CHK_PRT_RETURN(ret != 0, hccp_err("rs_get_tlv_cb failed, ret(%d) phyId(%u)", ret, head->phyId), ret);
+    CHK_PRT_RETURN(tlvCb->bufInfo.buf == NULL,
+        hccp_err("rs_tlv buf not initialized, phyId(%u)", head->phyId), -EINVAL);
+
+    RS_PTHREAD_MUTEX_LOCK(&tlvCb->mutex);
+    ret = RsTlvAssembleSendData(&tlvCb->bufInfo, head, data, &isSendFinish);
+    if (ret != 0) {
+        hccp_err("rs_tlv_assemble_send_data failed, ret(%d) phyId(%u)", ret, tlvCb->phyId);
+        goto tlv_request_release_lock;
+    }
+
+    if (!isSendFinish) {
+        goto tlv_request_release_lock;
+    }
+
+    switch(head->moduleType) {
+        case TLV_MODULE_TYPE_NSLB:
+            ret = RsNslbNetcoRequest(head->phyId, &tlvCb->nslbCb,
+                    head->type, tlvCb->bufInfo.buf, head->totalBytes);
+            break;
+        default:
+            hccp_err("[request][rs_tlv]module type error, moduleType(%u) phyId(%u)", head->moduleType, head->phyId);
+            ret = -EINVAL;
+            break;
+    }
+
+tlv_request_release_lock:
+    RS_PTHREAD_MUTEX_ULOCK(&tlvCb->mutex);
+    return ret;
+}

@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""Merge HCCL semantic plog records with msprof task_time.csv rows."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import os
+import sys
+from collections import Counter, defaultdict
+from typing import Dict, Iterable, List, Tuple
+
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from diagnosis.parse_msprof import parse_file as parse_task_time_file
+    from diagnosis.parse_plog import parse_file as parse_plog_file
+    from diagnosis.schema import MERGED_FIELDS, ProfilerTask, SemanticRecord, write_csv
+else:
+    from .parse_msprof import parse_file as parse_task_time_file
+    from .parse_plog import parse_file as parse_plog_file
+    from .schema import MERGED_FIELDS, ProfilerTask, SemanticRecord, write_csv
+
+
+def merge_records(semantics: Iterable[SemanticRecord], profilers: Iterable[ProfilerTask]) -> Tuple[List[Dict[str, object]], Counter]:
+    semantic_list = list(semantics)
+    profiler_list = list(profilers)
+    semantic_counts = Counter(record.merge_key for record in semantic_list)
+    profiler_counts = Counter(record.merge_key for record in profiler_list)
+    profiler_by_key = defaultdict(list)
+    profiler_by_device_task_key = defaultdict(list)
+    for task in profiler_list:
+        profiler_by_key[task.merge_key].append(task)
+        profiler_by_device_task_key[(task.device_id, task.stream_id, task.task_id)].append(task)
+
+    rows = []
+    matched_profiler_keys = set()
+    stats = Counter()
+    stats["semantic_total"] = len(semantic_list)
+    stats["profiler_total"] = len(profiler_list)
+
+    for semantic in semantic_list:
+        matches = profiler_by_key.get(semantic.merge_key, [])
+        if not matches and not semantic.node_id:
+            device_task_matches = profiler_by_device_task_key.get(
+                (semantic.device_id, semantic.stream_id, semantic.task_id), []
+            )
+            if len(device_task_matches) == 1:
+                matches = device_task_matches
+        duplicate_semantic = semantic_counts[semantic.merge_key] > 1
+        duplicate_profiler = profiler_counts[semantic.merge_key] > 1
+        if not matches:
+            stats["unmatched_semantic"] += 1
+            rows.append(_merged_row("unmatched_semantic", semantic, None, duplicate_semantic, duplicate_profiler))
+            continue
+        stats["matched"] += 1
+        matched_profiler_keys.add(semantic.merge_key)
+        rows.append(_merged_row("matched", semantic, matches[0], duplicate_semantic, duplicate_profiler))
+
+    for task in profiler_list:
+        if task.merge_key in matched_profiler_keys:
+            continue
+        stats["unmatched_profiler"] += 1
+
+    stats["duplicate_semantic_keys"] = sum(1 for count in semantic_counts.values() if count > 1)
+    stats["duplicate_profiler_keys"] = sum(1 for count in profiler_counts.values() if count > 1)
+    return rows, stats
+
+
+def _merged_row(status: str, semantic: SemanticRecord, profiler: ProfilerTask, duplicate_semantic: bool, duplicate_profiler: bool):
+    row = semantic.to_row()
+    row.update({
+        "match_status": status,
+        "duplicate_semantic": int(duplicate_semantic),
+        "duplicate_profiler": int(duplicate_profiler),
+        "profiler_task_kind": profiler.task_kind if profiler else "",
+        "task_start": profiler.task_start if profiler else "",
+        "task_stop": profiler.task_stop if profiler else "",
+        "duration": profiler.duration if profiler else "",
+        "kernel_type": profiler.kernel_type if profiler else "",
+    })
+    return row
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Merge HCCL semantic plog and msprof task_time.csv.")
+    parser.add_argument("--plog", required=True)
+    parser.add_argument("--task-time", required=True)
+    parser.add_argument("-o", "--output", required=True)
+    parser.add_argument("--node-id", default="")
+    parser.add_argument("--summary", default="")
+    args = parser.parse_args()
+
+    rows, stats = merge_records(parse_plog_file(args.plog), parse_task_time_file(args.task_time, args.node_id))
+    write_csv(args.output, list(MERGED_FIELDS), rows)
+    for key in sorted(stats):
+        print("{}={}".format(key, stats[key]))
+    if args.summary:
+        with open(args.summary, "w", newline="", encoding="utf-8") as output:
+            writer = csv.writer(output)
+            writer.writerow(("metric", "value"))
+            for key in sorted(stats):
+                writer.writerow((key, stats[key]))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

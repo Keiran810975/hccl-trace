@@ -1,0 +1,6 @@
+if (DEVICE_MODE)
+    add_subdirectory(adapter)
+endif()
+add_subdirectory(hdc)
+add_subdirectory(peer)
+add_subdirectory(client)

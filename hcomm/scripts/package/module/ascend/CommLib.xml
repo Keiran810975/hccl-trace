@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<block name="CommLib" copy_type="delivery" src_path="" dst_path="" install_path="" install_own="$username:$usergroup" install_mod="550" install_type="run;devel">
+    <dir_info install_mod="550">
+        <path value="$(TARGET_ENV)/lib64"/>
+        <path value="$(TARGET_ENV)/include" install_type="devel"/>
+        <path value="$(TARGET_ENV)/include/hccl" install_type="devel"/>
+        <path value="$(TARGET_ENV)/include/version" install_type="devel"/>
+        <path value="$(TARGET_ENV)/pkg_inc" install_type="devel"/>
+        <path value="$(TARGET_ENV)/pkg_inc/hccl" install_type="devel"/>
+        <path value="compat"/>
+        <path value="opp"/>
+        <path value="opp/built-in"/>
+        <path value="opp/built-in/op_impl"/>
+        <path value="opp/built-in/op_impl/aicpu"/>
+        <path value="opp/built-in/op_impl/aicpu/kernel"/>
+        <path value="opp/built-in/op_impl/aicpu/config"/>
+    </dir_info>
+    <file_info value="include" copy_type="source" src_path="hcomm/include/hccl" dst_path="include/hccl" install_path="$(TARGET_ENV)/include/hccl" install_type="devel" install_mod="440">
+        <file value="hccl_comm.h"/>
+        <file value="hccl_types.h"/>
+        <file value="hccl_rank_graph.h"/>
+        <file value="hccl_res.h"/>
+        <file value="hcomm_primitives.h"/>
+    </file_info>
+    <file_info value="include" copy_type="source" src_path="hcomm/src/pub_inc" dst_path="include/hccl" install_path="$(TARGET_ENV)/include/hccl" install_type="devel" install_mod="440">
+        <file value="hccn_rping.h"/>
+    </file_info>
+    <file_info value="include" copy_type="source" src_path="hcomm/pkg/hccl" dst_path="pkg_inc/hccl" install_path="$(TARGET_ENV)/pkg_inc/hccl" install_type="devel" install_mod="440">
+        <file value="base.h"/>
+        <file value="hccl_ex.h"/>
+        <file value="hccl_one_sided_services.h"/>
+        <file value="hcom.h"/>
+        <file value="dtype_common.h"/>
+        <file value="workflow.h"/>
+        <file value="hccl_inner.h"/>
+        <file value="hccl_ctrl_plane.h"/>
+        <file value="hcomm_diag.h"/>
+    </file_info>
+    <file_info value="device" copy_type="delivery" src_path="build" dst_path="Ascend/aicpu" install_path="opp/built-in/op_impl/aicpu/kernel" install_type="all" install_mod="440" optional="true">
+        <file value="aicpu_hcomm.tar.gz"/>
+    </file_info>
+    <file_info value="device" copy_type="delivery" src_path="build" dst_path="Ascend/aicpu" install_path="compat" install_type="all" install_mod="440" optional="true">
+        <file value="cann-hcomm-compat.tar.gz"/>
+        <file value="cann-hccd-compat.tar.gz"/>
+    </file_info>
+    <file_info value="json" copy_type="delivery" src_path="build" dst_path="built-in/data/op/aicpu" install_path="opp/built-in/op_impl/aicpu/config" install_type="all" install_mod="440">
+        <file value="ccl_kernel.json"/>
+    </file_info>
+    <file_info value="lib64" copy_type="delivery" src_path="build" dst_path="lib64" install_path="$(TARGET_ENV)/lib64" install_type="all" install_mod="440">
+        <!-- hccl -->
+        <file value="libhcomm.so" file_type="shared" install_softlink="$(TARGET_ENV)/lib64/libhccl_fwk.so"/>
+        <file value="libhccl_alg.so" file_type="shared"/>
+        <file value="libhccl_plf.so" file_type="shared"/>
+        <file value="libhccl_legacy.so" file_type="shared"/>
+        <file value="dynamic_mul_int8_v80.o"/>
+        <file value="dynamic_minimum_int8_v80.o"/>
+        <file value="dynamic_maximum_int8_v80.o"/>
+        <file value="dynamic_add_int8_v80.o"/>
+        <file value="dynamic_mul_int64_v80.o"/>
+        <file value="dynamic_minimum_int64_v80.o"/>
+        <file value="dynamic_maximum_int64_v80.o"/>
+        <file value="dynamic_add_int64_v80.o"/>
+        <file value="dynamic_mul_float32_v80.o"/>
+        <file value="dynamic_minimum_float32_v80.o"/>
+        <file value="dynamic_maximum_float32_v80.o"/>
+        <file value="dynamic_mul_float16_v80.o"/>
+        <file value="dynamic_add_float16_v80.o"/>
+        <file value="dynamic_minimum_float16_v80.o"/>
+        <file value="dynamic_maximum_float16_v80.o"/>
+        <file value="dynamic_mul_int32_v80.o"/>
+        <file value="dynamic_minimum_int32_v80.o"/>
+        <file value="dynamic_maximum_int32_v80.o"/>
+        <file value="dynamic_add_int32_v80.o"/>
+        <file value="MemSet_dynamic_AtomicAddrClean_1_ascend910.o"/>
+        <file value="dynamic_mul_int32_v81_910B4.o"/>
+        <file value="dynamic_mul_int8_v81_910B4.o"/>
+        <file value="dynamic_mul_float16_v81_910B4.o"/>
+        <file value="dynamic_mul_float32_v81_910B4.o"/>
+        <file value="dynamic_mul_int32_v81_910B3.o"/>
+        <file value="dynamic_mul_int8_v81_910B3.o"/>
+        <file value="dynamic_mul_float16_v81_910B3.o"/>
+        <file value="dynamic_mul_float32_v81_910B3.o"/>
+        <file value="dynamic_mul_int32_v81_910B2.o"/>
+        <file value="dynamic_mul_int8_v81_910B2.o"/>
+        <file value="dynamic_mul_float16_v81_910B2.o"/>
+        <file value="dynamic_mul_float32_v81_910B2.o"/>
+        <file value="dynamic_mul_int32_v81_910B1.o"/>
+        <file value="dynamic_mul_int8_v81_910B1.o"/>
+        <file value="dynamic_mul_float16_v81_910B1.o"/>
+        <file value="dynamic_mul_float32_v81_910B1.o"/>
+        <file value="dynamic_mul_int64_v81.o"/>
+        <file value="dynamic_minimum_int64_v81.o"/>
+        <file value="dynamic_maximum_int64_v81.o"/>
+        <file value="dynamic_add_int64_v81.o"/>
+        <file value="MemSet_dynamic_AtomicAddrClean_1_ascend910b.o"/>
+        <file value="dynamic_mul_int8_v51.o"/>
+        <file value="dynamic_add_int8_v51.o"/>
+        <file value="dynamic_minimum_int8_v51.o"/>
+        <file value="dynamic_maximum_int8_v51.o"/>
+        <file value="dynamic_mul_int32_v51.o"/>
+        <file value="dynamic_minimum_int32_v51.o"/>
+        <file value="dynamic_maximum_int32_v51.o"/>
+        <file value="dynamic_add_int32_v51.o"/>
+        <file value="dynamic_mul_float32_v51.o"/>
+        <file value="dynamic_minimum_float32_v51.o"/>
+        <file value="dynamic_maximum_float32_v51.o"/>
+        <file value="dynamic_add_float32_v51.o"/>
+        <file value="dynamic_mul_float16_v51.o"/>
+        <file value="dynamic_minimum_float16_v51.o"/>
+        <file value="dynamic_maximum_float16_v51.o"/>
+        <file value="dynamic_add_float16_v51.o"/>
+        <file value="MemSet_dynamic_AtomicAddrClean_1_ascend310p3.o"/>
+        <file value="hccl_aiv_op_ascend910B.o"/>
+        <file value="hccl_ag_superkernel_int8.o"/>
+        <file value="hccl_ag_superkernel_int16.o"/>
+        <file value="hccl_ag_superkernel_int32.o"/>
+        <file value="hccl_ag_superkernel_float16.o"/>
+        <file value="hccl_ag_superkernel_float32.o"/>
+        <file value="hccl_ag_superkernel_bfloat16.o"/>
+        <file value="hccl_ag_superkernel_uint8.o"/>
+        <file value="hccl_ag_superkernel_uint16.o"/>
+        <file value="hccl_ag_superkernel_uint32.o"/>
+        <file value="hccl_rs_superkernel_int8.o"/>
+        <file value="hccl_rs_superkernel_int16.o"/>
+        <file value="hccl_rs_superkernel_int32.o"/>
+        <file value="hccl_rs_superkernel_float16.o"/>
+        <file value="hccl_rs_superkernel_float32.o"/>
+        <file value="hccl_rs_superkernel_bfloat16.o"/>
+        <file value="hccl_a2a_superkernel_int8.o"/>
+        <file value="hccl_a2a_superkernel_int16.o"/>
+        <file value="hccl_a2a_superkernel_int32.o"/>
+        <file value="hccl_a2a_superkernel_float16.o"/>
+        <file value="hccl_a2a_superkernel_float32.o"/>
+        <file value="hccl_a2a_superkernel_bfloat16.o"/>
+        <file value="hccl_a2a_superkernel_uint8.o"/>
+        <file value="hccl_a2a_superkernel_uint16.o"/>
+        <file value="hccl_a2a_superkernel_uint32.o"/>
+        <file value="hccl_ar_superkernel_int8.o"/>
+        <file value="hccl_ar_superkernel_int16.o"/>
+        <file value="hccl_ar_superkernel_int32.o"/>
+        <file value="hccl_ar_superkernel_float16.o"/>
+        <file value="hccl_ar_superkernel_float32.o"/>
+        <file value="hccl_ar_superkernel_bfloat16.o"/>
+        <file value="hccl_sk_rs_deter.o"/>
+        <file value="hccl_sk_ar_deter.o"/>
+        <file value="hccl_sk_ar_crossnode.o"/>
+        <file value="hccl_sk_rs_crossnode.o"/>
+        <file value="hccl_sk_ag_crossnode.o"/>
+        <file value="hccl_sk_a2a_crossnode.o"/>
+        <!-- network -->
+        <file value="libra.so" file_type="shared" install_type="run;devel;docker"/>
+        <file value="libra_hdc.so" file_type="shared"/>
+        <file value="librs.so" file_type="shared"/>
+        <file value="libra_peer.so" file_type="shared"/>
+        <file value="libascend_kms.so" file_type="shared"/>
+        <file value="libtls_adp.so" file_type="shared"/>
+        <!-- python -->
+        <file value="hccl-0.1.0-py3-none-any.whl" file_type="whl"/>
+    </file_info>
+</block>

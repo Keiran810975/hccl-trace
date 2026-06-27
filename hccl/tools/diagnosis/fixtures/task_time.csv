@@ -1,0 +1,4 @@
+Device_id,stream_id,task_id,kernel_type,task_start(us),task_stop(us),task_time(us)
+0,12,34,NOTIFY_WAIT,1000,1004,4
+0,12,35,SDMA,1005,1020,15
+0,99,1,PROFILER_TRACE_EX,1,2,1
