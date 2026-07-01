@@ -14,13 +14,13 @@ if __package__ in (None, ""):
     from diagnosis.parse_msprof import parse_task_time_rows
     from diagnosis.parse_plog import parse_legacy_block
     from diagnosis.validate_trace import validate_rows
-    from diagnosis.visualize_dependency_graph import build_edges, build_nodes, infer_rank_size
+    from diagnosis.visualize_dependency_graph import apply_rank_field, assign_positions, build_edges, build_nodes, infer_rank_size
 else:
     from .merge_timeline import merge_records
     from .parse_msprof import parse_task_time_rows
     from .parse_plog import parse_legacy_block
     from .validate_trace import validate_rows
-    from .visualize_dependency_graph import build_edges, build_nodes, infer_rank_size
+    from .visualize_dependency_graph import apply_rank_field, assign_positions, build_edges, build_nodes, infer_rank_size
 
 
 class DiagnosisToolTest(unittest.TestCase):
@@ -168,6 +168,67 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertIn("upstream_prev_step", edge_kinds)
         self.assertIn("phase_bridge", edge_kinds)
         self.assertIn("signal_payload", edge_kinds)
+
+
+    def test_dependency_rank_auto_uses_device_when_user_rank_collapses(self):
+        rows = []
+        for device_id in (0, 1):
+            rows.append({
+                "node_id": "node0",
+                "device_id": str(device_id),
+                "user_rank": "3",
+                "rank_size": "8",
+                "stream_id": "10",
+                "task_id": str(100 + device_id),
+                "phase": "reduce_scatter_direct",
+                "event": "rx_payload_reduce_start",
+                "semantic": "rx_payload_reduce_start",
+                "step": "0",
+                "slice": "0",
+                "_source_row": device_id,
+                "_phase_group": "reduce_scatter",
+                "_phase_order": 0,
+                "_event_order": 4,
+                "_node_id": "node0",
+                "_device_id": device_id,
+                "_user_rank": 3,
+                "_rank": 3,
+                "_rank_size": 8,
+                "_stream_id": 10,
+                "_task_id": 100 + device_id,
+                "_step": 0,
+                "_slice": 0,
+                "_start": float(device_id),
+                "_stop": float(device_id + 1),
+                "_duration": 1.0,
+            })
+
+        selected = apply_rank_field(rows, "auto")
+        self.assertEqual(selected, "device_id")
+        self.assertEqual({row["_rank"] for row in rows}, {0, 1})
+
+    def test_dependency_layout_keeps_nodes_inside_column(self):
+        rows = []
+        for index in range(3):
+            rows.append({
+                "_graph_id": f"n{index}",
+                "_rank": 0,
+                "_phase_group": "reduce_scatter",
+                "_phase_order": 0,
+                "_step": 0,
+                "_event_order": index,
+                "_slice": index,
+                "_stream_id": 10,
+                "_start": float(index),
+                "_task_id": index,
+            })
+
+        positions, _columns, _ranks, _rank_y, _rank_heights = assign_positions(rows, 130, 94, 40)
+        left = 180
+        col_width = 130
+        for x, _y in positions.values():
+            self.assertGreaterEqual(x, left)
+            self.assertLessEqual(x + 40, left + col_width)
 
 
 if __name__ == "__main__":

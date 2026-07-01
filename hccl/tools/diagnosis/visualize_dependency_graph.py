@@ -159,6 +159,7 @@ def read_rows(path: Path, events: Iterable[str], include_unmatched: bool = False
                 "_event_order": EVENT_ORDER.get(event, 99),
                 "_node_id": row.get("node_id", ""),
                 "_device_id": to_int(row.get("device_id")),
+                "_user_rank": to_int(row.get("user_rank", row.get("rank"))),
                 "_rank": to_int(row.get("user_rank", row.get("rank"))),
                 "_rank_size": to_int(row.get("rank_size")),
                 "_stream_id": to_int(row.get("stream_id")),
@@ -169,7 +170,7 @@ def read_rows(path: Path, events: Iterable[str], include_unmatched: bool = False
                 "_stop": stop,
                 "_duration": max(0.0, stop - start),
             })
-            if item["_rank"] < 0 or item["_step"] < 0:
+            if (item["_user_rank"] < 0 and item["_device_id"] < 0) or item["_step"] < 0:
                 continue
             rows.append(item)
     rows.sort(key=row_sort_key)
@@ -189,11 +190,26 @@ def row_sort_key(row: dict) -> Tuple[int, int, int, int, int, int, float, int]:
     )
 
 
+def apply_rank_field(rows: List[dict], rank_field: str) -> str:
+    user_ranks = {row["_user_rank"] for row in rows if row["_user_rank"] >= 0}
+    device_ids = {row["_device_id"] for row in rows if row["_device_id"] >= 0}
+    selected = rank_field
+    if selected == "auto":
+        selected = "device_id" if len(user_ranks) <= 1 and len(device_ids) > 1 else "user_rank"
+    for row in rows:
+        if selected == "device_id" and row["_device_id"] >= 0:
+            row["_rank"] = row["_device_id"]
+        else:
+            row["_rank"] = row["_user_rank"]
+        row["_rank_source"] = selected
+    return selected
+
+
 def infer_rank_size(rows: List[dict], explicit: int = -1) -> int:
     if explicit > 0:
         return explicit
     for row in rows:
-        if row["_rank_size"] > 0:
+        if row["_rank_size"] > 0 and row.get("_rank_source") != "device_id":
             return row["_rank_size"]
     ranks = {row["_rank"] for row in rows if row["_rank"] >= 0}
     return max(ranks) + 1 if ranks else 0
@@ -258,6 +274,8 @@ def build_nodes(rows: List[dict]) -> List[dict]:
             "node_id": row.get("node_id", ""),
             "device_id": row.get("device_id", ""),
             "rank": row.get("user_rank", ""),
+            "graph_rank": row.get("_rank", ""),
+            "rank_source": row.get("_rank_source", "user_rank"),
             "rank_size": row.get("rank_size", ""),
             "stream_id": row.get("stream_id", ""),
             "task_id": row.get("task_id", ""),
@@ -404,10 +422,14 @@ def export_edges(path: Path, edges: List[dict]) -> None:
     write_csv(str(path), fields, edges)
 
 
-def assign_positions(rows: List[dict], col_width: int, row_height: int):
+def assign_positions(rows: List[dict], col_width: int, row_height: int, node_width: int):
     columns = sorted({(row["_phase_group"], row["_step"]) for row in rows}, key=lambda item: (PHASE_GROUP_ORDER.get(item[0], 99), item[1]))
     ranks = sorted({row["_rank"] for row in rows if row["_rank"] >= 0})
     col_index = {key: index for index, key in enumerate(columns)}
+
+    slot_gap = 8
+    cell_pad = 12
+    slots_per_row = max(1, int((col_width - cell_pad * 2 + slot_gap) / (node_width + slot_gap)))
 
     per_cell_counts: Dict[Tuple[int, int], int] = defaultdict(int)
     for row in rows:
@@ -416,7 +438,7 @@ def assign_positions(rows: List[dict], col_width: int, row_height: int):
     rank_heights = {}
     for rank in ranks:
         max_stack = max((count for (item_rank, _col), count in per_cell_counts.items() if item_rank == rank), default=1)
-        stack_rows = int(math.ceil(max_stack / 3.0))
+        stack_rows = int(math.ceil(max_stack / float(slots_per_row)))
         rank_heights[rank] = max(row_height, 48 + stack_rows * 30)
 
     rank_y = {}
@@ -433,15 +455,15 @@ def assign_positions(rows: List[dict], col_width: int, row_height: int):
         slot_key = (rank, col)
         slot = per_cell_slots[slot_key]
         per_cell_slots[slot_key] += 1
-        x = 180 + col * col_width + 18 + (slot % 3) * 46
-        y = rank_y[rank] + 16 + (slot // 3) * 30
+        x = 180 + col * col_width + cell_pad + (slot % slots_per_row) * (node_width + slot_gap)
+        y = rank_y[rank] + 16 + (slot // slots_per_row) * 30
         positions[row["_graph_id"]] = (x, y)
     return positions, columns, ranks, rank_y, rank_heights
 
 
 def title_for(row: dict) -> str:
     return (
-        f'rank={row["_rank"]} device={row["_device_id"]} stream={row["_stream_id"]} task={row["_task_id"]}\n'
+        f'graph_rank={row["_rank"]} user_rank={row["_user_rank"]} device={row["_device_id"]} stream={row["_stream_id"]} task={row["_task_id"]}\n'
         f'phase={row.get("phase", "")} event={row.get("event", "")} semantic={row.get("semantic", "")}\n'
         f'step={row["_step"]} slice={row["_slice"]}\n'
         f'{row["_start"]:.3f}..{row["_stop"]:.3f} us duration={row["_duration"]:.3f} us'
@@ -452,13 +474,13 @@ def render_svg(rows: List[dict], edges: List[dict], output: Path, col_width: int
     if not rows:
         raise ValueError("no dependency rows to render")
 
-    positions, columns, ranks, rank_y, rank_heights = assign_positions(rows, col_width, row_height)
+    node_w = 40
+    node_h = 20
+    positions, columns, ranks, rank_y, rank_heights = assign_positions(rows, col_width, row_height, node_w)
     left = 180
     right = 72
     top = 94
     bottom = 84
-    node_w = 40
-    node_h = 20
     width = left + max(1, len(columns)) * col_width + right
     height = (max((rank_y[rank] + rank_heights[rank] for rank in ranks), default=top) + bottom)
 
@@ -481,10 +503,12 @@ def render_svg(rows: List[dict], edges: List[dict], output: Path, col_width: int
         parts.append(f'<text x="{x + col_width / 2:.1f}" y="{top - 12}" text-anchor="middle" font-family="Arial" font-size="10" fill="#555">step {step}</text>')
     parts.append(f'<line x1="{left + len(columns) * col_width}" y1="{top - 18}" x2="{left + len(columns) * col_width}" y2="{height - bottom + 24}" stroke="#e6e6e6"/>')
 
+    rank_source = rows[0].get("_rank_source", "user_rank") if rows else "user_rank"
+    rank_label = "card" if rank_source == "device_id" else "rank"
     for rank in ranks:
         y = rank_y[rank]
         lane_h = rank_heights[rank]
-        parts.append(f'<text x="28" y="{y + 24}" font-family="Arial" font-size="12" fill="#333">rank {rank}</text>')
+        parts.append(f'<text x="28" y="{y + 24}" font-family="Arial" font-size="12" fill="#333">{rank_label} {rank}</text>')
         parts.append(f'<line x1="{left - 12}" y1="{y + lane_h / 2:.1f}" x2="{width - right}" y2="{y + lane_h / 2:.1f}" stroke="#f0f0f0"/>')
 
     for edge in edges:
@@ -539,6 +563,7 @@ def main() -> int:
     parser.add_argument("--events", default=",".join(DEFAULT_EVENTS), help="Comma-separated event filter; empty means all events.")
     parser.add_argument("--edge-kinds", default=",".join(DEFAULT_EDGE_KINDS), help="Comma-separated edge kinds.")
     parser.add_argument("--rank-size", type=int, default=-1)
+    parser.add_argument("--rank-field", choices=("auto", "user_rank", "device_id"), default="auto")
     parser.add_argument("--upstream", choices=("previous", "next"), default="previous")
     parser.add_argument("--col-width", type=int, default=130)
     parser.add_argument("--row-height", type=int, default=94)
@@ -548,6 +573,7 @@ def main() -> int:
     events = parse_csv_list(args.events)
     edge_kinds = parse_csv_list(args.edge_kinds)
     rows = read_rows(args.merged_csv, events, include_unmatched=args.include_unmatched)
+    selected_rank_field = apply_rank_field(rows, args.rank_field)
     build_nodes(rows)
     rank_size = infer_rank_size(rows, args.rank_size)
     edges = build_edges(rows, edge_kinds, rank_size, args.upstream)
@@ -560,6 +586,7 @@ def main() -> int:
     print(f"nodes={len(rows)}")
     print(f"edges={len(edges)}")
     print(f"rank_size={rank_size}")
+    print(f"rank_field={selected_rank_field}")
     print(f"svg={output}")
     print(f"nodes_csv={nodes_path}")
     print(f"edges_csv={edges_path}")

@@ -44,6 +44,14 @@ python -m tools.diagnosis.visualize_dependency_graph \
   tools/diagnosis/fixtures/merged.csv \
   --output tools/diagnosis/fixtures/dependency.svg
 
+# If semantic user_rank collapses to one value while Device_id spans multiple
+# cards, the default --rank-field auto renders rows by device/card. Force a
+# field explicitly when needed:
+python -m tools.diagnosis.visualize_dependency_graph \
+  tools/diagnosis/fixtures/merged.csv \
+  --rank-field device_id \
+  --output tools/diagnosis/fixtures/dependency_by_card.svg
+
 # Use the raw time-scaled view only when the span is small enough to inspect.
 python -m tools.diagnosis.visualize_timeline \
   tools/diagnosis/fixtures/merged.csv \
@@ -61,8 +69,11 @@ validation and visualization.
 
 `visualize_dependency_graph` currently infers dependencies from the merged task
 rows only. It does not require the legacy prototype's interval or flow-order CSV
-files, so it can run directly after `merge_timeline`; deeper wait-interval and
-multi-node NHR edges should be added as separate analysis layers when those
-intermediate artifacts are available.
+files, so it can run directly after `merge_timeline`. The default `--rank-field
+auto` uses `user_rank` when it is usable, and falls back to `device_id` for
+visual rows when all semantic rows report the same user rank but multiple
+profiler devices are present. Deeper wait-interval and multi-node NHR edges
+should be added as separate analysis layers when those intermediate artifacts
+are available.
 
 The tools use only the Python standard library.
