@@ -58,6 +58,7 @@ TaskSemanticEventScope::TaskSemanticEventScope(const char *event, const char *se
     TaskSemanticTraceInfo nextInfo = previousInfo_;
     nextInfo.event = event;
     nextInfo.semantic = semantic;
+    nextInfo.oneShot = true;
     SetTaskSemanticTraceInfo(nextInfo);
     active_ = true;
 }

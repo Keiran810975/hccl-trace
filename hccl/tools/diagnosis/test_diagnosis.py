@@ -44,6 +44,34 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(validate_stats["match_rate_percent"], 100.0)
 
+    def test_rank_as_device_fallback_is_explicit(self):
+        semantics = list(parse_legacy_block([
+            "[HcclTaskSemantic] stream_id[12] task_id[34] task_kind[notify_wait] "
+            "event[rx_ack_start] phase[reduce_scatter_direct] step[0] rank[0] ranksize[8] "
+            "slice[7] semantic[link_rx_ack]\n"
+        ]))
+        profilers = list(parse_task_time_rows([
+            {
+                "Device_id": "0",
+                "stream_id": "12",
+                "task_id": "34",
+                "kernel_type": "NOTIFY_WAIT",
+                "task_start(us)": "1000",
+                "task_stop(us)": "1004",
+                "task_time(us)": "4",
+            }
+        ], default_node_id="node0"))
+
+        strict_rows, strict_stats = merge_records(semantics, profilers)
+        self.assertEqual(strict_stats["matched"], 0)
+        self.assertEqual(strict_stats["semantic_missing_device_id"], 1)
+        self.assertEqual(strict_rows[0]["match_status"], "unmatched_semantic")
+
+        fallback_rows, fallback_stats = merge_records(semantics, profilers, rank_as_device_fallback=True)
+        self.assertEqual(fallback_stats["matched"], 1)
+        self.assertEqual(fallback_stats["rank_device_fallback_matches"], 1)
+        self.assertEqual(fallback_rows[0]["match_status"], "matched")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -91,8 +91,7 @@ def semantic_from_mapping(data: Dict[str, str]) -> SemanticRecord:
         task_id=parse_int(data.get("task_id")),
         task_kind=data.get("task_kind", data.get("task_type", "")),
         source=data.get("source", ""),
-        device_id=parse_int(data.get("device_id", data.get("device", data.get("rank",
-            data.get("user_rank", data.get("comm_rank")))))),
+        device_id=parse_int(data.get("device_id", data.get("device"))),
         node_id=data.get("node_id", ""),
         pid=parse_int(data.get("pid")),
     )

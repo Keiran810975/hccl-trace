@@ -21,7 +21,11 @@ else:
     from .schema import MERGED_FIELDS, ProfilerTask, SemanticRecord, write_csv
 
 
-def merge_records(semantics: Iterable[SemanticRecord], profilers: Iterable[ProfilerTask]) -> Tuple[List[Dict[str, object]], Counter]:
+def merge_records(
+    semantics: Iterable[SemanticRecord],
+    profilers: Iterable[ProfilerTask],
+    rank_as_device_fallback: bool = False,
+) -> Tuple[List[Dict[str, object]], Counter]:
     semantic_list = list(semantics)
     profiler_list = list(profilers)
     semantic_counts = Counter(record.merge_key for record in semantic_list)
@@ -39,22 +43,31 @@ def merge_records(semantics: Iterable[SemanticRecord], profilers: Iterable[Profi
     stats["profiler_total"] = len(profiler_list)
 
     for semantic in semantic_list:
+        if semantic.device_id < 0:
+            stats["semantic_missing_device_id"] += 1
+
         matches = profiler_by_key.get(semantic.merge_key, [])
-        if not matches and not semantic.node_id:
-            device_task_matches = profiler_by_device_task_key.get(
-                (semantic.device_id, semantic.stream_id, semantic.task_id), []
-            )
-            if len(device_task_matches) == 1:
-                matches = device_task_matches
+        if not matches and not semantic.node_id and semantic.device_id >= 0:
+            matches = _unique_device_task_match(profiler_by_device_task_key, semantic.device_id, semantic)
+            if matches:
+                stats["node_id_fallback_matches"] += 1
+
+        if not matches and rank_as_device_fallback and not semantic.node_id and semantic.device_id < 0:
+            matches = _rank_as_device_match(profiler_by_device_task_key, semantic)
+            if matches:
+                stats["rank_device_fallback_matches"] += 1
+
         duplicate_semantic = semantic_counts[semantic.merge_key] > 1
-        duplicate_profiler = profiler_counts[semantic.merge_key] > 1
+        matched_profiler = matches[0] if matches else None
+        profiler_key = matched_profiler.merge_key if matched_profiler else semantic.merge_key
+        duplicate_profiler = profiler_counts[profiler_key] > 1
         if not matches:
             stats["unmatched_semantic"] += 1
             rows.append(_merged_row("unmatched_semantic", semantic, None, duplicate_semantic, duplicate_profiler))
             continue
         stats["matched"] += 1
-        matched_profiler_keys.add(semantic.merge_key)
-        rows.append(_merged_row("matched", semantic, matches[0], duplicate_semantic, duplicate_profiler))
+        matched_profiler_keys.add(matched_profiler.merge_key)
+        rows.append(_merged_row("matched", semantic, matched_profiler, duplicate_semantic, duplicate_profiler))
 
     for task in profiler_list:
         if task.merge_key in matched_profiler_keys:
@@ -64,6 +77,27 @@ def merge_records(semantics: Iterable[SemanticRecord], profilers: Iterable[Profi
     stats["duplicate_semantic_keys"] = sum(1 for count in semantic_counts.values() if count > 1)
     stats["duplicate_profiler_keys"] = sum(1 for count in profiler_counts.values() if count > 1)
     return rows, stats
+
+
+def _unique_device_task_match(profiler_by_device_task_key, device_id: int, semantic: SemanticRecord) -> List[ProfilerTask]:
+    matches = profiler_by_device_task_key.get((device_id, semantic.stream_id, semantic.task_id), [])
+    return matches if len(matches) == 1 else []
+
+
+def _rank_as_device_match(profiler_by_device_task_key, semantic: SemanticRecord) -> List[ProfilerTask]:
+    candidate_device_ids = []
+    for value in (semantic.user_rank, semantic.comm_rank):
+        if value >= 0 and value not in candidate_device_ids:
+            candidate_device_ids.append(value)
+
+    unique_matches = []
+    seen_keys = set()
+    for device_id in candidate_device_ids:
+        for task in _unique_device_task_match(profiler_by_device_task_key, device_id, semantic):
+            if task.merge_key not in seen_keys:
+                unique_matches.append(task)
+                seen_keys.add(task.merge_key)
+    return unique_matches if len(unique_matches) == 1 else []
 
 
 def _merged_row(status: str, semantic: SemanticRecord, profiler: ProfilerTask, duplicate_semantic: bool, duplicate_profiler: bool):
@@ -88,9 +122,18 @@ def main() -> int:
     parser.add_argument("-o", "--output", required=True)
     parser.add_argument("--node-id", default="")
     parser.add_argument("--summary", default="")
+    parser.add_argument(
+        "--rank-as-device-fallback",
+        action="store_true",
+        help="Use semantic rank as msprof Device_id only for legacy single-node plog without device_id.",
+    )
     args = parser.parse_args()
 
-    rows, stats = merge_records(parse_plog_file(args.plog), parse_task_time_file(args.task_time, args.node_id))
+    rows, stats = merge_records(
+        parse_plog_file(args.plog),
+        parse_task_time_file(args.task_time, args.node_id),
+        rank_as_device_fallback=args.rank_as_device_fallback,
+    )
     write_csv(args.output, list(MERGED_FIELDS), rows)
     for key in sorted(stats):
         print("{}={}".format(key, stats[key]))

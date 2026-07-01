@@ -222,7 +222,7 @@ HcclResult TaskProfiling::Run(const StepData &stepData)
 
 HcclResult TaskProfiling::Run(const TaskData &taskData, bool isCapture)
 {
-    CHK_RET(ReportTaskSemanticTrace(taskData.streamID, taskData.taskID, taskData.taskType));
+    CHK_RET(ReportTaskSemanticTrace(deviceLogicId_, taskData.streamID, taskData.taskID, taskData.taskType));
     HCCLReportData hcclReportData{};
     auto &profilingManager = hccl::ProfilingManager::Instance();
     HcclResult is_subscribe = profilingManager.GetAddtionInfoState();

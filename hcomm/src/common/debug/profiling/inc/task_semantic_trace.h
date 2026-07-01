@@ -29,13 +29,14 @@ struct TaskSemanticTraceInfo {
     u32 commRank{0};
     u32 rankSize{0};
     u32 peerRank{INVALID_VALUE_RANKID};
+    bool oneShot{false};
 };
 
 bool IsTaskSemanticTraceEnabled();
 bool GetTaskSemanticTraceInfo(TaskSemanticTraceInfo &info);
 void SetTaskSemanticTraceInfo(const TaskSemanticTraceInfo &info);
 void ClearTaskSemanticTraceInfo();
-HcclResult ReportTaskSemanticTrace(u32 streamId, u32 taskId, TaskType taskType);
+HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskType taskType);
 } // namespace hccl
 
 #endif // TASK_SEMANTIC_TRACE_H

@@ -11,9 +11,10 @@ Current scope:
 - parse msprof `task_time.csv` rows;
 - skip `PROFILER_TRACE_EX` marker rows;
 - merge records by `(node_id, device_id, stream_id, task_id)`;
-- for single-node legacy plog rows without `node_id` or `device_id`, use
-  semantic `rank` as the msprof `Device_id` fallback when the profiler task
-  match is unique;
+- require semantic `device_id` by default instead of inferring it from rank;
+- for single-node legacy plog rows without `device_id`,
+  `--rank-as-device-fallback` can explicitly use semantic `rank` as the msprof
+  `Device_id` when the profiler task match is unique;
 - report duplicate, unmatched semantic, and unmatched profiler records.
 
 Example:
