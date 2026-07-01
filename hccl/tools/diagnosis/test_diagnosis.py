@@ -72,6 +72,34 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertEqual(fallback_stats["rank_device_fallback_matches"], 1)
         self.assertEqual(fallback_rows[0]["match_status"], "matched")
 
+    def test_duplicate_semantic_keys_are_deduped_by_default(self):
+        semantics = list(parse_legacy_block([
+            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[34] task_kind[sdma] "
+            "event[allreduce_start] phase[allreduce_executor] step[0] rank[0] ranksize[8] "
+            "slice[0] semantic[allreduce_executor]\n",
+            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[34] task_kind[sdma] "
+            "event[copy_start] phase[reduce_scatter_direct] step[0] rank[0] ranksize[8] "
+            "slice[6] semantic[hccl_local_copy]\n",
+        ]))
+        profilers = list(parse_task_time_rows([
+            {
+                "Device_id": "0",
+                "stream_id": "12",
+                "task_id": "34",
+                "kernel_type": "SDMA",
+                "task_start(us)": "1000",
+                "task_stop(us)": "1008",
+                "task_time(us)": "8",
+            }
+        ], default_node_id="node0"))
+
+        rows, stats = merge_records(semantics, profilers)
+        self.assertEqual(stats["duplicate_semantic_keys_input"], 1)
+        self.assertEqual(stats["deduped_semantic_rows"], 1)
+        self.assertEqual(stats["duplicate_semantic_keys"], 0)
+        self.assertEqual(stats["matched"], 1)
+        self.assertEqual(rows[0]["event"], "copy_start")
+
 
 if __name__ == "__main__":
     unittest.main()

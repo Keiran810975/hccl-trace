@@ -97,6 +97,7 @@ bash test/run_step_trace_function_test.sh \
 - `match_rate_percent >= 95`。
 - `duplicate_semantic_rows == 0` 且 `duplicate_profiler_rows == 0`。
 - `test/out/function/merged.csv` 中 `match_status` 主要为 `matched`。
+- 默认生成 `test/out/function/timeline.svg`，用于按 device/rank/stream 查看真实 task 时间线。
 
 若不通过，优先检查：
 
@@ -149,7 +150,7 @@ python3 test/measure_step_trace_overhead.py \
 - 构建日志和运行命令。
 - plog 原始文件。
 - msprof `task_time.csv`。
-- `merged.csv`、`summary.csv`、`validate.log`。
+- `merged.csv`、`summary.csv`、`validate.log`、`timeline.svg`。
 - `overhead.csv`、`summary.txt`。
 
 这样后续定位 unmatched task、duplicate key 或性能抖动时，可以直接回放离线工具。

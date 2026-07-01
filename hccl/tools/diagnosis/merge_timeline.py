@@ -21,13 +21,37 @@ else:
     from .schema import MERGED_FIELDS, ProfilerTask, SemanticRecord, write_csv
 
 
+EVENT_PRIORITY = {
+    "rx_payload_reduce_start": 90,
+    "rx_payload_copy_start": 85,
+    "tx_payload_start": 80,
+    "copy_start": 75,
+    "tx_data_signal_start": 70,
+    "rx_data_signal_start": 70,
+    "tx_ack_start": 60,
+    "rx_ack_start": 60,
+    "allreduce_start": 10,
+}
+
+
 def merge_records(
     semantics: Iterable[SemanticRecord],
     profilers: Iterable[ProfilerTask],
     rank_as_device_fallback: bool = False,
+    dedupe_semantic_keys: bool = True,
 ) -> Tuple[List[Dict[str, object]], Counter]:
-    semantic_list = list(semantics)
+    raw_semantic_list = list(semantics)
     profiler_list = list(profilers)
+    stats = Counter()
+    stats["semantic_total_input"] = len(raw_semantic_list)
+    if dedupe_semantic_keys:
+        semantic_list, dedupe_stats = _dedupe_semantics(raw_semantic_list)
+        stats.update(dedupe_stats)
+    else:
+        semantic_list = raw_semantic_list
+    stats["semantic_total"] = len(semantic_list)
+    stats["profiler_total"] = len(profiler_list)
+
     semantic_counts = Counter(record.merge_key for record in semantic_list)
     profiler_counts = Counter(record.merge_key for record in profiler_list)
     profiler_by_key = defaultdict(list)
@@ -38,9 +62,6 @@ def merge_records(
 
     rows = []
     matched_profiler_keys = set()
-    stats = Counter()
-    stats["semantic_total"] = len(semantic_list)
-    stats["profiler_total"] = len(profiler_list)
 
     for semantic in semantic_list:
         if semantic.device_id < 0:
@@ -77,6 +98,37 @@ def merge_records(
     stats["duplicate_semantic_keys"] = sum(1 for count in semantic_counts.values() if count > 1)
     stats["duplicate_profiler_keys"] = sum(1 for count in profiler_counts.values() if count > 1)
     return rows, stats
+
+
+def _dedupe_semantics(semantics: List[SemanticRecord]) -> Tuple[List[SemanticRecord], Counter]:
+    stats = Counter()
+    by_key = defaultdict(list)
+    for index, record in enumerate(semantics):
+        by_key[record.merge_key].append((index, record))
+
+    deduped: List[SemanticRecord] = []
+    for _key, items in by_key.items():
+        if len(items) > 1:
+            stats["duplicate_semantic_keys_input"] += 1
+            stats["duplicate_semantic_rows_input"] += len(items)
+            stats["deduped_semantic_rows"] += len(items) - 1
+        _index, best = max(items, key=lambda item: (_semantic_specificity(item[1]), -item[0]))
+        deduped.append(best)
+    deduped.sort(key=lambda record: (record.node_id, record.device_id, record.stream_id, record.task_id))
+    return deduped, stats
+
+
+def _semantic_specificity(record: SemanticRecord) -> int:
+    score = EVENT_PRIORITY.get(record.event, 40 if record.event else 0)
+    if record.phase and record.phase != "allreduce_executor":
+        score += 100
+    if record.semantic and record.semantic != "allreduce_executor":
+        score += 30
+    if record.slice >= 0:
+        score += 5
+    if record.peer_rank >= 0:
+        score += 5
+    return score
 
 
 def _unique_device_task_match(profiler_by_device_task_key, device_id: int, semantic: SemanticRecord) -> List[ProfilerTask]:
@@ -127,12 +179,18 @@ def main() -> int:
         action="store_true",
         help="Use semantic rank as msprof Device_id only for legacy single-node plog without device_id.",
     )
+    parser.add_argument(
+        "--keep-duplicate-semantic-keys",
+        action="store_true",
+        help="Keep raw duplicate semantic merge keys instead of selecting one best semantic row per task.",
+    )
     args = parser.parse_args()
 
     rows, stats = merge_records(
         parse_plog_file(args.plog),
         parse_task_time_file(args.task_time, args.node_id),
         rank_as_device_fallback=args.rank_as_device_fallback,
+        dedupe_semantic_keys=not args.keep_duplicate_semantic_keys,
     )
     write_csv(args.output, list(MERGED_FIELDS), rows)
     for key in sorted(stats):

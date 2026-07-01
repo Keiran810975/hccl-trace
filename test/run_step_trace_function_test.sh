@@ -7,6 +7,7 @@ PLOG=""
 TASK_TIME=""
 NODE_ID="node0"
 MIN_MATCH_RATE="95"
+VISUALIZE="1"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 usage() {
@@ -21,6 +22,7 @@ Options:
   --node-id ID               Node id used for task_time rows. Default: node0
   --min-match-rate PERCENT   validate_trace threshold. Default: 95
   --python BIN               Python executable. Default: $PYTHON_BIN or python3
+  --no-visualize             Do not render timeline.svg after merge
   -h, --help                 Show this help.
 
 If command is provided after --, it is run once with HCCL_STEP_TRACE=1 before
@@ -54,6 +56,10 @@ while [[ $# -gt 0 ]]; do
         --python)
             PYTHON_BIN="$2"
             shift 2
+            ;;
+        --no-visualize)
+            VISUALIZE="0"
+            shift
             ;;
         -h|--help)
             usage
@@ -101,6 +107,7 @@ MERGED_CSV="${OUT_DIR}/merged.csv"
 SUMMARY_CSV="${OUT_DIR}/summary.csv"
 MERGE_LOG="${OUT_DIR}/merge.log"
 VALIDATE_LOG="${OUT_DIR}/validate.log"
+TIMELINE_SVG="${OUT_DIR}/timeline.svg"
 
 echo "[step-trace] Merging semantic plog and task_time.csv"
 PYTHONPATH="${ROOT_DIR}/hccl" "${PYTHON_BIN}" -m tools.diagnosis.merge_timeline \
@@ -110,6 +117,13 @@ PYTHONPATH="${ROOT_DIR}/hccl" "${PYTHON_BIN}" -m tools.diagnosis.merge_timeline 
     --output "${MERGED_CSV}" \
     --summary "${SUMMARY_CSV}" \
     2>&1 | tee "${MERGE_LOG}"
+
+if [[ "${VISUALIZE}" == "1" ]]; then
+    echo "[step-trace] Rendering timeline SVG"
+    PYTHONPATH="${ROOT_DIR}/hccl" "${PYTHON_BIN}" -m tools.diagnosis.visualize_timeline \
+        "${MERGED_CSV}" \
+        --output "${TIMELINE_SVG}"
+fi
 
 echo "[step-trace] Validating merged trace"
 PYTHONPATH="${ROOT_DIR}/hccl" "${PYTHON_BIN}" -m tools.diagnosis.validate_trace \
@@ -121,4 +135,6 @@ echo "[step-trace] PASS"
 echo "  merged:   ${MERGED_CSV}"
 echo "  summary:  ${SUMMARY_CSV}"
 echo "  validate: ${VALIDATE_LOG}"
-
+if [[ "${VISUALIZE}" == "1" ]]; then
+    echo "  timeline: ${TIMELINE_SVG}"
+fi
