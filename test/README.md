@@ -97,7 +97,7 @@ bash test/run_step_trace_function_test.sh \
 - `match_rate_percent >= 95`。
 - `duplicate_semantic_rows == 0` 且 `duplicate_profiler_rows == 0`。
 - `test/out/function/merged.csv` 中 `match_status` 主要为 `matched`。
-- 默认生成 `test/out/function/timeline.svg`，用于按 device/rank/stream 查看真实 task 时间线。
+- 默认生成 `test/out/function/timeline.svg`，使用 phase/step/event 逻辑列展示任务，避免真实时间轴下密集 task 挤在一起；如需原始时间轴可手动运行 `visualize_timeline --layout time`。
 
 若不通过，优先检查：
 

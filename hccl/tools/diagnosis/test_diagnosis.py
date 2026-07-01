@@ -14,11 +14,13 @@ if __package__ in (None, ""):
     from diagnosis.parse_msprof import parse_task_time_rows
     from diagnosis.parse_plog import parse_legacy_block
     from diagnosis.validate_trace import validate_rows
+    from diagnosis.visualize_dependency_graph import build_edges, build_nodes, infer_rank_size
 else:
     from .merge_timeline import merge_records
     from .parse_msprof import parse_task_time_rows
     from .parse_plog import parse_legacy_block
     from .validate_trace import validate_rows
+    from .visualize_dependency_graph import build_edges, build_nodes, infer_rank_size
 
 
 class DiagnosisToolTest(unittest.TestCase):
@@ -99,6 +101,73 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertEqual(stats["duplicate_semantic_keys"], 0)
         self.assertEqual(stats["matched"], 1)
         self.assertEqual(rows[0]["event"], "copy_start")
+
+
+    def test_dependency_edges_are_inferred_from_merged_rows(self):
+        rows = []
+
+        def row(rank, phase, step, event, start):
+            phase_group = "reduce_scatter" if phase.startswith("reduce_scatter") else "allgather"
+            phase_order = 0 if phase_group == "reduce_scatter" else 1
+            event_order = {
+                "rx_ack_start": 0,
+                "rx_data_signal_start": 2,
+                "rx_payload_reduce_start": 4,
+                "rx_payload_copy_start": 5,
+            }[event]
+            return {
+                "node_id": "node0",
+                "device_id": str(rank),
+                "user_rank": str(rank),
+                "rank_size": "2",
+                "stream_id": "10",
+                "task_id": str(100 + rank * 10 + step * 3 + event_order),
+                "phase": phase,
+                "event": event,
+                "semantic": event,
+                "step": str(step),
+                "slice": "0",
+                "_source_row": len(rows),
+                "_phase_group": phase_group,
+                "_phase_order": phase_order,
+                "_event_order": event_order,
+                "_node_id": "node0",
+                "_device_id": rank,
+                "_rank": rank,
+                "_rank_size": 2,
+                "_stream_id": 10,
+                "_task_id": 100 + rank * 10 + step * 3 + event_order,
+                "_step": step,
+                "_slice": 0,
+                "_start": float(start),
+                "_stop": float(start + 1),
+                "_duration": 1.0,
+            }
+
+        rows.append(row(0, "reduce_scatter_direct", 0, "rx_ack_start", 0))
+        rows.append(row(0, "reduce_scatter_direct", 0, "rx_data_signal_start", 1))
+        rows.append(row(0, "reduce_scatter_direct", 0, "rx_payload_reduce_start", 2))
+        rows.append(row(0, "reduce_scatter_direct", 1, "rx_payload_reduce_start", 3))
+        rows.append(row(1, "reduce_scatter_direct", 1, "rx_ack_start", 4))
+        rows.append(row(1, "reduce_scatter_direct", 1, "rx_data_signal_start", 5))
+        rows.append(row(1, "reduce_scatter_direct", 1, "rx_payload_reduce_start", 6))
+        rows.append(row(0, "allgather_direct", 0, "rx_payload_copy_start", 7))
+
+        build_nodes(rows)
+        edges = build_edges(
+            rows,
+            ("same_rank_sequence", "right_neighbor_ack_dep", "upstream_data_signal_dep", "same_rank_step", "upstream_prev_step", "phase_bridge", "signal_payload"),
+            infer_rank_size(rows),
+            "previous",
+        )
+        edge_kinds = {edge["kind"] for edge in edges}
+        self.assertIn("same_rank_sequence", edge_kinds)
+        self.assertIn("right_neighbor_ack_dep", edge_kinds)
+        self.assertIn("upstream_data_signal_dep", edge_kinds)
+        self.assertIn("same_rank_step", edge_kinds)
+        self.assertIn("upstream_prev_step", edge_kinds)
+        self.assertIn("phase_bridge", edge_kinds)
+        self.assertIn("signal_payload", edge_kinds)
 
 
 if __name__ == "__main__":

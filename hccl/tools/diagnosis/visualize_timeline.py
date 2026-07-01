@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Render merged HCCL step trace rows as an SVG timeline.
 
-The input is the current tools.diagnosis.merge_timeline output. The renderer
-uses real msprof task_start/task_stop timing and splits lanes by node/device,
-rank, and stream so overlap and gaps are visible without external libraries.
+The default layout is logical instead of strictly time-scaled: columns are
+phase/step/event buckets and dense slice-level tasks are stacked inside each
+rank/stream lane. This keeps the graph readable when real task durations are
+much shorter than the full operation span. Use ``--layout time`` to render the
+raw msprof task_start/task_stop axis.
 """
 
 from __future__ import annotations
@@ -43,6 +45,18 @@ PHASE_ORDER = {
     "reduce_scatter": 1,
     "allgather_direct": 2,
     "allgather": 2,
+}
+
+EVENT_ORDER = {
+    "allreduce_start": 0,
+    "copy_start": 1,
+    "tx_ack_start": 2,
+    "rx_ack_start": 3,
+    "tx_data_signal_start": 4,
+    "rx_data_signal_start": 5,
+    "tx_payload_start": 6,
+    "rx_payload_reduce_start": 7,
+    "rx_payload_copy_start": 8,
 }
 
 
@@ -105,12 +119,14 @@ def read_rows(path: Path, include_unmatched: bool = False) -> List[dict]:
     return rows
 
 
-def timeline_sort_key(row: dict) -> Tuple[int, int, int, int, float, int]:
+def timeline_sort_key(row: dict) -> Tuple[int, int, int, int, int, int, float, int]:
     return (
         row["_device_id"],
         row["_rank"],
         row["_stream_id"],
         PHASE_ORDER.get(row["_phase"], 99),
+        row["_step"],
+        EVENT_ORDER.get(row["_event"], 99),
         row["_start"],
         row["_task_id"],
     )
@@ -120,6 +136,7 @@ def short_label(row: dict) -> str:
     event = row.get("_event", "")
     semantic = row.get("_semantic", "")
     labels = {
+        "allreduce_start": "op",
         "copy_start": "copy",
         "tx_ack_start": "tx_ack",
         "rx_ack_start": "rx_ack",
@@ -132,8 +149,27 @@ def short_label(row: dict) -> str:
     return labels.get(event, event or semantic or row.get("profiler_task_kind", "") or row.get("kernel_type", ""))
 
 
+def phase_label(phase: str) -> str:
+    labels = {
+        "allreduce_executor": "executor",
+        "reduce_scatter_direct": "reduce_scatter",
+        "allgather_direct": "allgather",
+    }
+    return labels.get(phase, phase or "unknown")
+
+
 def lane_key(row: dict) -> Tuple[str, int, int, int]:
     return (row["_node_id"], row["_device_id"], row["_rank"], row["_stream_id"])
+
+
+def logical_column_key(row: dict) -> Tuple[int, str, int, int, str]:
+    return (
+        PHASE_ORDER.get(row["_phase"], 99),
+        row["_phase"],
+        row["_step"],
+        EVENT_ORDER.get(row["_event"], 99),
+        row["_event"],
+    )
 
 
 def build_gap_rows(rows: List[dict]) -> List[dict]:
@@ -188,8 +224,123 @@ def export_nodes(path: Path, rows: Iterable[dict]) -> None:
     write_csv(str(path), list(out[0].keys()) if out else ["node_index"], out)
 
 
-def render_svg(rows: List[dict], gaps: List[dict], output: Path, max_width: int, min_px_per_us: float,
-               show_gap_threshold: float) -> None:
+def task_title(row: dict) -> str:
+    return (
+        f'device={row["_device_id"]} rank={row["_rank"]} stream={row["_stream_id"]} task={row["_task_id"]}\n'
+        f'phase={row["_phase"]} event={row["_event"]} semantic={row["_semantic"]}\n'
+        f'step={row["_step"]} slice={row["_slice"]}\n'
+        f'{row["_start"]:.3f}..{row["_stop"]:.3f} us duration={row["_duration"]:.3f} us'
+    )
+
+
+def render_logical_svg(rows: List[dict], output: Path, col_width: int, node_width: int) -> None:
+    if not rows:
+        raise ValueError("no matched timed rows to render")
+
+    left = 250
+    right = 80
+    top = 126
+    bottom = 76
+    node_h = 22
+    slot_gap = 5
+    lane_gap = 12
+    group_gap = 24
+    header_h = 72
+
+    columns = sorted({logical_column_key(row) for row in rows})
+    col_index = {key: index for index, key in enumerate(columns)}
+    lanes = sorted({lane_key(row) for row in rows})
+
+    per_lane_column_counts: Dict[Tuple[str, int, int, int], Dict[Tuple[int, str, int, int, str], int]] = defaultdict(lambda: defaultdict(int))
+    for row in rows:
+        per_lane_column_counts[lane_key(row)][logical_column_key(row)] += 1
+
+    lane_heights: Dict[Tuple[str, int, int, int], int] = {}
+    for lane in lanes:
+        max_stack = max(per_lane_column_counts[lane].values()) if per_lane_column_counts[lane] else 1
+        lane_heights[lane] = max(34, 8 + max_stack * (node_h + slot_gap))
+
+    lane_y = {}
+    y = top + header_h
+    last_group = None
+    for lane in lanes:
+        group = lane[:3]
+        if last_group is not None and group != last_group:
+            y += group_gap
+        lane_y[lane] = y
+        y += lane_heights[lane] + lane_gap
+        last_group = group
+
+    width = left + max(1, len(columns)) * col_width + right
+    height = y + bottom
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect x="0" y="0" width="100%" height="100%" fill="#fff"/>',
+        f'<text x="{left}" y="30" font-family="Arial" font-size="22" font-weight="700">HCCL step trace logical timeline</text>',
+        f'<text x="{left}" y="54" font-family="Arial" font-size="12" fill="#555">Rows: {len(rows)}. Columns are phase / step / event; dense slices stack vertically inside each lane. Hover nodes for real timing.</text>',
+    ]
+
+    # Column headers and vertical bands.
+    previous_phase = None
+    for key, index in col_index.items():
+        _phase_order, phase, step, _event_order, event = key
+        x = left + index * col_width
+        fill = "#fbfbfb" if index % 2 == 0 else "#ffffff"
+        parts.append(f'<rect x="{x}" y="76" width="{col_width}" height="{height - bottom - 66}" fill="{fill}"/>')
+        parts.append(f'<line x1="{x}" y1="76" x2="{x}" y2="{height - bottom + 8}" stroke="#e5e5e5"/>')
+        if phase != previous_phase:
+            parts.append(f'<text x="{x + 8}" y="94" font-family="Arial" font-size="12" font-weight="700" fill="#333">{html.escape(phase_label(phase))}</text>')
+            previous_phase = phase
+        parts.append(f'<text x="{x + col_width / 2:.1f}" y="113" text-anchor="middle" font-family="Arial" font-size="10" fill="#555">step {step}</text>')
+        parts.append(f'<text x="{x + col_width / 2:.1f}" y="128" text-anchor="middle" font-family="Arial" font-size="9" fill="#777">{html.escape(short_label({"_event": event}))}</text>')
+    parts.append(f'<line x1="{left + len(columns) * col_width}" y1="76" x2="{left + len(columns) * col_width}" y2="{height - bottom + 8}" stroke="#e5e5e5"/>')
+
+    # Lane labels.
+    for lane in lanes:
+        node_id, device_id, rank, stream_id = lane
+        yy = lane_y[lane]
+        lane_h = lane_heights[lane]
+        label = f'{node_id or "node"} dev {device_id} rank {rank} stream {stream_id}'
+        parts.append(f'<text x="20" y="{yy + 20}" font-family="Arial" font-size="11" fill="#333">{html.escape(label)}</text>')
+        parts.append(f'<line x1="{left - 10}" y1="{yy + lane_h / 2:.1f}" x2="{width - right}" y2="{yy + lane_h / 2:.1f}" stroke="#f0f0f0"/>')
+
+    # Assign stack slots per lane/column.
+    slot_cursor: Dict[Tuple[Tuple[str, int, int, int], Tuple[int, str, int, int, str]], int] = defaultdict(int)
+    for row in sorted(rows, key=lambda item: (lane_key(item), logical_column_key(item), item["_slice"], item["_start"])):
+        lane = lane_key(row)
+        col_key = logical_column_key(row)
+        slot_key = (lane, col_key)
+        slot = slot_cursor[slot_key]
+        slot_cursor[slot_key] += 1
+        x = left + col_index[col_key] * col_width + (col_width - node_width) / 2
+        y = lane_y[lane] + 4 + slot * (node_h + slot_gap)
+        fill, stroke = EVENT_COLOR.get(row["_event"], ("#eeeeee", "#777777"))
+        label = short_label(row)
+        title = task_title(row)
+        parts.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{node_width}" height="{node_h}" rx="3" ry="3" fill="{fill}" stroke="{stroke}" stroke-width="1"><title>{html.escape(title)}</title></rect>')
+        if node_width >= 72:
+            parts.append(f'<text x="{x + node_width / 2:.1f}" y="{y + 14:.1f}" text-anchor="middle" font-family="Arial" font-size="8.5">{html.escape(label)}</text>')
+
+    # Legend.
+    legend_x = left
+    legend_y = height - 22
+    x = legend_x
+    for event, (fill, stroke) in EVENT_COLOR.items():
+        label = short_label({"_event": event, "_semantic": ""})
+        parts.append(f'<rect x="{x}" y="{legend_y - 10}" width="12" height="8" fill="{fill}" stroke="{stroke}"/>')
+        parts.append(f'<text x="{x + 16}" y="{legend_y - 3}" font-family="Arial" font-size="9">{html.escape(label)}</text>')
+        x += 90
+        if x > width - 170:
+            x = legend_x
+            legend_y += 14
+
+    parts.append('</svg>')
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text('\n'.join(parts), encoding='utf-8')
+
+
+def render_time_svg(rows: List[dict], gaps: List[dict], output: Path, max_width: int, min_px_per_us: float,
+                    show_gap_threshold: float) -> None:
     if not rows:
         raise ValueError("no matched timed rows to render")
 
@@ -203,7 +354,7 @@ def render_svg(rows: List[dict], gaps: List[dict], output: Path, max_width: int,
     lane_h = 28
     lane_gap = 7
     group_gap = 24
-    min_node_w = 4
+    min_node_w = 8
     px_per_us = min((max_width - left - right) / span, max(min_px_per_us, 0.001))
     width = int(left + span * px_per_us + right)
 
@@ -226,9 +377,8 @@ def render_svg(rows: List[dict], gaps: List[dict], output: Path, max_width: int,
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
         '<rect x="0" y="0" width="100%" height="100%" fill="#fff"/>',
-        f'<text x="{left}" y="30" font-family="Arial" font-size="22" font-weight="700">HCCL step trace timeline</text>',
-        f'<text x="{left}" y="54" font-family="Arial" font-size="12" fill="#555">Rows: {len(rows)}. '
-        f'Real x-axis uses msprof task_start/task_stop, origin {min_t:.3f} us.</text>',
+        f'<text x="{left}" y="30" font-family="Arial" font-size="22" font-weight="700">HCCL step trace time-scaled timeline</text>',
+        f'<text x="{left}" y="54" font-family="Arial" font-size="12" fill="#555">Rows: {len(rows)}. Real x-axis uses msprof task_start/task_stop, origin {min_t:.3f} us.</text>',
     ]
 
     axis_y = height - 48
@@ -267,27 +417,9 @@ def render_svg(rows: List[dict], gaps: List[dict], output: Path, max_width: int,
         yy = lane_y[lane_key(row)] + 3
         h = lane_h - 7
         fill, stroke = EVENT_COLOR.get(row["_event"], ("#eeeeee", "#777777"))
-        title = (
-            f'device={row["_device_id"]} rank={row["_rank"]} stream={row["_stream_id"]} task={row["_task_id"]}\n'
-            f'phase={row["_phase"]} event={row["_event"]} semantic={row["_semantic"]}\n'
-            f'step={row["_step"]} slice={row["_slice"]}\n'
-            f'{row["_start"]:.3f}..{row["_stop"]:.3f} us duration={row["_duration"]:.3f} us'
-        )
-        parts.append(f'<rect x="{x:.1f}" y="{yy:.1f}" width="{w:.1f}" height="{h:.1f}" rx="2" ry="2" fill="{fill}" stroke="{stroke}"><title>{html.escape(title)}</title></rect>')
+        parts.append(f'<rect x="{x:.1f}" y="{yy:.1f}" width="{w:.1f}" height="{h:.1f}" rx="2" ry="2" fill="{fill}" stroke="{stroke}"><title>{html.escape(task_title(row))}</title></rect>')
         if w > 42:
             parts.append(f'<text x="{x + w / 2:.1f}" y="{yy + 14:.1f}" text-anchor="middle" font-family="Arial" font-size="8.5">{html.escape(short_label(row))}</text>')
-
-    legend_x = left
-    legend_y = height - 18
-    x = legend_x
-    for event, (fill, stroke) in EVENT_COLOR.items():
-        label = short_label({"_event": event, "_semantic": ""})
-        parts.append(f'<rect x="{x}" y="{legend_y - 10}" width="12" height="8" fill="{fill}" stroke="{stroke}"/>')
-        parts.append(f'<text x="{x + 16}" y="{legend_y - 3}" font-family="Arial" font-size="9">{html.escape(label)}</text>')
-        x += 90
-        if x > width - 170:
-            x = legend_x
-            legend_y += 14
 
     parts.append('</svg>')
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -299,6 +431,9 @@ def main() -> int:
     parser.add_argument("merged_csv", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--include-unmatched", action="store_true")
+    parser.add_argument("--layout", choices=("logical", "time"), default="logical")
+    parser.add_argument("--col-width", type=int, default=146)
+    parser.add_argument("--node-width", type=int, default=112)
     parser.add_argument("--max-width", type=int, default=28000)
     parser.add_argument("--min-px-per-us", type=float, default=0.025)
     parser.add_argument("--show-gap-threshold", type=float, default=20.0)
@@ -307,13 +442,17 @@ def main() -> int:
     output = args.output or args.merged_csv.with_name(args.merged_csv.stem + "_timeline.svg")
     rows = read_rows(args.merged_csv, include_unmatched=args.include_unmatched)
     gaps = build_gap_rows(rows)
-    render_svg(rows, gaps, output, args.max_width, args.min_px_per_us, args.show_gap_threshold)
+    if args.layout == "logical":
+        render_logical_svg(rows, output, args.col_width, args.node_width)
+    else:
+        render_time_svg(rows, gaps, output, args.max_width, args.min_px_per_us, args.show_gap_threshold)
     nodes_path = output.with_name(output.stem + "_nodes.csv")
     gaps_path = output.with_name(output.stem + "_gaps.csv")
     export_nodes(nodes_path, rows)
     write_csv(str(gaps_path), list(gaps[0].keys()) if gaps else ["gap"], gaps)
     print(f"rows={len(rows)}")
     print(f"gaps={len(gaps)}")
+    print(f"layout={args.layout}")
     print(f"svg={output}")
     print(f"nodes={nodes_path}")
     print(f"gaps_csv={gaps_path}")
