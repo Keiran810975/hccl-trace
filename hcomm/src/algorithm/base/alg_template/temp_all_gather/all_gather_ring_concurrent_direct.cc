@@ -180,6 +180,7 @@ HcclResult AllGatherRingConcurrentDirect::RunInitStep(const u32 rank, const u32 
     DeviceMem dstInit;
     u32 initSliceIdx = rank;
     u32 sliceSize = slices_.size() / rankSize;
+    bool traceInitCopy = true;
     for (u32 sliceIdx = 0; sliceIdx < sliceSize; sliceIdx++) {
         Slice initSlice = slices_[initSliceIdx * sliceSize + sliceIdx];
         // 需要+userMemIn_的offset
@@ -196,10 +197,15 @@ HcclResult AllGatherRingConcurrentDirect::RunInitStep(const u32 rank, const u32 
             userRank_, firstStepOffset, initSlice.size, initSlice.offset, initSlice.size);
         // 若src与dst一样，则不需要搬运
         if (srcInit != dstInit) {
-            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo("allgather_direct", 0, userRank_,
-                rankSize, initSliceIdx, "copy_start", "hccl_local_copy", INVALID_VALUE_RANKID,
-                "single_ring_direct", rank));
-            CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dstInit, srcInit, stream_));
+            if (traceInitCopy) {
+                TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo("allgather_direct", 0, userRank_,
+                    rankSize, initSliceIdx, "copy_start", "hccl_local_copy", INVALID_VALUE_RANKID,
+                    "single_ring_direct", rank));
+                CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dstInit, srcInit, stream_));
+                traceInitCopy = false;
+            } else {
+                CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dstInit, srcInit, stream_));
+            }
         }
     }
     return HCCL_SUCCESS;
@@ -244,6 +250,7 @@ HcclResult AllGatherRingConcurrentDirect::RunAllGather(const u32 rank, const u32
             CHK_RET(LocalNotify::Post(subStreams_[0], dispatcher_, mainSignals_[0], profilerInput_.stage));
             CHK_RET(LocalNotify::Wait(subStreams_[0], dispatcher_, subSignals_[0], profilerInput_.stage));
         }
+        bool traceSubCopy = true;
         for (u32 sliceIdx = 0; sliceIdx < sliceSize; sliceIdx++) {
             if (isSdma_) {
                 CHK_RET(LocalNotify::Post(subStreams_[0], dispatcher_, mainSignals_[0], profilerInput_.stage));
@@ -256,10 +263,15 @@ HcclResult AllGatherRingConcurrentDirect::RunAllGather(const u32 rank, const u32
                 "dst rank starts to rcv offset[%llu] size[%llu] at userMemOutput_",
                 step, userRank_, subSliceVector[sliceIdx].offset, subSliceVector[sliceIdx].size,
                 txSliceVector[sliceIdx].offset, txSliceVector[sliceIdx].size);
-            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo("allgather_direct", step, userRank_,
-                rankSize, txSliceIdx, "copy_start", "hccl_local_copy", INVALID_VALUE_RANKID,
-                "single_ring_direct", rank));
-            CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dst, src, subStreams_[0]));
+            if (traceSubCopy) {
+                TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo("allgather_direct", step, userRank_,
+                    rankSize, txSliceIdx, "copy_start", "hccl_local_copy", INVALID_VALUE_RANKID,
+                    "single_ring_direct", rank));
+                CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dst, src, subStreams_[0]));
+                traceSubCopy = false;
+            } else {
+                CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dst, src, subStreams_[0]));
+            }
         }
 
         // 主流
@@ -358,11 +370,17 @@ HcclResult AllGatherRingConcurrentDirect::RunAllGather(const u32 rank, const u32
     CHK_RET(SubRecordMain()); // 从流通知主流通信完成
     CHK_RET(MainWaitSub());   // 主流等待从流通知
     if (!isSdma_) {
+        bool traceFinalCopy = true;
         for (u32 vecIdx = 0; vecIdx < finalSrc.size(); vecIdx++) {
-            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo("allgather_direct", rankSize - 1,
-                userRank_, rankSize, rank, "copy_start", "hccl_local_copy", INVALID_VALUE_RANKID,
-                "single_ring_direct", rank));
-            CHK_RET(HcclD2DMemcpyAsync(dispatcher_, finalDst[vecIdx], finalSrc[vecIdx], stream_));
+            if (traceFinalCopy) {
+                TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo("allgather_direct", rankSize - 1,
+                    userRank_, rankSize, rank, "copy_start", "hccl_local_copy", INVALID_VALUE_RANKID,
+                    "single_ring_direct", rank));
+                CHK_RET(HcclD2DMemcpyAsync(dispatcher_, finalDst[vecIdx], finalSrc[vecIdx], stream_));
+                traceFinalCopy = false;
+            } else {
+                CHK_RET(HcclD2DMemcpyAsync(dispatcher_, finalDst[vecIdx], finalSrc[vecIdx], stream_));
+            }
         }
     }
     HCCL_INFO("AllGatherRingConcurrentDirect finished to RunAllGather");

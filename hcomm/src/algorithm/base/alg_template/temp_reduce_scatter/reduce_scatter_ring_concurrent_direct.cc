@@ -206,6 +206,8 @@ HcclResult ReduceScatterRingConcurrentDirect::RunInitStep(const u32 rank, const 
     initSlice1Idx     = (rank + rankSize - DMA_REDUCE_TWO_OFFSET) % rankSize;
     u32 sliceSize = slices_.size() / rankSize;
 
+    bool traceInitMainCopy = true;
+    bool traceInitSubCopy = true;
     for (u32 sliceIdx = 0; sliceIdx < sliceSize; sliceIdx++) {
         // 第-1步，片内将部分数据从userIn搬到cclIn
         const Slice &srcInitSlice0 = userSlices_[initSlice0Idx * sliceSize + sliceIdx];
@@ -234,19 +236,25 @@ HcclResult ReduceScatterRingConcurrentDirect::RunInitStep(const u32 rank, const 
                 "userMemInput to offset[%llu], size[%llu] on CCL",
                 userRank_, srcInitSlice1.offset, srcInitSlice1.size, dstInitSlice1.offset, dstInitSlice1.size);
         }
-        {
+        if (traceInitMainCopy) {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo("reduce_scatter_direct", 0, userRank_,
                 rankSize, initSlice1Idx, "copy_start", "hccl_local_copy", INVALID_VALUE_RANKID,
                 "single_ring_direct", rank));
+            CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dstInit, srcInit, stream_));
+            traceInitMainCopy = false;
+        } else {
             CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dstInit, srcInit, stream_));
         }
         HCCL_DEBUG("Memcpy operation: step[-1] stream[sub] src rank[%u] starts to copy(rcv) offset[%llu], "
             " size[%llu] on userMemInput to offset[%llu], size[%llu] on CCL",
             userRank_, srcInitSlice0.offset, srcInitSlice0.size, dstInitSlice0.offset, dstInitSlice0.size);
-        {
+        if (traceInitSubCopy) {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo("reduce_scatter_direct", 0, userRank_,
                 rankSize, initSlice0Idx, "copy_start", "hccl_local_copy", INVALID_VALUE_RANKID,
                 "single_ring_direct", rank));
+            CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dstSubInit, srcSubInit, subStreams_[0]));
+            traceInitSubCopy = false;
+        } else {
             CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dstSubInit, srcSubInit, subStreams_[0]));
         }
         CHK_RET(SubRecordMain()); // 从流通知主流通信完成
@@ -477,6 +485,7 @@ HcclResult ReduceScatterRingConcurrentDirect::RunSubStream(const u32 step, std::
         CHK_RET(LocalNotify::Post(subStreams_[0], dispatcher_, mainSignals_[0], profilerInput_.stage));
         CHK_RET(LocalNotify::Wait(subStreams_[0], dispatcher_, subSignals_[0], profilerInput_.stage));
     }
+    bool traceSubCopy = true;
     for (u32 sliceIdx = 0; sliceIdx < subSliceVector.size(); sliceIdx++) {
         if (isSdma_) {
             CHK_RET(LocalNotify::Post(subStreams_[0], dispatcher_, mainSignals_[0], profilerInput_.stage));
@@ -495,19 +504,29 @@ HcclResult ReduceScatterRingConcurrentDirect::RunSubStream(const u32 step, std::
                 "to userMemOut_", step, userRank_, lastStepOffset_, subSliceVector[sliceIdx].size);
             dst = DeviceMem::create(static_cast<u8 *>(opInfo_->outputAddr) + lastStepOffset_,
                 subSliceVector[sliceIdx].size);
-            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo("reduce_scatter_direct", step, userRank_,
-                rankSize, copySlice, "copy_start", "hccl_local_copy", INVALID_VALUE_RANKID, "single_ring_direct",
-                rank));
-            CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dst, src, subStreams_[0]));
+            if (traceSubCopy) {
+                TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo("reduce_scatter_direct", step, userRank_,
+                    rankSize, copySlice, "copy_start", "hccl_local_copy", INVALID_VALUE_RANKID, "single_ring_direct",
+                    rank));
+                CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dst, src, subStreams_[0]));
+                traceSubCopy = false;
+            } else {
+                CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dst, src, subStreams_[0]));
+            }
         } else {
             HCCL_DEBUG("Memcpy operation: step[%u] stream[sub], dst rank[%u] starts to rcv offset[%llu], size[%llu] "
                 "to inputMem_",
                 step, userRank_, cclSliceVector[sliceIdx].offset, cclSliceVector[sliceIdx].size);
             dst = inputMem_.range(cclSliceVector[sliceIdx].offset, cclSliceVector[sliceIdx].size);
-            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo("reduce_scatter_direct", step, userRank_,
-                rankSize, copySlice, "copy_start", "hccl_local_copy", INVALID_VALUE_RANKID, "single_ring_direct",
-                rank));
-            CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dst, src, subStreams_[0]));
+            if (traceSubCopy) {
+                TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo("reduce_scatter_direct", step, userRank_,
+                    rankSize, copySlice, "copy_start", "hccl_local_copy", INVALID_VALUE_RANKID, "single_ring_direct",
+                    rank));
+                CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dst, src, subStreams_[0]));
+                traceSubCopy = false;
+            } else {
+                CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dst, src, subStreams_[0]));
+            }
         }
     }
     return HCCL_SUCCESS;
