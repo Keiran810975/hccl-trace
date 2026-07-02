@@ -22,6 +22,17 @@ else:
     from .schema import MERGED_FIELDS, ProfilerTask, SemanticRecord, write_csv
 
 
+IGNORED_UNMATCHED_PROFILER_KERNEL_TYPES = {"AI_CORE"}
+TASK_KIND_KERNEL_TYPES = {
+    "sdma": {"MEMCPY_ASYNC"},
+    "rdma": {"RDMASEND"},
+    "reduce_inline": {"REDUCE_INLINE"},
+    "reduce_tbe": {"REDUCE_TBE"},
+    "notify_record": {"NOTIFY_RECORD"},
+    "notify_wait": {"NOTIFY_WAIT"},
+}
+
+
 EVENT_PRIORITY = {
     "rx_payload_reduce_start": 90,
     "rx_payload_copy_start": 85,
@@ -79,6 +90,7 @@ def merge_records(
             stats["semantic_missing_device_id"] += 1
 
         matches = []
+        type_mismatch_profiler = None
         uses_semantic_seq = semantic.semantic_seq >= 0 and semantic.device_id >= 0
         if uses_semantic_seq:
             sequence_key = (semantic.node_id, semantic.device_id, semantic.stream_id, semantic.semantic_seq)
@@ -89,19 +101,26 @@ def merge_records(
                 if len(fallback_matches) == 1:
                     matched_by_sequence = fallback_matches[0]
                     stats["semantic_seq_node_id_fallback_matches"] += 1
-            if matched_by_sequence:
+            if matched_by_sequence and _is_compatible_task_kind(semantic, matched_by_sequence):
                 matches = [matched_by_sequence]
                 stats["semantic_seq_matches"] += 1
+            elif matched_by_sequence:
+                type_mismatch_profiler = matched_by_sequence
+                stats["semantic_seq_type_mismatch"] += 1
+                matches = _compatible_task_id_match(profiler_by_key, profiler_by_device_task_key, semantic)
+                if matches:
+                    stats["task_id_type_fallback_matches"] += 1
+                else:
+                    stats["semantic_seq_unmatched"] += 1
             else:
                 stats["semantic_seq_unmatched"] += 1
 
         if not matches and not uses_semantic_seq:
-            matches = profiler_by_key.get(semantic.merge_key, [])
+            matches = _compatible_profiler_matches(semantic, profiler_by_key.get(semantic.merge_key, []))
         if not matches and not uses_semantic_seq and not semantic.node_id and semantic.device_id >= 0:
             matches = _unique_device_task_match(profiler_by_device_task_key, semantic.device_id, semantic)
             if matches:
                 stats["node_id_fallback_matches"] += 1
-
         if not matches and not uses_semantic_seq and rank_as_device_fallback and not semantic.node_id and semantic.device_id < 0:
             matches = _rank_as_device_match(profiler_by_device_task_key, semantic)
             if matches:
@@ -112,8 +131,13 @@ def merge_records(
         profiler_key = matched_profiler.merge_key if matched_profiler else semantic.merge_key
         duplicate_profiler = profiler_counts[profiler_key] > 1
         if not matches:
-            stats["unmatched_semantic"] += 1
-            rows.append(_merged_row("unmatched_semantic", semantic, None, duplicate_semantic, duplicate_profiler))
+            if type_mismatch_profiler is not None:
+                stats["type_mismatch_semantic"] += 1
+                rows.append(_merged_row("type_mismatch", semantic, type_mismatch_profiler,
+                    duplicate_semantic, duplicate_profiler))
+            else:
+                stats["unmatched_semantic"] += 1
+                rows.append(_merged_row("unmatched_semantic", semantic, None, duplicate_semantic, duplicate_profiler))
             continue
         stats["matched"] += 1
         matched_profiler_keys.add(matched_profiler.merge_key)
@@ -122,12 +146,43 @@ def merge_records(
     for task in profiler_list:
         if task.merge_key in matched_profiler_keys:
             continue
+        if _is_ignored_unmatched_profiler(task):
+            stats["ignored_unmatched_profiler"] += 1
+            continue
         stats["unmatched_profiler"] += 1
 
     stats["duplicate_semantic_keys"] = sum(1 for count in semantic_counts.values() if count > 1)
     stats["duplicate_profiler_keys"] = sum(1 for count in profiler_counts.values() if count > 1)
     return rows, stats
 
+
+
+def _is_ignored_unmatched_profiler(task: ProfilerTask) -> bool:
+    return str(task.kernel_type or "").strip().upper() in IGNORED_UNMATCHED_PROFILER_KERNEL_TYPES
+
+
+def _is_compatible_task_kind(semantic: SemanticRecord, profiler: ProfilerTask) -> bool:
+    expected = TASK_KIND_KERNEL_TYPES.get(str(semantic.task_kind or "").strip().lower())
+    if not expected:
+        return True
+    return str(profiler.kernel_type or "").strip().upper() in expected
+
+
+def _compatible_profiler_matches(semantic: SemanticRecord, profilers: List[ProfilerTask]) -> List[ProfilerTask]:
+    return [profiler for profiler in profilers if _is_compatible_task_kind(semantic, profiler)]
+
+
+def _can_use_task_id_fallback(semantic_task_ids_by_stream, semantic: SemanticRecord) -> bool:
+    task_ids = semantic_task_ids_by_stream.get((semantic.node_id, semantic.device_id, semantic.stream_id), set())
+    return len(task_ids) > 1
+
+def _compatible_task_id_match(profiler_by_key, profiler_by_device_task_key, semantic: SemanticRecord) -> List[ProfilerTask]:
+    matches = _compatible_profiler_matches(semantic, profiler_by_key.get(semantic.merge_key, []))
+    if len(matches) == 1:
+        return matches
+    if not semantic.node_id and semantic.device_id >= 0:
+        return _unique_device_task_match(profiler_by_device_task_key, semantic.device_id, semantic)
+    return []
 
 
 def _profiler_sequence_sort_key(task: ProfilerTask):

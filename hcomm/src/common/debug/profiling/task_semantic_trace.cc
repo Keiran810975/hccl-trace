@@ -196,19 +196,5 @@ HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskT
         SafeStr(info->source));
     return HCCL_SUCCESS;
 }
-HcclResult ReportTaskSemanticTracePlaceholder(u32 deviceId, u32 streamId, u32 taskId, const char *taskKind)
-{
-    if (!IsTaskSemanticTraceEnabled()) {
-        return HCCL_SUCCESS;
-    }
-    u64 semanticSeq = NextTaskSemanticSeq(deviceId, streamId);
-    static std::atomic<u32> logCount(0);
-    u32 curLogCount = logCount.fetch_add(1);
-    if (curLogCount < TASK_SEMANTIC_PROBE_LOG_LIMIT) {
-        HCCL_RUN_INFO("[HcclTaskSemanticProbe] placeholder device_id[%u] stream_id[%u] task_id[%u] "
-            "semantic_seq[%llu] task_kind[%s]",
-            deviceId, streamId, taskId, semanticSeq, SafeStr(taskKind));
-    }
-    return HCCL_SUCCESS;
-}
+
 } // namespace hccl

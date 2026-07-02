@@ -99,6 +99,17 @@ through the legacy `task_id` merge key. When `semantic_seq` is present but has
 no profiler sequence match, `merge_timeline` treats the row as unmatched
 instead of falling back to `task_id`.
 
+`AI_CORE` profiler rows are kept while building per-stream sequence numbers,
+because `semantic_seq` is an absolute profiler-stream position. They are treated
+as ignored unmatched profiler rows in the main summary, and dependency graph
+rendering stays focused on communication events: rx/tx ACK, rx/tx data signal,
+and payload copy/reduce. `merge_timeline` also validates the semantic
+`task_kind` against profiler `kernel_type`; incompatible sequence hits are
+reported as `type_mismatch`. When producer plog carries a non-degenerate graph
+`task_id`/ctxId, the merge can fall back to a type-compatible `(device, stream,
+task_id)` match. Revisit `AI_CORE` only after confirming it is produced by a
+semantic HCOMM AIV task that should participate in the communication graph.
+
 Use `--keep-duplicate-semantic-keys` on `merge_timeline` only when inspecting
 raw producer-side duplicate behavior. The default merged CSV is intended for
 validation and visualization.

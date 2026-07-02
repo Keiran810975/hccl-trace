@@ -16,6 +16,7 @@ else:
     from .schema import PROFILER_FIELDS, PROFILER_TRACE_EX, ProfilerTask, first_present, normalize_task_kind, parse_int, write_csv
 
 
+
 def parse_task_time_rows(rows: Iterable[Dict[str, str]], default_node_id: str = "") -> Iterator[ProfilerTask]:
     for row in rows:
         kernel_type = first_present(row, ("kernel_type", "Kernel Type", "Task Type", "task_type"))

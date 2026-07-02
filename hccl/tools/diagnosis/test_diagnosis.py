@@ -55,6 +55,41 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertEqual(len(tasks), 2)
         self.assertEqual({task.device_id for task in tasks}, {0})
 
+    def test_ai_core_keeps_sequence_but_is_not_unmatched_noise(self):
+        semantics = list(parse_legacy_block([
+            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[0] semantic_seq[1] task_kind[notify_wait] "
+            "event[rx_ack_start] phase[reduce_scatter_direct] step[0] rank[0] ranksize[2] "
+            "slice[0] semantic[link_rx_ack]\n",
+        ]))
+        profilers = list(parse_task_time_rows([
+            {
+                "Device_id": "0",
+                "stream_id": "12",
+                "task_id": "10",
+                "kernel_type": "AI_CORE",
+                "task_start(us)": "1",
+                "task_stop(us)": "2",
+                "task_time(us)": "1",
+            },
+            {
+                "Device_id": "0",
+                "stream_id": "12",
+                "task_id": "11",
+                "kernel_type": "NOTIFY_WAIT",
+                "task_start(us)": "2",
+                "task_stop(us)": "3",
+                "task_time(us)": "1",
+            },
+        ], default_node_id="node0"))
+
+        rows, stats = merge_records(semantics, profilers)
+
+        self.assertEqual(len(profilers), 2)
+        self.assertEqual(stats["matched"], 1)
+        self.assertEqual(stats["ignored_unmatched_profiler"], 1)
+        self.assertEqual(stats["unmatched_profiler"], 0)
+        self.assertEqual(rows[0]["profiler_task_kind"], "notify_wait")
+
     def test_plog_dir_loads_all_plog_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             for rank in (0, 1):
@@ -95,6 +130,44 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertEqual([row["task_id"] for row in rows], [0, 0])
         self.assertEqual([row["semantic_seq"] for row in rows], [0, 1])
         self.assertEqual([row["task_start"] for row in rows], ["10", "12"])
+    def test_semantic_seq_type_mismatch_is_not_matched(self):
+        semantics = list(parse_legacy_block([
+            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[0] semantic_seq[0] task_kind[notify_wait] "
+            "event[rx_ack_start] phase[reduce_scatter_direct] step[0] rank[0] ranksize[2] "
+            "slice[0] semantic[link_rx_ack]\n",
+        ]))
+        profilers = list(parse_task_time_rows([
+            {"Device_id": "0", "stream_id": "12", "task_id": "10", "kernel_type": "MEMCPY_ASYNC", "task_start(us)": "10", "task_stop(us)": "11", "task_time(us)": "1"},
+        ], default_node_id="node0"))
+
+        rows, stats = merge_records(semantics, profilers)
+
+        self.assertEqual(stats["matched"], 0)
+        self.assertEqual(stats["semantic_seq_type_mismatch"], 1)
+        self.assertEqual(stats["type_mismatch_semantic"], 1)
+        self.assertEqual(rows[0]["match_status"], "type_mismatch")
+
+    def test_type_mismatch_can_fallback_to_compatible_task_id(self):
+        semantics = list(parse_legacy_block([
+            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[11] semantic_seq[0] task_kind[notify_wait] "
+            "event[rx_ack_start] phase[reduce_scatter_direct] step[0] rank[0] ranksize[2] "
+            "slice[0] semantic[link_rx_ack]\n",
+            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[12] semantic_seq[2] task_kind[notify_record] "
+            "event[tx_ack_start] phase[reduce_scatter_direct] step[0] rank[0] ranksize[2] "
+            "slice[0] semantic[link_tx_ack]\n",
+        ]))
+        profilers = list(parse_task_time_rows([
+            {"Device_id": "0", "stream_id": "12", "task_id": "10", "kernel_type": "MEMCPY_ASYNC", "task_start(us)": "10", "task_stop(us)": "11", "task_time(us)": "1"},
+            {"Device_id": "0", "stream_id": "12", "task_id": "11", "kernel_type": "NOTIFY_WAIT", "task_start(us)": "12", "task_stop(us)": "13", "task_time(us)": "1"},
+            {"Device_id": "0", "stream_id": "12", "task_id": "12", "kernel_type": "NOTIFY_RECORD", "task_start(us)": "14", "task_stop(us)": "15", "task_time(us)": "1"},
+        ], default_node_id="node0"))
+
+        rows, stats = merge_records(semantics, profilers)
+
+        self.assertEqual(stats["matched"], 2)
+        self.assertEqual(stats["task_id_type_fallback_matches"], 1)
+        self.assertEqual(rows[0]["profiler_task_kind"], "notify_wait")
+        self.assertEqual(rows[0]["task_start"], "12")
     def test_semantic_seq_miss_does_not_fall_back_to_task_id(self):
         semantics = list(parse_legacy_block([
             "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[100] semantic_seq[9] task_kind[notify_wait] "

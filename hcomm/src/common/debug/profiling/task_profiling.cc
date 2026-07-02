@@ -334,10 +334,6 @@ HcclResult TaskProfiling::Save(u32 captureStreamID, u32 streamID, u32 taskID, co
     auto &profilingManager = hccl::ProfilingManager::Instance();
     HcclResult is_subscribe = profilingManager.GetAddtionInfoState();
     bool isCapture = (captureStreamID != streamID);
-    HCCL_RUN_INFO("[HcclTaskSemanticAivDebug] task profiling save enter device_id[%u] capture_stream_id[%u] "
-        "stream_id[%u] task_id[%u] is_capture[%u] is_subscribe[%d] workflow_mode[%d] cmd_type[%d] tag[%u]",
-        deviceLogicId_, captureStreamID, streamID, taskID, static_cast<u32>(isCapture), is_subscribe,
-        static_cast<s32>(GetWorkflowMode()), static_cast<s32>(paraAiv.cmdType), paraAiv.tag);
     if (is_subscribe && GetWorkflowMode() == HcclWorkflowMode::HCCL_WORKFLOW_MODE_OP_BASE &&
         !isCapture) {
         return HCCL_SUCCESS;

@@ -86,7 +86,9 @@ DEFAULT_EDGE_KINDS = (
 )
 DEFAULT_EVENTS = (
     "rx_ack_start",
+    "tx_ack_start",
     "rx_data_signal_start",
+    "tx_data_signal_start",
     "rx_payload_reduce_start",
     "rx_payload_copy_start",
     "tx_payload_start",
@@ -264,7 +266,7 @@ def select_representatives(rows: List[dict]) -> Dict[Tuple[str, int, int], dict]
 
 
 def compact_dependency_rows(rows: List[dict]) -> List[dict]:
-    """Keep one RxAck, one Signal, and one payload representative per rank/phase/step."""
+    """Keep representative ack, signal, and payload nodes per rank/phase/step."""
     reps = select_representatives(rows)
     by_step: Dict[Tuple[str, int, int], List[dict]] = defaultdict(list)
     for row in rows:
@@ -277,7 +279,13 @@ def compact_dependency_rows(rows: List[dict]) -> List[dict]:
         first_by_event = {}
         for row in candidates:
             first_by_event.setdefault(row.get("event", ""), row)
-        for row in (first_by_event.get("rx_ack_start"), first_by_event.get("rx_data_signal_start"), reps.get(key)):
+        for row in (
+            first_by_event.get("rx_ack_start"),
+            first_by_event.get("tx_ack_start"),
+            first_by_event.get("rx_data_signal_start"),
+            first_by_event.get("tx_data_signal_start"),
+            reps.get(key),
+        ):
             if not row:
                 continue
             row_id = row["_source_row"]
