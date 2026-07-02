@@ -40,6 +40,7 @@ void ClearTaskSemanticTraceInfo();
 HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskType taskType);
 HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskType taskType,
     const TaskSemanticTraceInfo *info);
+HcclResult ReportTaskSemanticTracePlaceholder(u32 deviceId, u32 streamId, u32 taskId, const char *taskKind);
 } // namespace hccl
 
 #endif // TASK_SEMANTIC_TRACE_H

@@ -376,6 +376,7 @@ HcclResult TaskProfiling::Save(u32 captureStreamID, u32 streamID, u32 taskID, co
         hcclReportData.tag.c_str(), hcclReportData.profInfo.cclTag, hcclReportData.groupName.c_str(),
         hcclReportData.profInfo.groupName);
 
+    CHK_RET(ReportTaskSemanticTracePlaceholder(deviceLogicId_, streamID, taskID, "aiv"));
     DumpReportDataInfo(hcclReportData.type, hcclReportData.profInfo);
     CHK_RET(ReportMsprofData(hcclReportData));
     return HCCL_SUCCESS;
