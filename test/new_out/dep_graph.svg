@@ -1,0 +1,201 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1292" height="308" viewBox="0 0 1292 308">
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3 z" fill="#555"/></marker></defs>
+<rect x="0" y="0" width="100%" height="100%" fill="#fff"/>
+<text x="180" y="30" font-family="Arial" font-size="22" font-weight="700">HCCL task dependency graph</text>
+<text x="180" y="54" font-family="Arial" font-size="12" fill="#555">Nodes are matched tasks. Edges show inferred single-ring step, upstream, phase, and ack/signal/payload dependencies.</text>
+<rect x="180" y="76" width="130" height="172" fill="#fbfbfb"/>
+<line x1="180" y1="76" x2="180" y2="248" stroke="#e6e6e6"/>
+<text x="190" y="64" font-family="Arial" font-size="12" font-weight="700">reduce_scatter</text>
+<text x="245.0" y="82" text-anchor="middle" font-family="Arial" font-size="10" fill="#555">step 0</text>
+<rect x="310" y="76" width="130" height="172" fill="#ffffff"/>
+<line x1="310" y1="76" x2="310" y2="248" stroke="#e6e6e6"/>
+<text x="320" y="64" font-family="Arial" font-size="12" font-weight="700">allgather</text>
+<text x="375.0" y="82" text-anchor="middle" font-family="Arial" font-size="10" fill="#555">step 0</text>
+<rect x="440" y="76" width="130" height="172" fill="#fbfbfb"/>
+<line x1="440" y1="76" x2="440" y2="248" stroke="#e6e6e6"/>
+<text x="505.0" y="82" text-anchor="middle" font-family="Arial" font-size="10" fill="#555">step 1</text>
+<rect x="570" y="76" width="130" height="172" fill="#ffffff"/>
+<line x1="570" y1="76" x2="570" y2="248" stroke="#e6e6e6"/>
+<text x="635.0" y="82" text-anchor="middle" font-family="Arial" font-size="10" fill="#555">step 2</text>
+<rect x="700" y="76" width="130" height="172" fill="#fbfbfb"/>
+<line x1="700" y1="76" x2="700" y2="248" stroke="#e6e6e6"/>
+<text x="765.0" y="82" text-anchor="middle" font-family="Arial" font-size="10" fill="#555">step 3</text>
+<rect x="830" y="76" width="130" height="172" fill="#ffffff"/>
+<line x1="830" y1="76" x2="830" y2="248" stroke="#e6e6e6"/>
+<text x="895.0" y="82" text-anchor="middle" font-family="Arial" font-size="10" fill="#555">step 4</text>
+<rect x="960" y="76" width="130" height="172" fill="#fbfbfb"/>
+<line x1="960" y1="76" x2="960" y2="248" stroke="#e6e6e6"/>
+<text x="1025.0" y="82" text-anchor="middle" font-family="Arial" font-size="10" fill="#555">step 5</text>
+<rect x="1090" y="76" width="130" height="172" fill="#ffffff"/>
+<line x1="1090" y1="76" x2="1090" y2="248" stroke="#e6e6e6"/>
+<text x="1155.0" y="82" text-anchor="middle" font-family="Arial" font-size="10" fill="#555">step 6</text>
+<line x1="1220" y1="76" x2="1220" y2="248" stroke="#e6e6e6"/>
+<text x="28" y="140" font-family="Arial" font-size="12" fill="#333">rank 6</text>
+<line x1="168" y1="170.0" x2="1220" y2="170.0" stroke="#f0f0f0"/>
+<path d="M 232.0 142.0 C 272.5 142.0, 281.5 142.0, 322.0 142.0" fill="none" stroke="#444444" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_sequence: same-rank task program order</title></path>
+<path d="M 362.0 142.0 C 380.0 142.0, 352.0 142.0, 370.0 142.0" fill="none" stroke="#444444" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_sequence: same-rank task program order</title></path>
+<path d="M 410.0 142.0 C 449.6 142.0, 282.4 172.0, 322.0 172.0" fill="none" stroke="#444444" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_sequence: same-rank task program order</title></path>
+<path d="M 362.0 172.0 C 402.5 172.0, 411.5 142.0, 452.0 142.0" fill="none" stroke="#444444" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_sequence: same-rank task program order</title></path>
+<path d="M 492.0 142.0 C 510.0 142.0, 482.0 142.0, 500.0 142.0" fill="none" stroke="#444444" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_sequence: same-rank task program order</title></path>
+<path d="M 540.0 142.0 C 579.6 142.0, 412.4 172.0, 452.0 172.0" fill="none" stroke="#444444" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_sequence: same-rank task program order</title></path>
+<path d="M 492.0 172.0 C 532.5 172.0, 541.5 142.0, 582.0 142.0" fill="none" stroke="#444444" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_sequence: same-rank task program order</title></path>
+<path d="M 622.0 142.0 C 640.0 142.0, 612.0 142.0, 630.0 142.0" fill="none" stroke="#444444" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_sequence: same-rank task program order</title></path>
+<path d="M 670.0 142.0 C 709.6 142.0, 542.4 172.0, 582.0 172.0" fill="none" stroke="#444444" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_sequence: same-rank task program order</title></path>
+<path d="M 622.0 172.0 C 662.5 172.0, 671.5 142.0, 712.0 142.0" fill="none" stroke="#444444" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_sequence: same-rank task program order</title></path>
+<path d="M 752.0 142.0 C 770.0 142.0, 742.0 142.0, 760.0 142.0" fill="none" stroke="#444444" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_sequence: same-rank task program order</title></path>
+<path d="M 800.0 142.0 C 839.6 142.0, 672.4 172.0, 712.0 172.0" fill="none" stroke="#444444" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_sequence: same-rank task program order</title></path>
+<path d="M 752.0 172.0 C 792.5 172.0, 801.5 142.0, 842.0 142.0" fill="none" stroke="#444444" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_sequence: same-rank task program order</title></path>
+<path d="M 882.0 142.0 C 900.0 142.0, 872.0 142.0, 890.0 142.0" fill="none" stroke="#444444" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_sequence: same-rank task program order</title></path>
+<path d="M 930.0 142.0 C 969.6 142.0, 802.4 172.0, 842.0 172.0" fill="none" stroke="#444444" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_sequence: same-rank task program order</title></path>
+<path d="M 882.0 172.0 C 922.5 172.0, 931.5 142.0, 972.0 142.0" fill="none" stroke="#444444" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_sequence: same-rank task program order</title></path>
+<path d="M 1012.0 142.0 C 1030.0 142.0, 1002.0 142.0, 1020.0 142.0" fill="none" stroke="#444444" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_sequence: same-rank task program order</title></path>
+<path d="M 1060.0 142.0 C 1099.6 142.0, 932.4 172.0, 972.0 172.0" fill="none" stroke="#444444" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_sequence: same-rank task program order</title></path>
+<path d="M 1012.0 172.0 C 1052.5 172.0, 1061.5 142.0, 1102.0 142.0" fill="none" stroke="#444444" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_sequence: same-rank task program order</title></path>
+<path d="M 1142.0 142.0 C 1160.0 142.0, 1132.0 142.0, 1150.0 142.0" fill="none" stroke="#444444" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_sequence: same-rank task program order</title></path>
+<path d="M 1190.0 142.0 C 1229.6 142.0, 1062.4 172.0, 1102.0 172.0" fill="none" stroke="#444444" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_sequence: same-rank task program order</title></path>
+<path d="M 362.0 172.0 C 402.5 172.0, 411.5 172.0, 452.0 172.0" fill="none" stroke="#777777" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_step: same rank next step waits for previous step payload</title></path>
+<path d="M 492.0 172.0 C 532.5 172.0, 541.5 172.0, 582.0 172.0" fill="none" stroke="#777777" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_step: same rank next step waits for previous step payload</title></path>
+<path d="M 622.0 172.0 C 662.5 172.0, 671.5 172.0, 712.0 172.0" fill="none" stroke="#777777" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_step: same rank next step waits for previous step payload</title></path>
+<path d="M 752.0 172.0 C 792.5 172.0, 801.5 172.0, 842.0 172.0" fill="none" stroke="#777777" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_step: same rank next step waits for previous step payload</title></path>
+<path d="M 882.0 172.0 C 922.5 172.0, 931.5 172.0, 972.0 172.0" fill="none" stroke="#777777" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_step: same rank next step waits for previous step payload</title></path>
+<path d="M 1012.0 172.0 C 1052.5 172.0, 1061.5 172.0, 1102.0 172.0" fill="none" stroke="#777777" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>same_rank_step: same rank next step waits for previous step payload</title></path>
+<path d="M 232.0 142.0 C 272.5 142.0, 281.5 172.0, 322.0 172.0" fill="none" stroke="#7b3fb3" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>phase_bridge: allgather step 0 starts after reduce_scatter final step</title></path>
+<path d="M 362.0 142.0 C 380.0 142.0, 352.0 142.0, 370.0 142.0" fill="none" stroke="#2b8a3e" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>signal_payload: ack wait completes before data-signal wait</title></path>
+<path d="M 410.0 142.0 C 449.6 142.0, 282.4 172.0, 322.0 172.0" fill="none" stroke="#2b8a3e" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>signal_payload: data-signal wait releases payload task</title></path>
+<path d="M 492.0 142.0 C 510.0 142.0, 482.0 142.0, 500.0 142.0" fill="none" stroke="#2b8a3e" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>signal_payload: ack wait completes before data-signal wait</title></path>
+<path d="M 540.0 142.0 C 579.6 142.0, 412.4 172.0, 452.0 172.0" fill="none" stroke="#2b8a3e" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>signal_payload: data-signal wait releases payload task</title></path>
+<path d="M 622.0 142.0 C 640.0 142.0, 612.0 142.0, 630.0 142.0" fill="none" stroke="#2b8a3e" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>signal_payload: ack wait completes before data-signal wait</title></path>
+<path d="M 670.0 142.0 C 709.6 142.0, 542.4 172.0, 582.0 172.0" fill="none" stroke="#2b8a3e" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>signal_payload: data-signal wait releases payload task</title></path>
+<path d="M 752.0 142.0 C 770.0 142.0, 742.0 142.0, 760.0 142.0" fill="none" stroke="#2b8a3e" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>signal_payload: ack wait completes before data-signal wait</title></path>
+<path d="M 800.0 142.0 C 839.6 142.0, 672.4 172.0, 712.0 172.0" fill="none" stroke="#2b8a3e" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>signal_payload: data-signal wait releases payload task</title></path>
+<path d="M 882.0 142.0 C 900.0 142.0, 872.0 142.0, 890.0 142.0" fill="none" stroke="#2b8a3e" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>signal_payload: ack wait completes before data-signal wait</title></path>
+<path d="M 930.0 142.0 C 969.6 142.0, 802.4 172.0, 842.0 172.0" fill="none" stroke="#2b8a3e" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>signal_payload: data-signal wait releases payload task</title></path>
+<path d="M 1012.0 142.0 C 1030.0 142.0, 1002.0 142.0, 1020.0 142.0" fill="none" stroke="#2b8a3e" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>signal_payload: ack wait completes before data-signal wait</title></path>
+<path d="M 1060.0 142.0 C 1099.6 142.0, 932.4 172.0, 972.0 172.0" fill="none" stroke="#2b8a3e" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>signal_payload: data-signal wait releases payload task</title></path>
+<path d="M 1142.0 142.0 C 1160.0 142.0, 1132.0 142.0, 1150.0 142.0" fill="none" stroke="#2b8a3e" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>signal_payload: ack wait completes before data-signal wait</title></path>
+<path d="M 1190.0 142.0 C 1229.6 142.0, 1062.4 172.0, 1102.0 172.0" fill="none" stroke="#2b8a3e" stroke-width="1.2" stroke-opacity="0.72" marker-end="url(#arrow)"><title>signal_payload: data-signal wait releases payload task</title></path>
+<rect x="192.0" y="132.0" width="40" height="20" rx="3" ry="3" fill="#ffd9bd" stroke="#b45f06" stroke-width="1"><title>graph_rank=6 user_rank=6 device=6 stream=45 task=0
+phase=reduce_scatter_direct event=rx_payload_reduce_start semantic=link_rx_payload_reduce
+step=0 slice=4
+1782933834935584.250..1782933834935584.250 us duration=0.000 us</title></rect>
+<text x="212.0" y="145.5" text-anchor="middle" font-family="Arial" font-size="7.5">rx_reduc</text>
+<rect x="322.0" y="132.0" width="40" height="20" rx="3" ry="3" fill="#ffe8d2" stroke="#b26000" stroke-width="1"><title>graph_rank=6 user_rank=6 device=6 stream=45 task=5
+phase=allgather_direct event=rx_ack_start semantic=link_rx_ack
+step=0 slice=6
+1782933835073146.250..1782933835073147.000 us duration=0.750 us</title></rect>
+<text x="342.0" y="145.5" text-anchor="middle" font-family="Arial" font-size="7.5">rx_ack</text>
+<rect x="370.0" y="132.0" width="40" height="20" rx="3" ry="3" fill="#e9e1ff" stroke="#5b43a8" stroke-width="1"><title>graph_rank=6 user_rank=6 device=6 stream=45 task=7
+phase=allgather_direct event=rx_data_signal_start semantic=link_rx_data_signal
+step=0 slice=5
+1782933835073147.750..1782933835073147.750 us duration=0.000 us</title></rect>
+<text x="390.0" y="145.5" text-anchor="middle" font-family="Arial" font-size="7.5">rx_sig</text>
+<rect x="322.0" y="162.0" width="40" height="20" rx="3" ry="3" fill="#d7f2ff" stroke="#1683a8" stroke-width="1"><title>graph_rank=6 user_rank=6 device=6 stream=45 task=10
+phase=allgather_direct event=rx_payload_copy_start semantic=link_rx_payload_copy
+step=0 slice=5
+1782933835073148.000..1782933835074400.250 us duration=1252.250 us</title></rect>
+<text x="342.0" y="175.5" text-anchor="middle" font-family="Arial" font-size="7.5">rx_copy</text>
+<rect x="452.0" y="132.0" width="40" height="20" rx="3" ry="3" fill="#ffe8d2" stroke="#b26000" stroke-width="1"><title>graph_rank=6 user_rank=6 device=6 stream=45 task=12
+phase=allgather_direct event=rx_ack_start semantic=link_rx_ack
+step=1 slice=5
+1782933835074401.000..1782933835074402.500 us duration=1.500 us</title></rect>
+<text x="472.0" y="145.5" text-anchor="middle" font-family="Arial" font-size="7.5">rx_ack</text>
+<rect x="500.0" y="132.0" width="40" height="20" rx="3" ry="3" fill="#e9e1ff" stroke="#5b43a8" stroke-width="1"><title>graph_rank=6 user_rank=6 device=6 stream=45 task=14
+phase=allgather_direct event=rx_data_signal_start semantic=link_rx_data_signal
+step=1 slice=4
+1782933835074403.250..1782933835074404.250 us duration=1.000 us</title></rect>
+<text x="520.0" y="145.5" text-anchor="middle" font-family="Arial" font-size="7.5">rx_sig</text>
+<rect x="452.0" y="162.0" width="40" height="20" rx="3" ry="3" fill="#d7f2ff" stroke="#1683a8" stroke-width="1"><title>graph_rank=6 user_rank=6 device=6 stream=45 task=17
+phase=allgather_direct event=rx_payload_copy_start semantic=link_rx_payload_copy
+step=1 slice=4
+1782933835074404.500..1782933835075656.750 us duration=1252.250 us</title></rect>
+<text x="472.0" y="175.5" text-anchor="middle" font-family="Arial" font-size="7.5">rx_copy</text>
+<rect x="582.0" y="132.0" width="40" height="20" rx="3" ry="3" fill="#ffe8d2" stroke="#b26000" stroke-width="1"><title>graph_rank=6 user_rank=6 device=6 stream=45 task=19
+phase=allgather_direct event=rx_ack_start semantic=link_rx_ack
+step=2 slice=4
+1782933835075657.500..1782933835075658.750 us duration=1.250 us</title></rect>
+<text x="602.0" y="145.5" text-anchor="middle" font-family="Arial" font-size="7.5">rx_ack</text>
+<rect x="630.0" y="132.0" width="40" height="20" rx="3" ry="3" fill="#e9e1ff" stroke="#5b43a8" stroke-width="1"><title>graph_rank=6 user_rank=6 device=6 stream=45 task=21
+phase=allgather_direct event=rx_data_signal_start semantic=link_rx_data_signal
+step=2 slice=3
+1782933835075659.500..1782933835075661.750 us duration=2.250 us</title></rect>
+<text x="650.0" y="145.5" text-anchor="middle" font-family="Arial" font-size="7.5">rx_sig</text>
+<rect x="582.0" y="162.0" width="40" height="20" rx="3" ry="3" fill="#d7f2ff" stroke="#1683a8" stroke-width="1"><title>graph_rank=6 user_rank=6 device=6 stream=45 task=24
+phase=allgather_direct event=rx_payload_copy_start semantic=link_rx_payload_copy
+step=2 slice=3
+1782933835075661.750..1782933835076914.000 us duration=1252.250 us</title></rect>
+<text x="602.0" y="175.5" text-anchor="middle" font-family="Arial" font-size="7.5">rx_copy</text>
+<rect x="712.0" y="132.0" width="40" height="20" rx="3" ry="3" fill="#ffe8d2" stroke="#b26000" stroke-width="1"><title>graph_rank=6 user_rank=6 device=6 stream=45 task=26
+phase=allgather_direct event=rx_ack_start semantic=link_rx_ack
+step=3 slice=3
+1782933835076914.750..1782933835076914.750 us duration=0.000 us</title></rect>
+<text x="732.0" y="145.5" text-anchor="middle" font-family="Arial" font-size="7.5">rx_ack</text>
+<rect x="760.0" y="132.0" width="40" height="20" rx="3" ry="3" fill="#e9e1ff" stroke="#5b43a8" stroke-width="1"><title>graph_rank=6 user_rank=6 device=6 stream=45 task=28
+phase=allgather_direct event=rx_data_signal_start semantic=link_rx_data_signal
+step=3 slice=2
+1782933835076915.500..1782933835076916.500 us duration=1.000 us</title></rect>
+<text x="780.0" y="145.5" text-anchor="middle" font-family="Arial" font-size="7.5">rx_sig</text>
+<rect x="712.0" y="162.0" width="40" height="20" rx="3" ry="3" fill="#d7f2ff" stroke="#1683a8" stroke-width="1"><title>graph_rank=6 user_rank=6 device=6 stream=45 task=31
+phase=allgather_direct event=rx_payload_copy_start semantic=link_rx_payload_copy
+step=3 slice=2
+1782933835076916.500..1782933835078168.750 us duration=1252.250 us</title></rect>
+<text x="732.0" y="175.5" text-anchor="middle" font-family="Arial" font-size="7.5">rx_copy</text>
+<rect x="842.0" y="132.0" width="40" height="20" rx="3" ry="3" fill="#ffe8d2" stroke="#b26000" stroke-width="1"><title>graph_rank=6 user_rank=6 device=6 stream=45 task=33
+phase=allgather_direct event=rx_ack_start semantic=link_rx_ack
+step=4 slice=2
+1782933835078169.500..1782933835078169.500 us duration=0.000 us</title></rect>
+<text x="862.0" y="145.5" text-anchor="middle" font-family="Arial" font-size="7.5">rx_ack</text>
+<rect x="890.0" y="132.0" width="40" height="20" rx="3" ry="3" fill="#e9e1ff" stroke="#5b43a8" stroke-width="1"><title>graph_rank=6 user_rank=6 device=6 stream=45 task=35
+phase=allgather_direct event=rx_data_signal_start semantic=link_rx_data_signal
+step=4 slice=1
+1782933835078170.250..1782933835078171.000 us duration=0.750 us</title></rect>
+<text x="910.0" y="145.5" text-anchor="middle" font-family="Arial" font-size="7.5">rx_sig</text>
+<rect x="842.0" y="162.0" width="40" height="20" rx="3" ry="3" fill="#d7f2ff" stroke="#1683a8" stroke-width="1"><title>graph_rank=6 user_rank=6 device=6 stream=45 task=38
+phase=allgather_direct event=rx_payload_copy_start semantic=link_rx_payload_copy
+step=4 slice=1
+1782933835078171.500..1782933835079423.750 us duration=1252.250 us</title></rect>
+<text x="862.0" y="175.5" text-anchor="middle" font-family="Arial" font-size="7.5">rx_copy</text>
+<rect x="972.0" y="132.0" width="40" height="20" rx="3" ry="3" fill="#ffe8d2" stroke="#b26000" stroke-width="1"><title>graph_rank=6 user_rank=6 device=6 stream=45 task=40
+phase=allgather_direct event=rx_ack_start semantic=link_rx_ack
+step=5 slice=1
+1782933835079424.500..1782933835079424.500 us duration=0.000 us</title></rect>
+<text x="992.0" y="145.5" text-anchor="middle" font-family="Arial" font-size="7.5">rx_ack</text>
+<rect x="1020.0" y="132.0" width="40" height="20" rx="3" ry="3" fill="#e9e1ff" stroke="#5b43a8" stroke-width="1"><title>graph_rank=6 user_rank=6 device=6 stream=45 task=42
+phase=allgather_direct event=rx_data_signal_start semantic=link_rx_data_signal
+step=5 slice=0
+1782933835079425.250..1782933835079426.000 us duration=0.750 us</title></rect>
+<text x="1040.0" y="145.5" text-anchor="middle" font-family="Arial" font-size="7.5">rx_sig</text>
+<rect x="972.0" y="162.0" width="40" height="20" rx="3" ry="3" fill="#d7f2ff" stroke="#1683a8" stroke-width="1"><title>graph_rank=6 user_rank=6 device=6 stream=45 task=45
+phase=allgather_direct event=rx_payload_copy_start semantic=link_rx_payload_copy
+step=5 slice=0
+1782933835079426.000..1782933835080678.250 us duration=1252.250 us</title></rect>
+<text x="992.0" y="175.5" text-anchor="middle" font-family="Arial" font-size="7.5">rx_copy</text>
+<rect x="1102.0" y="132.0" width="40" height="20" rx="3" ry="3" fill="#ffe8d2" stroke="#b26000" stroke-width="1"><title>graph_rank=6 user_rank=6 device=6 stream=45 task=47
+phase=allgather_direct event=rx_ack_start semantic=link_rx_ack
+step=6 slice=0
+1782933835080679.000..1782933835080679.000 us duration=0.000 us</title></rect>
+<text x="1122.0" y="145.5" text-anchor="middle" font-family="Arial" font-size="7.5">rx_ack</text>
+<rect x="1150.0" y="132.0" width="40" height="20" rx="3" ry="3" fill="#e9e1ff" stroke="#5b43a8" stroke-width="1"><title>graph_rank=6 user_rank=6 device=6 stream=45 task=49
+phase=allgather_direct event=rx_data_signal_start semantic=link_rx_data_signal
+step=6 slice=7
+1782933835080679.750..1782933835080680.500 us duration=0.750 us</title></rect>
+<text x="1170.0" y="145.5" text-anchor="middle" font-family="Arial" font-size="7.5">rx_sig</text>
+<rect x="1102.0" y="162.0" width="40" height="20" rx="3" ry="3" fill="#d7f2ff" stroke="#1683a8" stroke-width="1"><title>graph_rank=6 user_rank=6 device=6 stream=45 task=52
+phase=allgather_direct event=rx_payload_copy_start semantic=link_rx_payload_copy
+step=6 slice=7
+1782933835080680.750..1782933835081933.000 us duration=1252.250 us</title></rect>
+<text x="1122.0" y="175.5" text-anchor="middle" font-family="Arial" font-size="7.5">rx_copy</text>
+<line x1="180" y1="256" x2="206" y2="256" stroke="#444444" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="214" y="260" font-family="Arial" font-size="10">same_rank_sequence</text>
+<line x1="370" y1="256" x2="396" y2="256" stroke="#777777" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="404" y="260" font-family="Arial" font-size="10">same_rank_step</text>
+<line x1="560" y1="256" x2="586" y2="256" stroke="#d98000" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="594" y="260" font-family="Arial" font-size="10">right_neighbor_ack_dep</text>
+<line x1="750" y1="256" x2="776" y2="256" stroke="#276fbf" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="784" y="260" font-family="Arial" font-size="10">upstream_data_signal_dep</text>
+<line x1="940" y1="256" x2="966" y2="256" stroke="#1f77b4" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="974" y="260" font-family="Arial" font-size="10">upstream_prev_step</text>
+<line x1="180" y1="272" x2="206" y2="272" stroke="#7b3fb3" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="214" y="276" font-family="Arial" font-size="10">phase_bridge</text>
+<line x1="370" y1="272" x2="396" y2="272" stroke="#2b8a3e" stroke-width="1.5" marker-end="url(#arrow)"/>
+<text x="404" y="276" font-family="Arial" font-size="10">signal_payload</text>
+</svg>

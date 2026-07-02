@@ -4,7 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${ROOT_DIR}/test/out/function"
 PLOG=""
+PLOG_DIR=""
 TASK_TIME=""
+TASK_TIME_DIR=""
 NODE_ID="node0"
 MIN_MATCH_RATE="95"
 VISUALIZE="1"
@@ -18,7 +20,9 @@ Usage:
 Options:
   --out-dir DIR              Output directory. Default: test/out/function
   --plog FILE                HCCL plog containing [HcclTaskSemantic] rows.
+  --plog-dir DIR            Directory containing plog*.log files.
   --task-time FILE           msprof task_time.csv.
+  --task-time-dir DIR        Directory containing msprof task_time*.csv files.
   --node-id ID               Node id used for task_time rows. Default: node0
   --min-match-rate PERCENT   validate_trace threshold. Default: 95
   --python BIN               Python executable. Default: $PYTHON_BIN or python3
@@ -27,7 +31,7 @@ Options:
 
 If command is provided after --, it is run once with HCCL_STEP_TRACE=1 before
 merge/validate. If no command is provided, the script only validates the
-provided --plog and --task-time files.
+provided --plog/--plog-dir and --task-time/--task-time-dir files.
 USAGE
 }
 
@@ -41,8 +45,16 @@ while [[ $# -gt 0 ]]; do
             PLOG="$2"
             shift 2
             ;;
+        --plog-dir)
+            PLOG_DIR="$2"
+            shift 2
+            ;;
         --task-time)
             TASK_TIME="$2"
+            shift 2
+            ;;
+        --task-time-dir)
+            TASK_TIME_DIR="$2"
             shift 2
             ;;
         --node-id)
@@ -88,18 +100,28 @@ if [[ $# -gt 0 ]]; then
     ) 2>&1 | tee "${OUT_DIR}/workload.log"
 fi
 
-if [[ -z "${PLOG}" || -z "${TASK_TIME}" ]]; then
-    echo "Both --plog and --task-time are required for merge/validate." >&2
+if [[ ( -z "${PLOG}" && -z "${PLOG_DIR}" ) || ( -z "${TASK_TIME}" && -z "${TASK_TIME_DIR}" ) ]]; then
+    echo "one of --plog/--plog-dir and one of --task-time/--task-time-dir are required for merge/validate." >&2
     exit 2
 fi
 
-if [[ ! -f "${PLOG}" ]]; then
+if [[ -n "${PLOG}" && ! -f "${PLOG}" ]]; then
     echo "plog file not found: ${PLOG}" >&2
     exit 2
 fi
 
-if [[ ! -f "${TASK_TIME}" ]]; then
+if [[ -n "${PLOG_DIR}" && ! -d "${PLOG_DIR}" ]]; then
+    echo "plog dir not found: ${PLOG_DIR}" >&2
+    exit 2
+fi
+
+if [[ -n "${TASK_TIME}" && ! -f "${TASK_TIME}" ]]; then
     echo "task_time.csv not found: ${TASK_TIME}" >&2
+    exit 2
+fi
+
+if [[ -n "${TASK_TIME_DIR}" && ! -d "${TASK_TIME_DIR}" ]]; then
+    echo "task_time dir not found: ${TASK_TIME_DIR}" >&2
     exit 2
 fi
 
@@ -111,12 +133,25 @@ TIMELINE_SVG="${OUT_DIR}/timeline.svg"
 DEPENDENCY_SVG="${OUT_DIR}/dependency.svg"
 
 echo "[step-trace] Merging semantic plog and task_time.csv"
+MERGE_ARGS=(
+    --node-id "${NODE_ID}"
+    --output "${MERGED_CSV}"
+    --summary "${SUMMARY_CSV}"
+)
+if [[ -n "${PLOG}" ]]; then
+    MERGE_ARGS+=(--plog "${PLOG}")
+fi
+if [[ -n "${PLOG_DIR}" ]]; then
+    MERGE_ARGS+=(--plog-dir "${PLOG_DIR}")
+fi
+if [[ -n "${TASK_TIME}" ]]; then
+    MERGE_ARGS+=(--task-time "${TASK_TIME}")
+fi
+if [[ -n "${TASK_TIME_DIR}" ]]; then
+    MERGE_ARGS+=(--task-time-dir "${TASK_TIME_DIR}")
+fi
 PYTHONPATH="${ROOT_DIR}/hccl" "${PYTHON_BIN}" -m tools.diagnosis.merge_timeline \
-    --plog "${PLOG}" \
-    --task-time "${TASK_TIME}" \
-    --node-id "${NODE_ID}" \
-    --output "${MERGED_CSV}" \
-    --summary "${SUMMARY_CSV}" \
+    "${MERGE_ARGS[@]}" \
     2>&1 | tee "${MERGE_LOG}"
 
 if [[ "${VISUALIZE}" == "1" ]]; then

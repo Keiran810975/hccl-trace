@@ -1,0 +1,512 @@
+edge_id,kind,src,dst,src_rank,dst_rank,src_phase,dst_phase,src_step,dst_step,src_event,dst_event,reason
+e0,same_rank_sequence,n0,n1,0,0,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_ack_start,same-rank task program order
+e1,same_rank_sequence,n1,n2,0,0,allgather,allgather,0,0,rx_ack_start,rx_data_signal_start,same-rank task program order
+e2,same_rank_sequence,n2,n3,0,0,allgather,allgather,0,0,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e3,same_rank_sequence,n3,n4,0,0,allgather,allgather,0,1,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e4,same_rank_sequence,n4,n5,0,0,allgather,allgather,1,1,rx_ack_start,rx_data_signal_start,same-rank task program order
+e5,same_rank_sequence,n5,n6,0,0,allgather,allgather,1,1,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e6,same_rank_sequence,n6,n7,0,0,allgather,allgather,1,2,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e7,same_rank_sequence,n7,n8,0,0,allgather,allgather,2,2,rx_ack_start,rx_data_signal_start,same-rank task program order
+e8,same_rank_sequence,n8,n9,0,0,allgather,allgather,2,2,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e9,same_rank_sequence,n9,n10,0,0,allgather,allgather,2,3,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e10,same_rank_sequence,n10,n11,0,0,allgather,allgather,3,3,rx_ack_start,rx_data_signal_start,same-rank task program order
+e11,same_rank_sequence,n11,n12,0,0,allgather,allgather,3,3,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e12,same_rank_sequence,n12,n13,0,0,allgather,allgather,3,4,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e13,same_rank_sequence,n13,n14,0,0,allgather,allgather,4,4,rx_ack_start,rx_data_signal_start,same-rank task program order
+e14,same_rank_sequence,n14,n15,0,0,allgather,allgather,4,4,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e15,same_rank_sequence,n15,n16,0,0,allgather,allgather,4,5,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e16,same_rank_sequence,n16,n17,0,0,allgather,allgather,5,5,rx_ack_start,rx_data_signal_start,same-rank task program order
+e17,same_rank_sequence,n17,n18,0,0,allgather,allgather,5,5,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e18,same_rank_sequence,n18,n19,0,0,allgather,allgather,5,6,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e19,same_rank_sequence,n19,n20,0,0,allgather,allgather,6,6,rx_ack_start,rx_data_signal_start,same-rank task program order
+e20,same_rank_sequence,n20,n21,0,0,allgather,allgather,6,6,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e21,same_rank_sequence,n22,n23,1,1,reduce_scatter,reduce_scatter,0,3,rx_payload_reduce_start,copy_start,same-rank task program order
+e22,same_rank_sequence,n23,n24,1,1,reduce_scatter,reduce_scatter,3,4,copy_start,rx_payload_reduce_start,same-rank task program order
+e23,same_rank_sequence,n24,n25,1,1,reduce_scatter,allgather,4,0,rx_payload_reduce_start,rx_ack_start,same-rank task program order
+e24,same_rank_sequence,n25,n26,1,1,allgather,allgather,0,0,rx_ack_start,rx_data_signal_start,same-rank task program order
+e25,same_rank_sequence,n26,n27,1,1,allgather,allgather,0,0,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e26,same_rank_sequence,n27,n28,1,1,allgather,allgather,0,1,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e27,same_rank_sequence,n28,n29,1,1,allgather,allgather,1,1,rx_ack_start,rx_data_signal_start,same-rank task program order
+e28,same_rank_sequence,n29,n30,1,1,allgather,allgather,1,1,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e29,same_rank_sequence,n30,n31,1,1,allgather,allgather,1,2,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e30,same_rank_sequence,n31,n32,1,1,allgather,allgather,2,2,rx_ack_start,rx_data_signal_start,same-rank task program order
+e31,same_rank_sequence,n32,n33,1,1,allgather,allgather,2,2,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e32,same_rank_sequence,n33,n34,1,1,allgather,allgather,2,3,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e33,same_rank_sequence,n34,n35,1,1,allgather,allgather,3,3,rx_ack_start,rx_data_signal_start,same-rank task program order
+e34,same_rank_sequence,n35,n36,1,1,allgather,allgather,3,3,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e35,same_rank_sequence,n36,n37,1,1,allgather,allgather,3,4,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e36,same_rank_sequence,n37,n38,1,1,allgather,allgather,4,4,rx_ack_start,rx_data_signal_start,same-rank task program order
+e37,same_rank_sequence,n38,n39,1,1,allgather,allgather,4,4,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e38,same_rank_sequence,n39,n40,1,1,allgather,allgather,4,5,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e39,same_rank_sequence,n40,n41,1,1,allgather,allgather,5,5,rx_ack_start,rx_data_signal_start,same-rank task program order
+e40,same_rank_sequence,n41,n42,1,1,allgather,allgather,5,5,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e41,same_rank_sequence,n42,n43,1,1,allgather,allgather,5,6,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e42,same_rank_sequence,n43,n44,1,1,allgather,allgather,6,6,rx_ack_start,rx_data_signal_start,same-rank task program order
+e43,same_rank_sequence,n44,n45,1,1,allgather,allgather,6,6,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e44,same_rank_sequence,n46,n47,2,2,reduce_scatter,reduce_scatter,0,4,rx_payload_reduce_start,rx_payload_reduce_start,same-rank task program order
+e45,same_rank_sequence,n47,n48,2,2,reduce_scatter,allgather,4,0,rx_payload_reduce_start,rx_ack_start,same-rank task program order
+e46,same_rank_sequence,n48,n49,2,2,allgather,allgather,0,0,rx_ack_start,rx_data_signal_start,same-rank task program order
+e47,same_rank_sequence,n49,n50,2,2,allgather,allgather,0,0,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e48,same_rank_sequence,n50,n51,2,2,allgather,allgather,0,1,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e49,same_rank_sequence,n51,n52,2,2,allgather,allgather,1,1,rx_ack_start,rx_data_signal_start,same-rank task program order
+e50,same_rank_sequence,n52,n53,2,2,allgather,allgather,1,1,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e51,same_rank_sequence,n53,n54,2,2,allgather,allgather,1,2,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e52,same_rank_sequence,n54,n55,2,2,allgather,allgather,2,2,rx_ack_start,rx_data_signal_start,same-rank task program order
+e53,same_rank_sequence,n55,n56,2,2,allgather,allgather,2,2,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e54,same_rank_sequence,n56,n57,2,2,allgather,allgather,2,3,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e55,same_rank_sequence,n57,n58,2,2,allgather,allgather,3,3,rx_ack_start,rx_data_signal_start,same-rank task program order
+e56,same_rank_sequence,n58,n59,2,2,allgather,allgather,3,3,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e57,same_rank_sequence,n59,n60,2,2,allgather,allgather,3,4,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e58,same_rank_sequence,n60,n61,2,2,allgather,allgather,4,4,rx_ack_start,rx_data_signal_start,same-rank task program order
+e59,same_rank_sequence,n61,n62,2,2,allgather,allgather,4,4,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e60,same_rank_sequence,n62,n63,2,2,allgather,allgather,4,5,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e61,same_rank_sequence,n63,n64,2,2,allgather,allgather,5,5,rx_ack_start,rx_data_signal_start,same-rank task program order
+e62,same_rank_sequence,n64,n65,2,2,allgather,allgather,5,5,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e63,same_rank_sequence,n65,n66,2,2,allgather,allgather,5,6,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e64,same_rank_sequence,n66,n67,2,2,allgather,allgather,6,6,rx_ack_start,rx_data_signal_start,same-rank task program order
+e65,same_rank_sequence,n67,n68,2,2,allgather,allgather,6,6,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e66,same_rank_sequence,n69,n70,3,3,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_ack_start,same-rank task program order
+e67,same_rank_sequence,n70,n71,3,3,allgather,allgather,0,0,rx_ack_start,rx_data_signal_start,same-rank task program order
+e68,same_rank_sequence,n71,n72,3,3,allgather,allgather,0,0,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e69,same_rank_sequence,n72,n73,3,3,allgather,allgather,0,1,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e70,same_rank_sequence,n73,n74,3,3,allgather,allgather,1,1,rx_ack_start,rx_data_signal_start,same-rank task program order
+e71,same_rank_sequence,n74,n75,3,3,allgather,allgather,1,1,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e72,same_rank_sequence,n75,n76,3,3,allgather,allgather,1,2,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e73,same_rank_sequence,n76,n77,3,3,allgather,allgather,2,2,rx_ack_start,rx_data_signal_start,same-rank task program order
+e74,same_rank_sequence,n77,n78,3,3,allgather,allgather,2,2,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e75,same_rank_sequence,n78,n79,3,3,allgather,allgather,2,3,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e76,same_rank_sequence,n79,n80,3,3,allgather,allgather,3,3,rx_ack_start,rx_data_signal_start,same-rank task program order
+e77,same_rank_sequence,n80,n81,3,3,allgather,allgather,3,3,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e78,same_rank_sequence,n81,n82,3,3,allgather,allgather,3,4,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e79,same_rank_sequence,n82,n83,3,3,allgather,allgather,4,4,rx_ack_start,rx_data_signal_start,same-rank task program order
+e80,same_rank_sequence,n83,n84,3,3,allgather,allgather,4,4,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e81,same_rank_sequence,n84,n85,3,3,allgather,allgather,4,5,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e82,same_rank_sequence,n85,n86,3,3,allgather,allgather,5,5,rx_ack_start,rx_data_signal_start,same-rank task program order
+e83,same_rank_sequence,n86,n87,3,3,allgather,allgather,5,5,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e84,same_rank_sequence,n87,n88,3,3,allgather,allgather,5,6,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e85,same_rank_sequence,n88,n89,3,3,allgather,allgather,6,6,rx_ack_start,rx_data_signal_start,same-rank task program order
+e86,same_rank_sequence,n89,n90,3,3,allgather,allgather,6,6,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e87,same_rank_sequence,n91,n92,4,4,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_ack_start,same-rank task program order
+e88,same_rank_sequence,n92,n93,4,4,allgather,allgather,0,0,rx_ack_start,rx_data_signal_start,same-rank task program order
+e89,same_rank_sequence,n93,n94,4,4,allgather,allgather,0,0,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e90,same_rank_sequence,n94,n95,4,4,allgather,allgather,0,1,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e91,same_rank_sequence,n95,n96,4,4,allgather,allgather,1,1,rx_ack_start,rx_data_signal_start,same-rank task program order
+e92,same_rank_sequence,n96,n97,4,4,allgather,allgather,1,1,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e93,same_rank_sequence,n97,n98,4,4,allgather,allgather,1,2,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e94,same_rank_sequence,n98,n99,4,4,allgather,allgather,2,2,rx_ack_start,rx_data_signal_start,same-rank task program order
+e95,same_rank_sequence,n99,n100,4,4,allgather,allgather,2,2,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e96,same_rank_sequence,n100,n101,4,4,allgather,allgather,2,3,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e97,same_rank_sequence,n101,n102,4,4,allgather,allgather,3,3,rx_ack_start,rx_data_signal_start,same-rank task program order
+e98,same_rank_sequence,n102,n103,4,4,allgather,allgather,3,3,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e99,same_rank_sequence,n103,n104,4,4,allgather,allgather,3,4,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e100,same_rank_sequence,n104,n105,4,4,allgather,allgather,4,4,rx_ack_start,rx_data_signal_start,same-rank task program order
+e101,same_rank_sequence,n105,n106,4,4,allgather,allgather,4,4,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e102,same_rank_sequence,n106,n107,4,4,allgather,allgather,4,5,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e103,same_rank_sequence,n107,n108,4,4,allgather,allgather,5,5,rx_ack_start,rx_data_signal_start,same-rank task program order
+e104,same_rank_sequence,n108,n109,4,4,allgather,allgather,5,5,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e105,same_rank_sequence,n109,n110,4,4,allgather,allgather,5,6,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e106,same_rank_sequence,n110,n111,4,4,allgather,allgather,6,6,rx_ack_start,rx_data_signal_start,same-rank task program order
+e107,same_rank_sequence,n111,n112,4,4,allgather,allgather,6,6,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e108,same_rank_sequence,n113,n114,5,5,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_ack_start,same-rank task program order
+e109,same_rank_sequence,n114,n115,5,5,allgather,allgather,0,0,rx_ack_start,rx_data_signal_start,same-rank task program order
+e110,same_rank_sequence,n115,n116,5,5,allgather,allgather,0,0,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e111,same_rank_sequence,n116,n117,5,5,allgather,allgather,0,1,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e112,same_rank_sequence,n117,n118,5,5,allgather,allgather,1,1,rx_ack_start,rx_data_signal_start,same-rank task program order
+e113,same_rank_sequence,n118,n119,5,5,allgather,allgather,1,1,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e114,same_rank_sequence,n119,n120,5,5,allgather,allgather,1,2,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e115,same_rank_sequence,n120,n121,5,5,allgather,allgather,2,2,rx_ack_start,rx_data_signal_start,same-rank task program order
+e116,same_rank_sequence,n121,n122,5,5,allgather,allgather,2,2,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e117,same_rank_sequence,n122,n123,5,5,allgather,allgather,2,3,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e118,same_rank_sequence,n123,n124,5,5,allgather,allgather,3,3,rx_ack_start,rx_data_signal_start,same-rank task program order
+e119,same_rank_sequence,n124,n125,5,5,allgather,allgather,3,3,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e120,same_rank_sequence,n125,n126,5,5,allgather,allgather,3,4,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e121,same_rank_sequence,n126,n127,5,5,allgather,allgather,4,4,rx_ack_start,rx_data_signal_start,same-rank task program order
+e122,same_rank_sequence,n127,n128,5,5,allgather,allgather,4,4,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e123,same_rank_sequence,n128,n129,5,5,allgather,allgather,4,5,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e124,same_rank_sequence,n129,n130,5,5,allgather,allgather,5,5,rx_ack_start,rx_data_signal_start,same-rank task program order
+e125,same_rank_sequence,n130,n131,5,5,allgather,allgather,5,5,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e126,same_rank_sequence,n131,n132,5,5,allgather,allgather,5,6,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e127,same_rank_sequence,n132,n133,5,5,allgather,allgather,6,6,rx_ack_start,rx_data_signal_start,same-rank task program order
+e128,same_rank_sequence,n133,n134,5,5,allgather,allgather,6,6,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e129,same_rank_sequence,n135,n136,6,6,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_ack_start,same-rank task program order
+e130,same_rank_sequence,n136,n137,6,6,allgather,allgather,0,0,rx_ack_start,rx_data_signal_start,same-rank task program order
+e131,same_rank_sequence,n137,n138,6,6,allgather,allgather,0,0,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e132,same_rank_sequence,n138,n139,6,6,allgather,allgather,0,1,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e133,same_rank_sequence,n139,n140,6,6,allgather,allgather,1,1,rx_ack_start,rx_data_signal_start,same-rank task program order
+e134,same_rank_sequence,n140,n141,6,6,allgather,allgather,1,1,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e135,same_rank_sequence,n141,n142,6,6,allgather,allgather,1,2,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e136,same_rank_sequence,n142,n143,6,6,allgather,allgather,2,2,rx_ack_start,rx_data_signal_start,same-rank task program order
+e137,same_rank_sequence,n143,n144,6,6,allgather,allgather,2,2,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e138,same_rank_sequence,n144,n145,6,6,allgather,allgather,2,3,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e139,same_rank_sequence,n145,n146,6,6,allgather,allgather,3,3,rx_ack_start,rx_data_signal_start,same-rank task program order
+e140,same_rank_sequence,n146,n147,6,6,allgather,allgather,3,3,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e141,same_rank_sequence,n147,n148,6,6,allgather,allgather,3,4,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e142,same_rank_sequence,n148,n149,6,6,allgather,allgather,4,4,rx_ack_start,rx_data_signal_start,same-rank task program order
+e143,same_rank_sequence,n149,n150,6,6,allgather,allgather,4,4,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e144,same_rank_sequence,n150,n151,6,6,allgather,allgather,4,5,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e145,same_rank_sequence,n151,n152,6,6,allgather,allgather,5,5,rx_ack_start,rx_data_signal_start,same-rank task program order
+e146,same_rank_sequence,n152,n153,6,6,allgather,allgather,5,5,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e147,same_rank_sequence,n153,n154,6,6,allgather,allgather,5,6,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e148,same_rank_sequence,n154,n155,6,6,allgather,allgather,6,6,rx_ack_start,rx_data_signal_start,same-rank task program order
+e149,same_rank_sequence,n155,n156,6,6,allgather,allgather,6,6,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e150,same_rank_sequence,n157,n158,7,7,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_ack_start,same-rank task program order
+e151,same_rank_sequence,n158,n159,7,7,allgather,allgather,0,0,rx_ack_start,rx_data_signal_start,same-rank task program order
+e152,same_rank_sequence,n159,n160,7,7,allgather,allgather,0,0,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e153,same_rank_sequence,n160,n161,7,7,allgather,allgather,0,1,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e154,same_rank_sequence,n161,n162,7,7,allgather,allgather,1,1,rx_ack_start,rx_data_signal_start,same-rank task program order
+e155,same_rank_sequence,n162,n163,7,7,allgather,allgather,1,1,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e156,same_rank_sequence,n163,n164,7,7,allgather,allgather,1,2,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e157,same_rank_sequence,n164,n165,7,7,allgather,allgather,2,2,rx_ack_start,rx_data_signal_start,same-rank task program order
+e158,same_rank_sequence,n165,n166,7,7,allgather,allgather,2,2,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e159,same_rank_sequence,n166,n167,7,7,allgather,allgather,2,3,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e160,same_rank_sequence,n167,n168,7,7,allgather,allgather,3,3,rx_ack_start,rx_data_signal_start,same-rank task program order
+e161,same_rank_sequence,n168,n169,7,7,allgather,allgather,3,3,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e162,same_rank_sequence,n169,n170,7,7,allgather,allgather,3,4,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e163,same_rank_sequence,n170,n171,7,7,allgather,allgather,4,4,rx_ack_start,rx_data_signal_start,same-rank task program order
+e164,same_rank_sequence,n171,n172,7,7,allgather,allgather,4,4,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e165,same_rank_sequence,n172,n173,7,7,allgather,allgather,4,5,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e166,same_rank_sequence,n173,n174,7,7,allgather,allgather,5,5,rx_ack_start,rx_data_signal_start,same-rank task program order
+e167,same_rank_sequence,n174,n175,7,7,allgather,allgather,5,5,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e168,same_rank_sequence,n175,n176,7,7,allgather,allgather,5,6,rx_payload_copy_start,rx_ack_start,same-rank task program order
+e169,same_rank_sequence,n176,n177,7,7,allgather,allgather,6,6,rx_ack_start,rx_data_signal_start,same-rank task program order
+e170,same_rank_sequence,n177,n178,7,7,allgather,allgather,6,6,rx_data_signal_start,rx_payload_copy_start,same-rank task program order
+e171,same_rank_step,n3,n6,0,0,allgather,allgather,0,1,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e172,same_rank_step,n6,n9,0,0,allgather,allgather,1,2,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e173,same_rank_step,n9,n12,0,0,allgather,allgather,2,3,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e174,same_rank_step,n12,n15,0,0,allgather,allgather,3,4,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e175,same_rank_step,n15,n18,0,0,allgather,allgather,4,5,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e176,same_rank_step,n18,n21,0,0,allgather,allgather,5,6,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e177,same_rank_step,n22,n23,1,1,reduce_scatter,reduce_scatter,0,3,rx_payload_reduce_start,copy_start,same rank next step waits for previous step payload
+e178,same_rank_step,n23,n24,1,1,reduce_scatter,reduce_scatter,3,4,copy_start,rx_payload_reduce_start,same rank next step waits for previous step payload
+e179,same_rank_step,n27,n30,1,1,allgather,allgather,0,1,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e180,same_rank_step,n30,n33,1,1,allgather,allgather,1,2,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e181,same_rank_step,n33,n36,1,1,allgather,allgather,2,3,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e182,same_rank_step,n36,n39,1,1,allgather,allgather,3,4,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e183,same_rank_step,n39,n42,1,1,allgather,allgather,4,5,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e184,same_rank_step,n42,n45,1,1,allgather,allgather,5,6,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e185,same_rank_step,n46,n47,2,2,reduce_scatter,reduce_scatter,0,4,rx_payload_reduce_start,rx_payload_reduce_start,same rank next step waits for previous step payload
+e186,same_rank_step,n50,n53,2,2,allgather,allgather,0,1,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e187,same_rank_step,n53,n56,2,2,allgather,allgather,1,2,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e188,same_rank_step,n56,n59,2,2,allgather,allgather,2,3,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e189,same_rank_step,n59,n62,2,2,allgather,allgather,3,4,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e190,same_rank_step,n62,n65,2,2,allgather,allgather,4,5,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e191,same_rank_step,n65,n68,2,2,allgather,allgather,5,6,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e192,same_rank_step,n72,n75,3,3,allgather,allgather,0,1,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e193,same_rank_step,n75,n78,3,3,allgather,allgather,1,2,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e194,same_rank_step,n78,n81,3,3,allgather,allgather,2,3,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e195,same_rank_step,n81,n84,3,3,allgather,allgather,3,4,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e196,same_rank_step,n84,n87,3,3,allgather,allgather,4,5,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e197,same_rank_step,n87,n90,3,3,allgather,allgather,5,6,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e198,same_rank_step,n94,n97,4,4,allgather,allgather,0,1,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e199,same_rank_step,n97,n100,4,4,allgather,allgather,1,2,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e200,same_rank_step,n100,n103,4,4,allgather,allgather,2,3,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e201,same_rank_step,n103,n106,4,4,allgather,allgather,3,4,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e202,same_rank_step,n106,n109,4,4,allgather,allgather,4,5,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e203,same_rank_step,n109,n112,4,4,allgather,allgather,5,6,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e204,same_rank_step,n116,n119,5,5,allgather,allgather,0,1,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e205,same_rank_step,n119,n122,5,5,allgather,allgather,1,2,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e206,same_rank_step,n122,n125,5,5,allgather,allgather,2,3,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e207,same_rank_step,n125,n128,5,5,allgather,allgather,3,4,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e208,same_rank_step,n128,n131,5,5,allgather,allgather,4,5,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e209,same_rank_step,n131,n134,5,5,allgather,allgather,5,6,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e210,same_rank_step,n138,n141,6,6,allgather,allgather,0,1,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e211,same_rank_step,n141,n144,6,6,allgather,allgather,1,2,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e212,same_rank_step,n144,n147,6,6,allgather,allgather,2,3,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e213,same_rank_step,n147,n150,6,6,allgather,allgather,3,4,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e214,same_rank_step,n150,n153,6,6,allgather,allgather,4,5,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e215,same_rank_step,n153,n156,6,6,allgather,allgather,5,6,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e216,same_rank_step,n160,n163,7,7,allgather,allgather,0,1,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e217,same_rank_step,n163,n166,7,7,allgather,allgather,1,2,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e218,same_rank_step,n166,n169,7,7,allgather,allgather,2,3,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e219,same_rank_step,n169,n172,7,7,allgather,allgather,3,4,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e220,same_rank_step,n172,n175,7,7,allgather,allgather,4,5,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e221,same_rank_step,n175,n178,7,7,allgather,allgather,5,6,rx_payload_copy_start,rx_payload_copy_start,same rank next step waits for previous step payload
+e222,upstream_prev_step,n157,n3,7,0,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e223,upstream_prev_step,n160,n6,7,0,allgather,allgather,0,1,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e224,upstream_prev_step,n163,n9,7,0,allgather,allgather,1,2,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e225,upstream_prev_step,n166,n12,7,0,allgather,allgather,2,3,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e226,upstream_prev_step,n169,n15,7,0,allgather,allgather,3,4,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e227,upstream_prev_step,n172,n18,7,0,allgather,allgather,4,5,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e228,upstream_prev_step,n175,n21,7,0,allgather,allgather,5,6,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e229,upstream_prev_step,n0,n27,0,1,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e230,upstream_prev_step,n3,n30,0,1,allgather,allgather,0,1,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e231,upstream_prev_step,n6,n33,0,1,allgather,allgather,1,2,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e232,upstream_prev_step,n9,n36,0,1,allgather,allgather,2,3,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e233,upstream_prev_step,n12,n39,0,1,allgather,allgather,3,4,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e234,upstream_prev_step,n15,n42,0,1,allgather,allgather,4,5,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e235,upstream_prev_step,n18,n45,0,1,allgather,allgather,5,6,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e236,upstream_prev_step,n23,n47,1,2,reduce_scatter,reduce_scatter,3,4,copy_start,rx_payload_reduce_start,single-ring previous upstream previous payload
+e237,upstream_prev_step,n24,n50,1,2,reduce_scatter,allgather,4,0,rx_payload_reduce_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e238,upstream_prev_step,n27,n53,1,2,allgather,allgather,0,1,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e239,upstream_prev_step,n30,n56,1,2,allgather,allgather,1,2,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e240,upstream_prev_step,n33,n59,1,2,allgather,allgather,2,3,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e241,upstream_prev_step,n36,n62,1,2,allgather,allgather,3,4,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e242,upstream_prev_step,n39,n65,1,2,allgather,allgather,4,5,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e243,upstream_prev_step,n42,n68,1,2,allgather,allgather,5,6,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e244,upstream_prev_step,n47,n72,2,3,reduce_scatter,allgather,4,0,rx_payload_reduce_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e245,upstream_prev_step,n50,n75,2,3,allgather,allgather,0,1,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e246,upstream_prev_step,n53,n78,2,3,allgather,allgather,1,2,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e247,upstream_prev_step,n56,n81,2,3,allgather,allgather,2,3,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e248,upstream_prev_step,n59,n84,2,3,allgather,allgather,3,4,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e249,upstream_prev_step,n62,n87,2,3,allgather,allgather,4,5,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e250,upstream_prev_step,n65,n90,2,3,allgather,allgather,5,6,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e251,upstream_prev_step,n69,n94,3,4,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e252,upstream_prev_step,n72,n97,3,4,allgather,allgather,0,1,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e253,upstream_prev_step,n75,n100,3,4,allgather,allgather,1,2,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e254,upstream_prev_step,n78,n103,3,4,allgather,allgather,2,3,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e255,upstream_prev_step,n81,n106,3,4,allgather,allgather,3,4,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e256,upstream_prev_step,n84,n109,3,4,allgather,allgather,4,5,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e257,upstream_prev_step,n87,n112,3,4,allgather,allgather,5,6,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e258,upstream_prev_step,n91,n116,4,5,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e259,upstream_prev_step,n94,n119,4,5,allgather,allgather,0,1,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e260,upstream_prev_step,n97,n122,4,5,allgather,allgather,1,2,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e261,upstream_prev_step,n100,n125,4,5,allgather,allgather,2,3,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e262,upstream_prev_step,n103,n128,4,5,allgather,allgather,3,4,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e263,upstream_prev_step,n106,n131,4,5,allgather,allgather,4,5,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e264,upstream_prev_step,n109,n134,4,5,allgather,allgather,5,6,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e265,upstream_prev_step,n113,n138,5,6,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e266,upstream_prev_step,n116,n141,5,6,allgather,allgather,0,1,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e267,upstream_prev_step,n119,n144,5,6,allgather,allgather,1,2,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e268,upstream_prev_step,n122,n147,5,6,allgather,allgather,2,3,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e269,upstream_prev_step,n125,n150,5,6,allgather,allgather,3,4,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e270,upstream_prev_step,n128,n153,5,6,allgather,allgather,4,5,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e271,upstream_prev_step,n131,n156,5,6,allgather,allgather,5,6,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e272,upstream_prev_step,n135,n160,6,7,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e273,upstream_prev_step,n138,n163,6,7,allgather,allgather,0,1,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e274,upstream_prev_step,n141,n166,6,7,allgather,allgather,1,2,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e275,upstream_prev_step,n144,n169,6,7,allgather,allgather,2,3,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e276,upstream_prev_step,n147,n172,6,7,allgather,allgather,3,4,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e277,upstream_prev_step,n150,n175,6,7,allgather,allgather,4,5,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e278,upstream_prev_step,n153,n178,6,7,allgather,allgather,5,6,rx_payload_copy_start,rx_payload_copy_start,single-ring previous upstream previous payload
+e279,phase_bridge,n0,n3,0,0,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_payload_copy_start,allgather step 0 starts after reduce_scatter final step
+e280,phase_bridge,n24,n27,1,1,reduce_scatter,allgather,4,0,rx_payload_reduce_start,rx_payload_copy_start,allgather step 0 starts after reduce_scatter final step
+e281,phase_bridge,n47,n50,2,2,reduce_scatter,allgather,4,0,rx_payload_reduce_start,rx_payload_copy_start,allgather step 0 starts after reduce_scatter final step
+e282,phase_bridge,n69,n72,3,3,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_payload_copy_start,allgather step 0 starts after reduce_scatter final step
+e283,phase_bridge,n91,n94,4,4,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_payload_copy_start,allgather step 0 starts after reduce_scatter final step
+e284,phase_bridge,n113,n116,5,5,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_payload_copy_start,allgather step 0 starts after reduce_scatter final step
+e285,phase_bridge,n135,n138,6,6,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_payload_copy_start,allgather step 0 starts after reduce_scatter final step
+e286,phase_bridge,n157,n160,7,7,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_payload_copy_start,allgather step 0 starts after reduce_scatter final step
+e287,signal_payload,n1,n2,0,0,allgather,allgather,0,0,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e288,signal_payload,n2,n3,0,0,allgather,allgather,0,0,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e289,right_neighbor_ack_dep,n24,n1,1,0,reduce_scatter,allgather,4,0,rx_payload_reduce_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e290,upstream_data_signal_dep,n157,n2,7,0,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e291,signal_payload,n4,n5,0,0,allgather,allgather,1,1,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e292,signal_payload,n5,n6,0,0,allgather,allgather,1,1,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e293,right_neighbor_ack_dep,n27,n4,1,0,allgather,allgather,0,1,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e294,upstream_data_signal_dep,n160,n5,7,0,allgather,allgather,0,1,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e295,signal_payload,n7,n8,0,0,allgather,allgather,2,2,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e296,signal_payload,n8,n9,0,0,allgather,allgather,2,2,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e297,right_neighbor_ack_dep,n30,n7,1,0,allgather,allgather,1,2,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e298,upstream_data_signal_dep,n163,n8,7,0,allgather,allgather,1,2,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e299,signal_payload,n10,n11,0,0,allgather,allgather,3,3,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e300,signal_payload,n11,n12,0,0,allgather,allgather,3,3,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e301,right_neighbor_ack_dep,n33,n10,1,0,allgather,allgather,2,3,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e302,upstream_data_signal_dep,n166,n11,7,0,allgather,allgather,2,3,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e303,signal_payload,n13,n14,0,0,allgather,allgather,4,4,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e304,signal_payload,n14,n15,0,0,allgather,allgather,4,4,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e305,right_neighbor_ack_dep,n36,n13,1,0,allgather,allgather,3,4,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e306,upstream_data_signal_dep,n169,n14,7,0,allgather,allgather,3,4,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e307,signal_payload,n16,n17,0,0,allgather,allgather,5,5,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e308,signal_payload,n17,n18,0,0,allgather,allgather,5,5,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e309,right_neighbor_ack_dep,n39,n16,1,0,allgather,allgather,4,5,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e310,upstream_data_signal_dep,n172,n17,7,0,allgather,allgather,4,5,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e311,signal_payload,n19,n20,0,0,allgather,allgather,6,6,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e312,signal_payload,n20,n21,0,0,allgather,allgather,6,6,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e313,right_neighbor_ack_dep,n42,n19,1,0,allgather,allgather,5,6,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e314,upstream_data_signal_dep,n175,n20,7,0,allgather,allgather,5,6,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e315,signal_payload,n25,n26,1,1,allgather,allgather,0,0,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e316,signal_payload,n26,n27,1,1,allgather,allgather,0,0,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e317,right_neighbor_ack_dep,n47,n25,2,1,reduce_scatter,allgather,4,0,rx_payload_reduce_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e318,upstream_data_signal_dep,n0,n26,0,1,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e319,signal_payload,n28,n29,1,1,allgather,allgather,1,1,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e320,signal_payload,n29,n30,1,1,allgather,allgather,1,1,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e321,right_neighbor_ack_dep,n50,n28,2,1,allgather,allgather,0,1,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e322,upstream_data_signal_dep,n3,n29,0,1,allgather,allgather,0,1,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e323,signal_payload,n31,n32,1,1,allgather,allgather,2,2,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e324,signal_payload,n32,n33,1,1,allgather,allgather,2,2,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e325,right_neighbor_ack_dep,n53,n31,2,1,allgather,allgather,1,2,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e326,upstream_data_signal_dep,n6,n32,0,1,allgather,allgather,1,2,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e327,signal_payload,n34,n35,1,1,allgather,allgather,3,3,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e328,signal_payload,n35,n36,1,1,allgather,allgather,3,3,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e329,right_neighbor_ack_dep,n56,n34,2,1,allgather,allgather,2,3,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e330,upstream_data_signal_dep,n9,n35,0,1,allgather,allgather,2,3,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e331,signal_payload,n37,n38,1,1,allgather,allgather,4,4,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e332,signal_payload,n38,n39,1,1,allgather,allgather,4,4,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e333,right_neighbor_ack_dep,n59,n37,2,1,allgather,allgather,3,4,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e334,upstream_data_signal_dep,n12,n38,0,1,allgather,allgather,3,4,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e335,signal_payload,n40,n41,1,1,allgather,allgather,5,5,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e336,signal_payload,n41,n42,1,1,allgather,allgather,5,5,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e337,right_neighbor_ack_dep,n62,n40,2,1,allgather,allgather,4,5,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e338,upstream_data_signal_dep,n15,n41,0,1,allgather,allgather,4,5,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e339,signal_payload,n43,n44,1,1,allgather,allgather,6,6,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e340,signal_payload,n44,n45,1,1,allgather,allgather,6,6,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e341,right_neighbor_ack_dep,n65,n43,2,1,allgather,allgather,5,6,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e342,upstream_data_signal_dep,n18,n44,0,1,allgather,allgather,5,6,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e343,signal_payload,n48,n49,2,2,allgather,allgather,0,0,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e344,signal_payload,n49,n50,2,2,allgather,allgather,0,0,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e345,right_neighbor_ack_dep,n69,n48,3,2,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e346,upstream_data_signal_dep,n24,n49,1,2,reduce_scatter,allgather,4,0,rx_payload_reduce_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e347,signal_payload,n51,n52,2,2,allgather,allgather,1,1,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e348,signal_payload,n52,n53,2,2,allgather,allgather,1,1,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e349,right_neighbor_ack_dep,n72,n51,3,2,allgather,allgather,0,1,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e350,upstream_data_signal_dep,n27,n52,1,2,allgather,allgather,0,1,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e351,signal_payload,n54,n55,2,2,allgather,allgather,2,2,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e352,signal_payload,n55,n56,2,2,allgather,allgather,2,2,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e353,right_neighbor_ack_dep,n75,n54,3,2,allgather,allgather,1,2,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e354,upstream_data_signal_dep,n30,n55,1,2,allgather,allgather,1,2,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e355,signal_payload,n57,n58,2,2,allgather,allgather,3,3,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e356,signal_payload,n58,n59,2,2,allgather,allgather,3,3,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e357,right_neighbor_ack_dep,n78,n57,3,2,allgather,allgather,2,3,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e358,upstream_data_signal_dep,n33,n58,1,2,allgather,allgather,2,3,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e359,signal_payload,n60,n61,2,2,allgather,allgather,4,4,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e360,signal_payload,n61,n62,2,2,allgather,allgather,4,4,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e361,right_neighbor_ack_dep,n81,n60,3,2,allgather,allgather,3,4,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e362,upstream_data_signal_dep,n36,n61,1,2,allgather,allgather,3,4,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e363,signal_payload,n63,n64,2,2,allgather,allgather,5,5,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e364,signal_payload,n64,n65,2,2,allgather,allgather,5,5,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e365,right_neighbor_ack_dep,n84,n63,3,2,allgather,allgather,4,5,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e366,upstream_data_signal_dep,n39,n64,1,2,allgather,allgather,4,5,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e367,signal_payload,n66,n67,2,2,allgather,allgather,6,6,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e368,signal_payload,n67,n68,2,2,allgather,allgather,6,6,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e369,right_neighbor_ack_dep,n87,n66,3,2,allgather,allgather,5,6,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e370,upstream_data_signal_dep,n42,n67,1,2,allgather,allgather,5,6,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e371,signal_payload,n70,n71,3,3,allgather,allgather,0,0,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e372,signal_payload,n71,n72,3,3,allgather,allgather,0,0,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e373,right_neighbor_ack_dep,n91,n70,4,3,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e374,upstream_data_signal_dep,n47,n71,2,3,reduce_scatter,allgather,4,0,rx_payload_reduce_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e375,signal_payload,n73,n74,3,3,allgather,allgather,1,1,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e376,signal_payload,n74,n75,3,3,allgather,allgather,1,1,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e377,right_neighbor_ack_dep,n94,n73,4,3,allgather,allgather,0,1,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e378,upstream_data_signal_dep,n50,n74,2,3,allgather,allgather,0,1,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e379,signal_payload,n76,n77,3,3,allgather,allgather,2,2,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e380,signal_payload,n77,n78,3,3,allgather,allgather,2,2,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e381,right_neighbor_ack_dep,n97,n76,4,3,allgather,allgather,1,2,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e382,upstream_data_signal_dep,n53,n77,2,3,allgather,allgather,1,2,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e383,signal_payload,n79,n80,3,3,allgather,allgather,3,3,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e384,signal_payload,n80,n81,3,3,allgather,allgather,3,3,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e385,right_neighbor_ack_dep,n100,n79,4,3,allgather,allgather,2,3,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e386,upstream_data_signal_dep,n56,n80,2,3,allgather,allgather,2,3,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e387,signal_payload,n82,n83,3,3,allgather,allgather,4,4,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e388,signal_payload,n83,n84,3,3,allgather,allgather,4,4,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e389,right_neighbor_ack_dep,n103,n82,4,3,allgather,allgather,3,4,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e390,upstream_data_signal_dep,n59,n83,2,3,allgather,allgather,3,4,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e391,signal_payload,n85,n86,3,3,allgather,allgather,5,5,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e392,signal_payload,n86,n87,3,3,allgather,allgather,5,5,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e393,right_neighbor_ack_dep,n106,n85,4,3,allgather,allgather,4,5,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e394,upstream_data_signal_dep,n62,n86,2,3,allgather,allgather,4,5,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e395,signal_payload,n88,n89,3,3,allgather,allgather,6,6,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e396,signal_payload,n89,n90,3,3,allgather,allgather,6,6,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e397,right_neighbor_ack_dep,n109,n88,4,3,allgather,allgather,5,6,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e398,upstream_data_signal_dep,n65,n89,2,3,allgather,allgather,5,6,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e399,signal_payload,n92,n93,4,4,allgather,allgather,0,0,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e400,signal_payload,n93,n94,4,4,allgather,allgather,0,0,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e401,right_neighbor_ack_dep,n113,n92,5,4,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e402,upstream_data_signal_dep,n69,n93,3,4,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e403,signal_payload,n95,n96,4,4,allgather,allgather,1,1,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e404,signal_payload,n96,n97,4,4,allgather,allgather,1,1,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e405,right_neighbor_ack_dep,n116,n95,5,4,allgather,allgather,0,1,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e406,upstream_data_signal_dep,n72,n96,3,4,allgather,allgather,0,1,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e407,signal_payload,n98,n99,4,4,allgather,allgather,2,2,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e408,signal_payload,n99,n100,4,4,allgather,allgather,2,2,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e409,right_neighbor_ack_dep,n119,n98,5,4,allgather,allgather,1,2,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e410,upstream_data_signal_dep,n75,n99,3,4,allgather,allgather,1,2,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e411,signal_payload,n101,n102,4,4,allgather,allgather,3,3,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e412,signal_payload,n102,n103,4,4,allgather,allgather,3,3,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e413,right_neighbor_ack_dep,n122,n101,5,4,allgather,allgather,2,3,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e414,upstream_data_signal_dep,n78,n102,3,4,allgather,allgather,2,3,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e415,signal_payload,n104,n105,4,4,allgather,allgather,4,4,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e416,signal_payload,n105,n106,4,4,allgather,allgather,4,4,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e417,right_neighbor_ack_dep,n125,n104,5,4,allgather,allgather,3,4,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e418,upstream_data_signal_dep,n81,n105,3,4,allgather,allgather,3,4,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e419,signal_payload,n107,n108,4,4,allgather,allgather,5,5,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e420,signal_payload,n108,n109,4,4,allgather,allgather,5,5,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e421,right_neighbor_ack_dep,n128,n107,5,4,allgather,allgather,4,5,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e422,upstream_data_signal_dep,n84,n108,3,4,allgather,allgather,4,5,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e423,signal_payload,n110,n111,4,4,allgather,allgather,6,6,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e424,signal_payload,n111,n112,4,4,allgather,allgather,6,6,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e425,right_neighbor_ack_dep,n131,n110,5,4,allgather,allgather,5,6,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e426,upstream_data_signal_dep,n87,n111,3,4,allgather,allgather,5,6,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e427,signal_payload,n114,n115,5,5,allgather,allgather,0,0,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e428,signal_payload,n115,n116,5,5,allgather,allgather,0,0,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e429,right_neighbor_ack_dep,n135,n114,6,5,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e430,upstream_data_signal_dep,n91,n115,4,5,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e431,signal_payload,n117,n118,5,5,allgather,allgather,1,1,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e432,signal_payload,n118,n119,5,5,allgather,allgather,1,1,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e433,right_neighbor_ack_dep,n138,n117,6,5,allgather,allgather,0,1,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e434,upstream_data_signal_dep,n94,n118,4,5,allgather,allgather,0,1,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e435,signal_payload,n120,n121,5,5,allgather,allgather,2,2,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e436,signal_payload,n121,n122,5,5,allgather,allgather,2,2,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e437,right_neighbor_ack_dep,n141,n120,6,5,allgather,allgather,1,2,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e438,upstream_data_signal_dep,n97,n121,4,5,allgather,allgather,1,2,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e439,signal_payload,n123,n124,5,5,allgather,allgather,3,3,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e440,signal_payload,n124,n125,5,5,allgather,allgather,3,3,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e441,right_neighbor_ack_dep,n144,n123,6,5,allgather,allgather,2,3,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e442,upstream_data_signal_dep,n100,n124,4,5,allgather,allgather,2,3,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e443,signal_payload,n126,n127,5,5,allgather,allgather,4,4,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e444,signal_payload,n127,n128,5,5,allgather,allgather,4,4,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e445,right_neighbor_ack_dep,n147,n126,6,5,allgather,allgather,3,4,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e446,upstream_data_signal_dep,n103,n127,4,5,allgather,allgather,3,4,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e447,signal_payload,n129,n130,5,5,allgather,allgather,5,5,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e448,signal_payload,n130,n131,5,5,allgather,allgather,5,5,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e449,right_neighbor_ack_dep,n150,n129,6,5,allgather,allgather,4,5,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e450,upstream_data_signal_dep,n106,n130,4,5,allgather,allgather,4,5,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e451,signal_payload,n132,n133,5,5,allgather,allgather,6,6,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e452,signal_payload,n133,n134,5,5,allgather,allgather,6,6,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e453,right_neighbor_ack_dep,n153,n132,6,5,allgather,allgather,5,6,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e454,upstream_data_signal_dep,n109,n133,4,5,allgather,allgather,5,6,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e455,signal_payload,n136,n137,6,6,allgather,allgather,0,0,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e456,signal_payload,n137,n138,6,6,allgather,allgather,0,0,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e457,right_neighbor_ack_dep,n157,n136,7,6,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e458,upstream_data_signal_dep,n113,n137,5,6,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e459,signal_payload,n139,n140,6,6,allgather,allgather,1,1,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e460,signal_payload,n140,n141,6,6,allgather,allgather,1,1,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e461,right_neighbor_ack_dep,n160,n139,7,6,allgather,allgather,0,1,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e462,upstream_data_signal_dep,n116,n140,5,6,allgather,allgather,0,1,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e463,signal_payload,n142,n143,6,6,allgather,allgather,2,2,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e464,signal_payload,n143,n144,6,6,allgather,allgather,2,2,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e465,right_neighbor_ack_dep,n163,n142,7,6,allgather,allgather,1,2,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e466,upstream_data_signal_dep,n119,n143,5,6,allgather,allgather,1,2,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e467,signal_payload,n145,n146,6,6,allgather,allgather,3,3,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e468,signal_payload,n146,n147,6,6,allgather,allgather,3,3,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e469,right_neighbor_ack_dep,n166,n145,7,6,allgather,allgather,2,3,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e470,upstream_data_signal_dep,n122,n146,5,6,allgather,allgather,2,3,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e471,signal_payload,n148,n149,6,6,allgather,allgather,4,4,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e472,signal_payload,n149,n150,6,6,allgather,allgather,4,4,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e473,right_neighbor_ack_dep,n169,n148,7,6,allgather,allgather,3,4,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e474,upstream_data_signal_dep,n125,n149,5,6,allgather,allgather,3,4,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e475,signal_payload,n151,n152,6,6,allgather,allgather,5,5,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e476,signal_payload,n152,n153,6,6,allgather,allgather,5,5,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e477,right_neighbor_ack_dep,n172,n151,7,6,allgather,allgather,4,5,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e478,upstream_data_signal_dep,n128,n152,5,6,allgather,allgather,4,5,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e479,signal_payload,n154,n155,6,6,allgather,allgather,6,6,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e480,signal_payload,n155,n156,6,6,allgather,allgather,6,6,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e481,right_neighbor_ack_dep,n175,n154,7,6,allgather,allgather,5,6,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e482,upstream_data_signal_dep,n131,n155,5,6,allgather,allgather,5,6,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e483,signal_payload,n158,n159,7,7,allgather,allgather,0,0,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e484,signal_payload,n159,n160,7,7,allgather,allgather,0,0,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e485,right_neighbor_ack_dep,n0,n158,0,7,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e486,upstream_data_signal_dep,n135,n159,6,7,reduce_scatter,allgather,0,0,rx_payload_reduce_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e487,signal_payload,n161,n162,7,7,allgather,allgather,1,1,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e488,signal_payload,n162,n163,7,7,allgather,allgather,1,1,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e489,right_neighbor_ack_dep,n3,n161,0,7,allgather,allgather,0,1,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e490,upstream_data_signal_dep,n138,n162,6,7,allgather,allgather,0,1,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e491,signal_payload,n164,n165,7,7,allgather,allgather,2,2,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e492,signal_payload,n165,n166,7,7,allgather,allgather,2,2,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e493,right_neighbor_ack_dep,n6,n164,0,7,allgather,allgather,1,2,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e494,upstream_data_signal_dep,n141,n165,6,7,allgather,allgather,1,2,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e495,signal_payload,n167,n168,7,7,allgather,allgather,3,3,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e496,signal_payload,n168,n169,7,7,allgather,allgather,3,3,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e497,right_neighbor_ack_dep,n9,n167,0,7,allgather,allgather,2,3,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e498,upstream_data_signal_dep,n144,n168,6,7,allgather,allgather,2,3,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e499,signal_payload,n170,n171,7,7,allgather,allgather,4,4,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e500,signal_payload,n171,n172,7,7,allgather,allgather,4,4,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e501,right_neighbor_ack_dep,n12,n170,0,7,allgather,allgather,3,4,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e502,upstream_data_signal_dep,n147,n171,6,7,allgather,allgather,3,4,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e503,signal_payload,n173,n174,7,7,allgather,allgather,5,5,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e504,signal_payload,n174,n175,7,7,allgather,allgather,5,5,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e505,right_neighbor_ack_dep,n15,n173,0,7,allgather,allgather,4,5,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e506,upstream_data_signal_dep,n150,n174,6,7,allgather,allgather,4,5,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion
+e507,signal_payload,n176,n177,7,7,allgather,allgather,6,6,rx_ack_start,rx_data_signal_start,ack wait completes before data-signal wait
+e508,signal_payload,n177,n178,7,7,allgather,allgather,6,6,rx_data_signal_start,rx_payload_copy_start,data-signal wait releases payload task
+e509,right_neighbor_ack_dep,n18,n176,0,7,allgather,allgather,5,6,rx_payload_copy_start,rx_ack_start,RxAck wait depends on right-neighbor previous payload completion
+e510,upstream_data_signal_dep,n153,n177,6,7,allgather,allgather,5,6,rx_payload_copy_start,rx_data_signal_start,data-signal wait depends on upstream producer previous payload completion

@@ -8,6 +8,7 @@ import csv
 import os
 import sys
 from collections import Counter, defaultdict
+from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
 if __package__ in (None, ""):
@@ -52,13 +53,23 @@ def merge_records(
     stats["semantic_total"] = len(semantic_list)
     stats["profiler_total"] = len(profiler_list)
 
-    semantic_counts = Counter(record.merge_key for record in semantic_list)
+    semantic_counts = Counter(_semantic_dedupe_key(record) for record in semantic_list)
     profiler_counts = Counter(record.merge_key for record in profiler_list)
     profiler_by_key = defaultdict(list)
     profiler_by_device_task_key = defaultdict(list)
+    profiler_by_sequence_key = {}
+    profiler_by_device_stream_sequence_key = defaultdict(list)
+    profiler_by_stream = defaultdict(list)
     for task in profiler_list:
         profiler_by_key[task.merge_key].append(task)
         profiler_by_device_task_key[(task.device_id, task.stream_id, task.task_id)].append(task)
+        profiler_by_stream[(task.node_id, task.device_id, task.stream_id)].append(task)
+    for stream_key, stream_tasks in profiler_by_stream.items():
+        stream_tasks.sort(key=_profiler_sequence_sort_key)
+        for sequence, task in enumerate(stream_tasks):
+            profiler_by_sequence_key[stream_key + (sequence,)] = task
+            _node_id, device_id, stream_id = stream_key
+            profiler_by_device_stream_sequence_key[(device_id, stream_id, sequence)].append(task)
 
     rows = []
     matched_profiler_keys = set()
@@ -67,7 +78,22 @@ def merge_records(
         if semantic.device_id < 0:
             stats["semantic_missing_device_id"] += 1
 
-        matches = profiler_by_key.get(semantic.merge_key, [])
+        matches = []
+        if semantic.semantic_seq >= 0 and semantic.device_id >= 0:
+            sequence_key = (semantic.node_id, semantic.device_id, semantic.stream_id, semantic.semantic_seq)
+            matched_by_sequence = profiler_by_sequence_key.get(sequence_key)
+            if not matched_by_sequence and not semantic.node_id:
+                fallback_matches = profiler_by_device_stream_sequence_key.get(
+                    (semantic.device_id, semantic.stream_id, semantic.semantic_seq), [])
+                if len(fallback_matches) == 1:
+                    matched_by_sequence = fallback_matches[0]
+                    stats["semantic_seq_node_id_fallback_matches"] += 1
+            if matched_by_sequence:
+                matches = [matched_by_sequence]
+                stats["semantic_seq_matches"] += 1
+
+        if not matches:
+            matches = profiler_by_key.get(semantic.merge_key, [])
         if not matches and not semantic.node_id and semantic.device_id >= 0:
             matches = _unique_device_task_match(profiler_by_device_task_key, semantic.device_id, semantic)
             if matches:
@@ -78,7 +104,7 @@ def merge_records(
             if matches:
                 stats["rank_device_fallback_matches"] += 1
 
-        duplicate_semantic = semantic_counts[semantic.merge_key] > 1
+        duplicate_semantic = semantic_counts[_semantic_dedupe_key(semantic)] > 1
         matched_profiler = matches[0] if matches else None
         profiler_key = matched_profiler.merge_key if matched_profiler else semantic.merge_key
         duplicate_profiler = profiler_counts[profiler_key] > 1
@@ -100,11 +126,48 @@ def merge_records(
     return rows, stats
 
 
+
+def _profiler_sequence_sort_key(task: ProfilerTask):
+    return (to_float_for_sort(task.task_start), to_float_for_sort(task.task_stop), task.task_id)
+
+
+def to_float_for_sort(value: object) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+def parse_task_time_inputs(task_time: str = "", task_time_dir: str = "", node_id: str = "") -> List[ProfilerTask]:
+    tasks: List[ProfilerTask] = []
+    if task_time:
+        tasks.extend(parse_task_time_file(task_time, node_id))
+    if task_time_dir:
+        for path in sorted(Path(task_time_dir).rglob("task_time*.csv")):
+            tasks.extend(parse_task_time_file(str(path), node_id))
+    return tasks
+
+
+def parse_plog_inputs(plog: str = "", plog_dir: str = "") -> List[SemanticRecord]:
+    records: List[SemanticRecord] = []
+    if plog:
+        records.extend(parse_plog_file(plog))
+    if plog_dir:
+        for path in sorted(Path(plog_dir).rglob("plog*.log")):
+            records.extend(parse_plog_file(str(path)))
+    return records
+
+
+
+def _semantic_dedupe_key(record: SemanticRecord):
+    if record.semantic_seq >= 0 and record.device_id >= 0 and record.stream_id >= 0:
+        return (record.node_id, record.device_id, record.stream_id, "semantic_seq", record.semantic_seq)
+    return record.merge_key
+
 def _dedupe_semantics(semantics: List[SemanticRecord]) -> Tuple[List[SemanticRecord], Counter]:
     stats = Counter()
     by_key = defaultdict(list)
     for index, record in enumerate(semantics):
-        by_key[record.merge_key].append((index, record))
+        by_key[_semantic_dedupe_key(record)].append((index, record))
 
     deduped: List[SemanticRecord] = []
     for _key, items in by_key.items():
@@ -169,8 +232,10 @@ def _merged_row(status: str, semantic: SemanticRecord, profiler: ProfilerTask, d
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Merge HCCL semantic plog and msprof task_time.csv.")
-    parser.add_argument("--plog", required=True)
-    parser.add_argument("--task-time", required=True)
+    parser.add_argument("--plog", default="")
+    parser.add_argument("--plog-dir", default="", help="Directory containing one or more plog*.log files.")
+    parser.add_argument("--task-time", default="")
+    parser.add_argument("--task-time-dir", default="", help="Directory containing one or more msprof task_time*.csv files.")
     parser.add_argument("-o", "--output", required=True)
     parser.add_argument("--node-id", default="")
     parser.add_argument("--summary", default="")
@@ -185,10 +250,14 @@ def main() -> int:
         help="Keep raw duplicate semantic merge keys instead of selecting one best semantic row per task.",
     )
     args = parser.parse_args()
+    if not args.plog and not args.plog_dir:
+        parser.error("one of --plog or --plog-dir is required")
+    if not args.task_time and not args.task_time_dir:
+        parser.error("one of --task-time or --task-time-dir is required")
 
     rows, stats = merge_records(
-        parse_plog_file(args.plog),
-        parse_task_time_file(args.task_time, args.node_id),
+        parse_plog_inputs(args.plog, args.plog_dir),
+        parse_task_time_inputs(args.task_time, args.task_time_dir, args.node_id),
         rank_as_device_fallback=args.rank_as_device_fallback,
         dedupe_semantic_keys=not args.keep_duplicate_semantic_keys,
     )

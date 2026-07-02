@@ -9,7 +9,7 @@ asks for edits there.
 Relevant paths:
 
 - `hccl/`: open HCCL operator repository and current diagnosis tools.
-- `../hcomm/`: matching HCOMM source; mature collective algorithms and the C++
+- `hcomm/`: matching HCOMM source; mature collective algorithms and the C++
   semantic trace producer live here.
 - `../cann-hccl/`: older prototype/reference for step-trace diagnosis and SVG
   visualizations.
@@ -17,7 +17,7 @@ Relevant paths:
 - `test records 0630/` in the workspace: test plan, progress, and command records.
 
 When a task crosses repositories, state which repository owns each change. Do
-not modify `../hcomm` or `../cann-hccl` without an explicit user request.
+not modify `../cann-hccl` without an explicit user request.
 
 ## Diagnosis Tooling Context
 

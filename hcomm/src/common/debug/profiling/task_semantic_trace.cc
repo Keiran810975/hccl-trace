@@ -10,14 +10,19 @@
 
 #include "task_semantic_trace.h"
 
+#include <array>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
+#include <new>
 
 namespace hccl {
 namespace {
 constexpr u32 TASK_SEMANTIC_SCHEMA_VERSION = 1;
 constexpr u32 TASK_SEMANTIC_PROBE_LOG_LIMIT = 32;
+constexpr u32 TASK_SEMANTIC_MAX_DEVICE_NUM = 64;
+constexpr u32 TASK_SEMANTIC_MAX_STREAM_NUM = 65536;
+using TaskSemanticStreamSeqArray = std::array<std::atomic<u64>, TASK_SEMANTIC_MAX_STREAM_NUM>;
 thread_local bool g_taskSemanticValid = false;
 thread_local TaskSemanticTraceInfo g_taskSemanticInfo{};
 
@@ -52,6 +57,35 @@ const char *TaskTypeToName(TaskType taskType)
 const char *SafeStr(const char *value)
 {
     return value == nullptr ? "" : value;
+}
+
+u64 NextTaskSemanticSeq(u32 deviceId, u32 streamId)
+{
+    static std::array<std::atomic<TaskSemanticStreamSeqArray *>, TASK_SEMANTIC_MAX_DEVICE_NUM> seqByDevice{};
+    static std::atomic<u64> fallbackSeq{0};
+    if (deviceId >= TASK_SEMANTIC_MAX_DEVICE_NUM || streamId >= TASK_SEMANTIC_MAX_STREAM_NUM) {
+        return fallbackSeq.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    TaskSemanticStreamSeqArray *streamSeqs = seqByDevice[deviceId].load(std::memory_order_acquire);
+    if (streamSeqs == nullptr) {
+        TaskSemanticStreamSeqArray *created = new (std::nothrow) TaskSemanticStreamSeqArray();
+        if (created == nullptr) {
+            return fallbackSeq.fetch_add(1, std::memory_order_relaxed);
+        }
+        for (auto &seq : *created) {
+            seq.store(0, std::memory_order_relaxed);
+        }
+        TaskSemanticStreamSeqArray *expected = nullptr;
+        if (seqByDevice[deviceId].compare_exchange_strong(expected, created, std::memory_order_release,
+            std::memory_order_acquire)) {
+            streamSeqs = created;
+        } else {
+            delete created;
+            streamSeqs = expected;
+        }
+    }
+    return (*streamSeqs)[streamId].fetch_add(1, std::memory_order_relaxed);
 }
 } // namespace
 
@@ -112,26 +146,29 @@ HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskT
     if (!IsTaskSemanticTraceEnabled()) {
         return HCCL_SUCCESS;
     }
+    u64 semanticSeq = NextTaskSemanticSeq(deviceId, streamId);
     if (!g_taskSemanticValid) {
         static std::atomic<u32> logCount(0);
         u32 curLogCount = logCount.fetch_add(1);
         if (curLogCount < TASK_SEMANTIC_PROBE_LOG_LIMIT) {
             HCCL_RUN_INFO("[HcclTaskSemanticProbe] report without context device_id[%u] stream_id[%u] task_id[%u] "
-                "task_type[%u] task_kind[%s]",
-                deviceId, streamId, taskId, static_cast<u32>(taskType), TaskTypeToName(taskType));
+                "semantic_seq[%llu] task_type[%u] task_kind[%s]",
+                deviceId, streamId, taskId, semanticSeq, static_cast<u32>(taskType), TaskTypeToName(taskType));
         }
         return HCCL_SUCCESS;
     }
 
     HCCL_RUN_INFO("[HcclTaskSemantic] schema_version[%u] op_id[%llu] op_type[%s] algorithm[%s] "
         "event[%s] phase[%s] step[%u] slice[%u] rank[%u] ranksize[%u] user_rank[%u] comm_rank[%u] "
-        "rank_size[%u] peer_rank[%u] semantic[%s] device_id[%u] stream_id[%u] task_id[%u] task_type[%u] task_kind[%s] source[%s]",
+        "rank_size[%u] peer_rank[%u] semantic[%s] device_id[%u] stream_id[%u] task_id[%u] "
+        "semantic_seq[%llu] task_type[%u] task_kind[%s] source[%s]",
         TASK_SEMANTIC_SCHEMA_VERSION, g_taskSemanticInfo.opId, SafeStr(g_taskSemanticInfo.opType),
         SafeStr(g_taskSemanticInfo.algorithm), SafeStr(g_taskSemanticInfo.event), SafeStr(g_taskSemanticInfo.phase),
         g_taskSemanticInfo.step, g_taskSemanticInfo.slice, g_taskSemanticInfo.userRank, g_taskSemanticInfo.rankSize,
         g_taskSemanticInfo.userRank, g_taskSemanticInfo.commRank, g_taskSemanticInfo.rankSize,
         g_taskSemanticInfo.peerRank, SafeStr(g_taskSemanticInfo.semantic), deviceId,
-        streamId, taskId, static_cast<u32>(taskType), TaskTypeToName(taskType), SafeStr(g_taskSemanticInfo.source));
+        streamId, taskId, semanticSeq, static_cast<u32>(taskType), TaskTypeToName(taskType),
+        SafeStr(g_taskSemanticInfo.source));
     if (g_taskSemanticInfo.oneShot) {
         g_taskSemanticValid = false;
     }

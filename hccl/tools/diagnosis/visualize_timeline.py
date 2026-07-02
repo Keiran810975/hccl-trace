@@ -339,8 +339,32 @@ def render_logical_svg(rows: List[dict], output: Path, col_width: int, node_widt
     output.write_text('\n'.join(parts), encoding='utf-8')
 
 
+def assign_time_slots(rows: List[dict]) -> Dict[Tuple[str, int, int, int], int]:
+    by_lane: Dict[Tuple[str, int, int, int], List[dict]] = defaultdict(list)
+    for row in rows:
+        by_lane[lane_key(row)].append(row)
+
+    slot_counts: Dict[Tuple[str, int, int, int], int] = {}
+    for lane, lane_rows in by_lane.items():
+        slot_stops: List[float] = []
+        for row in sorted(lane_rows, key=lambda item: (item["_start"], item["_stop"], timeline_sort_key(item))):
+            slot = None
+            for index, stop in enumerate(slot_stops):
+                if row["_start"] >= stop:
+                    slot = index
+                    break
+            if slot is None:
+                slot = len(slot_stops)
+                slot_stops.append(row["_stop"])
+            else:
+                slot_stops[slot] = row["_stop"]
+            row["_time_slot"] = slot
+        slot_counts[lane] = max(1, len(slot_stops))
+    return slot_counts
+
+
 def render_time_svg(rows: List[dict], gaps: List[dict], output: Path, max_width: int, min_px_per_us: float,
-                    show_gap_threshold: float) -> None:
+                    show_gap_threshold: float, time_scale: str) -> None:
     if not rows:
         raise ValueError("no matched timed rows to render")
 
@@ -351,14 +375,18 @@ def render_time_svg(rows: List[dict], gaps: List[dict], output: Path, max_width:
     right = 80
     top = 92
     bottom = 86
-    lane_h = 28
     lane_gap = 7
     group_gap = 24
     min_node_w = 8
-    px_per_us = min((max_width - left - right) / span, max(min_px_per_us, 0.001))
+    node_h = 20
+    slot_gap = 4
+    fit_px_per_us = (max_width - left - right) / span
+    px_per_us = fit_px_per_us if time_scale == "fit" else max(fit_px_per_us, max(min_px_per_us, 0.001))
     width = int(left + span * px_per_us + right)
 
     lanes = sorted({lane_key(row) for row in rows})
+    slot_counts = assign_time_slots(rows)
+    lane_heights = {lane: max(28, 8 + slot_counts.get(lane, 1) * (node_h + slot_gap)) for lane in lanes}
     lane_y = {}
     y = top
     last_group = None
@@ -367,7 +395,7 @@ def render_time_svg(rows: List[dict], gaps: List[dict], output: Path, max_width:
         if last_group is not None and group != last_group:
             y += group_gap
         lane_y[lane] = y
-        y += lane_h + lane_gap
+        y += lane_heights[lane] + lane_gap
         last_group = group
     height = y + bottom
 
@@ -393,6 +421,7 @@ def render_time_svg(rows: List[dict], gaps: List[dict], output: Path, max_width:
         node_id, device_id, rank, stream_id = lane
         yy = lane_y[lane]
         label = f'{node_id or "node"} dev {device_id} rank {rank} stream {stream_id}'
+        lane_h = lane_heights[lane]
         parts.append(f'<text x="22" y="{yy + 17}" font-family="Arial" font-size="11" fill="#333">{html.escape(label)}</text>')
         parts.append(f'<line x1="{left - 10}" y1="{yy + lane_h / 2:.1f}" x2="{width - right}" y2="{yy + lane_h / 2:.1f}" stroke="#f2f2f2"/>')
 
@@ -406,7 +435,7 @@ def render_time_svg(rows: List[dict], gaps: List[dict], output: Path, max_width:
         x2 = x_for(to_float(gap["cur_start"]))
         if x2 <= x1:
             continue
-        yy = lane_y[lane] + lane_h - 2
+        yy = lane_y[lane] + lane_heights[lane] - 2
         parts.append(f'<line x1="{x1:.1f}" y1="{yy:.1f}" x2="{x2:.1f}" y2="{yy:.1f}" stroke="#999" stroke-dasharray="2 2"/>')
         if x2 - x1 > 24:
             parts.append(f'<text x="{(x1 + x2) / 2:.1f}" y="{yy - 2:.1f}" text-anchor="middle" font-family="Arial" font-size="8" fill="#666">{float(gap["gap"]):.1f}</text>')
@@ -414,8 +443,8 @@ def render_time_svg(rows: List[dict], gaps: List[dict], output: Path, max_width:
     for row in rows:
         x = x_for(row["_start"])
         w = max(min_node_w, row["_duration"] * px_per_us)
-        yy = lane_y[lane_key(row)] + 3
-        h = lane_h - 7
+        yy = lane_y[lane_key(row)] + 4 + row.get("_time_slot", 0) * (node_h + slot_gap)
+        h = node_h
         fill, stroke = EVENT_COLOR.get(row["_event"], ("#eeeeee", "#777777"))
         parts.append(f'<rect x="{x:.1f}" y="{yy:.1f}" width="{w:.1f}" height="{h:.1f}" rx="2" ry="2" fill="{fill}" stroke="{stroke}"><title>{html.escape(task_title(row))}</title></rect>')
         if w > 42:
@@ -437,6 +466,7 @@ def main() -> int:
     parser.add_argument("--max-width", type=int, default=28000)
     parser.add_argument("--min-px-per-us", type=float, default=0.025)
     parser.add_argument("--show-gap-threshold", type=float, default=20.0)
+    parser.add_argument("--time-scale", choices=("minimum", "fit"), default="minimum")
     args = parser.parse_args()
 
     output = args.output or args.merged_csv.with_name(args.merged_csv.stem + "_timeline.svg")
@@ -445,7 +475,7 @@ def main() -> int:
     if args.layout == "logical":
         render_logical_svg(rows, output, args.col_width, args.node_width)
     else:
-        render_time_svg(rows, gaps, output, args.max_width, args.min_px_per_us, args.show_gap_threshold)
+        render_time_svg(rows, gaps, output, args.max_width, args.min_px_per_us, args.show_gap_threshold, args.time_scale)
     nodes_path = output.with_name(output.stem + "_nodes.csv")
     gaps_path = output.with_name(output.stem + "_gaps.csv")
     export_nodes(nodes_path, rows)

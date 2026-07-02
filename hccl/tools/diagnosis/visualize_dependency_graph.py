@@ -263,6 +263,32 @@ def select_representatives(rows: List[dict]) -> Dict[Tuple[str, int, int], dict]
     return reps
 
 
+def compact_dependency_rows(rows: List[dict]) -> List[dict]:
+    """Keep one RxAck, one Signal, and one payload representative per rank/phase/step."""
+    reps = select_representatives(rows)
+    by_step: Dict[Tuple[str, int, int], List[dict]] = defaultdict(list)
+    for row in rows:
+        by_step[(row["_phase_group"], row["_rank"], row["_step"])].append(row)
+
+    compact: List[dict] = []
+    seen_rows = set()
+    for key in sorted(by_step, key=lambda item: (PHASE_GROUP_ORDER.get(item[0], 99), item[1], item[2])):
+        candidates = sorted(by_step[key], key=row_sort_key)
+        first_by_event = {}
+        for row in candidates:
+            first_by_event.setdefault(row.get("event", ""), row)
+        for row in (first_by_event.get("rx_ack_start"), first_by_event.get("rx_data_signal_start"), reps.get(key)):
+            if not row:
+                continue
+            row_id = row["_source_row"]
+            if row_id in seen_rows:
+                continue
+            seen_rows.add(row_id)
+            compact.append(row)
+    compact.sort(key=row_sort_key)
+    return compact
+
+
 def build_nodes(rows: List[dict]) -> List[dict]:
     nodes = []
     for index, row in enumerate(rows):
@@ -551,6 +577,13 @@ def render_svg(rows: List[dict], edges: List[dict], output: Path, col_width: int
     output.write_text("\n".join(parts), encoding="utf-8")
 
 
+def summarize_values(rows: List[dict], key: str, limit: int = 16) -> str:
+    values = sorted({row.get(key) for row in rows if row.get(key) is not None})
+    if len(values) > limit:
+        shown = values[:limit]
+        return ",".join(str(value) for value in shown) + f",...(+{len(values) - limit})"
+    return ",".join(str(value) for value in values)
+
 def parse_csv_list(value: str) -> Tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
@@ -564,6 +597,7 @@ def main() -> int:
     parser.add_argument("--edge-kinds", default=",".join(DEFAULT_EDGE_KINDS), help="Comma-separated edge kinds.")
     parser.add_argument("--rank-size", type=int, default=-1)
     parser.add_argument("--rank-field", choices=("auto", "user_rank", "device_id"), default="auto")
+    parser.add_argument("--node-mode", choices=("compact", "task"), default="compact")
     parser.add_argument("--upstream", choices=("previous", "next"), default="previous")
     parser.add_argument("--col-width", type=int, default=130)
     parser.add_argument("--row-height", type=int, default=94)
@@ -574,6 +608,9 @@ def main() -> int:
     edge_kinds = parse_csv_list(args.edge_kinds)
     rows = read_rows(args.merged_csv, events, include_unmatched=args.include_unmatched)
     selected_rank_field = apply_rank_field(rows, args.rank_field)
+    raw_row_count = len(rows)
+    if args.node_mode == "compact":
+        rows = compact_dependency_rows(rows)
     build_nodes(rows)
     rank_size = infer_rank_size(rows, args.rank_size)
     edges = build_edges(rows, edge_kinds, rank_size, args.upstream)
@@ -583,9 +620,14 @@ def main() -> int:
     edges_path = output.with_name(output.stem + "_edges.csv")
     export_nodes(nodes_path, build_nodes(rows))
     export_edges(edges_path, edges)
+    print(f"raw_nodes={raw_row_count}")
     print(f"nodes={len(rows)}")
+    print(f"node_mode={args.node_mode}")
     print(f"edges={len(edges)}")
     print(f"rank_size={rank_size}")
+    print(f"user_ranks={summarize_values(rows, '_user_rank')}")
+    print(f"device_ids={summarize_values(rows, '_device_id')}")
+    print(f"graph_ranks={summarize_values(rows, '_rank')}")
     print(f"rank_field={selected_rank_field}")
     print(f"svg={output}")
     print(f"nodes_csv={nodes_path}")

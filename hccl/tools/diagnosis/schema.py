@@ -28,6 +28,7 @@ SEMANTIC_FIELDS = (
     "semantic",
     "stream_id",
     "task_id",
+    "semantic_seq",
     "task_kind",
     "source",
     "device_id",
@@ -79,6 +80,7 @@ class SemanticRecord:
     semantic: str = ""
     stream_id: int = -1
     task_id: int = -1
+    semantic_seq: int = -1
     task_kind: str = ""
     source: str = ""
     device_id: int = -1

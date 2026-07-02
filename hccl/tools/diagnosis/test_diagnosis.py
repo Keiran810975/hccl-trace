@@ -6,21 +6,24 @@ from __future__ import annotations
 import csv
 import os
 import sys
+import tempfile
 import unittest
 
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from diagnosis.merge_timeline import merge_records
+    from diagnosis.merge_timeline import merge_records, parse_plog_inputs, parse_task_time_inputs
     from diagnosis.parse_msprof import parse_task_time_rows
     from diagnosis.parse_plog import parse_legacy_block
     from diagnosis.validate_trace import validate_rows
-    from diagnosis.visualize_dependency_graph import apply_rank_field, assign_positions, build_edges, build_nodes, infer_rank_size
+    from diagnosis.visualize_timeline import assign_time_slots
+    from diagnosis.visualize_dependency_graph import apply_rank_field, assign_positions, build_edges, build_nodes, compact_dependency_rows, infer_rank_size
 else:
-    from .merge_timeline import merge_records
+    from .merge_timeline import merge_records, parse_plog_inputs, parse_task_time_inputs
     from .parse_msprof import parse_task_time_rows
     from .parse_plog import parse_legacy_block
     from .validate_trace import validate_rows
-    from .visualize_dependency_graph import apply_rank_field, assign_positions, build_edges, build_nodes, infer_rank_size
+    from .visualize_timeline import assign_time_slots
+    from .visualize_dependency_graph import apply_rank_field, assign_positions, build_edges, build_nodes, compact_dependency_rows, infer_rank_size
 
 
 class DiagnosisToolTest(unittest.TestCase):
@@ -46,6 +49,52 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(validate_stats["match_rate_percent"], 100.0)
 
+    def test_task_time_dir_loads_all_task_time_csv_files(self):
+        fixture_dir = os.path.join(os.path.dirname(__file__), "fixtures")
+        tasks = parse_task_time_inputs(task_time_dir=fixture_dir, node_id="node0")
+        self.assertEqual(len(tasks), 2)
+        self.assertEqual({task.device_id for task in tasks}, {0})
+
+    def test_plog_dir_loads_all_plog_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for rank in (0, 1):
+                path = os.path.join(temp_dir, f"plog-{rank}.log")
+                with open(path, "w", encoding="utf-8") as output:
+                    output.write(
+                        "[INFO] HCCL(502444,python):2026-01-01-00:00:00.000.000 "
+                        "[task_semantic_trace.cc:126] [502444][HcclTaskSemantic] "
+                        f"device_id[{rank}] stream_id[12] task_id[34] task_kind[notify_wait] "
+                        f"event[rx_ack_start] phase[reduce_scatter_direct] step[0] rank[{rank}] ranksize[2] "
+                        "slice[0] semantic[link_rx_ack]\n"
+                    )
+
+            records = parse_plog_inputs(plog_dir=temp_dir)
+
+        self.assertEqual(len(records), 2)
+        self.assertEqual({record.device_id for record in records}, {0, 1})
+
+    def test_semantic_seq_matches_profiler_stream_order(self):
+        semantics = list(parse_legacy_block([
+            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[0] semantic_seq[0] task_kind[notify_wait] "
+            "event[rx_ack_start] phase[reduce_scatter_direct] step[0] rank[0] ranksize[2] "
+            "slice[0] semantic[link_rx_ack]\n",
+            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[0] semantic_seq[1] task_kind[notify_wait] "
+            "event[rx_ack_start] phase[reduce_scatter_direct] step[1] rank[0] ranksize[2] "
+            "slice[1] semantic[link_rx_ack]\n",
+        ]))
+        profilers = list(parse_task_time_rows([
+            {"Device_id": "0", "stream_id": "12", "task_id": "100", "kernel_type": "NOTIFY_WAIT", "task_start(us)": "10", "task_stop(us)": "11", "task_time(us)": "1"},
+            {"Device_id": "0", "stream_id": "12", "task_id": "101", "kernel_type": "NOTIFY_WAIT", "task_start(us)": "12", "task_stop(us)": "13", "task_time(us)": "1"},
+        ], default_node_id="node0"))
+
+        rows, stats = merge_records(semantics, profilers)
+
+        self.assertEqual(stats["matched"], 2)
+        self.assertEqual(stats["semantic_seq_matches"], 2)
+        self.assertEqual(stats["duplicate_semantic_keys"], 0)
+        self.assertEqual([row["task_id"] for row in rows], [0, 0])
+        self.assertEqual([row["semantic_seq"] for row in rows], [0, 1])
+        self.assertEqual([row["task_start"] for row in rows], ["10", "12"])
     def test_rank_as_device_fallback_is_explicit(self):
         semantics = list(parse_legacy_block([
             "[HcclTaskSemantic] stream_id[12] task_id[34] task_kind[notify_wait] "
@@ -231,5 +280,48 @@ class DiagnosisToolTest(unittest.TestCase):
             self.assertLessEqual(x + 40, left + col_width)
 
 
+    def test_timeline_time_layout_stacks_overlapping_tasks(self):
+        def row(index, start, stop):
+            return {
+                "_node_id": "node0",
+                "_device_id": 0,
+                "_rank": 0,
+                "_stream_id": 10,
+                "_task_id": index,
+                "_phase": "reduce_scatter_direct",
+                "_step": 0,
+                "_event": "rx_payload_reduce_start",
+                "_slice": index,
+                "_start": start,
+                "_stop": stop,
+            }
+
+        rows = [row(0, 0.0, 10.0), row(1, 5.0, 12.0), row(2, 12.0, 14.0)]
+        slot_counts = assign_time_slots(rows)
+        self.assertEqual(slot_counts[("node0", 0, 0, 10)], 2)
+        self.assertEqual(rows[0]["_time_slot"], 0)
+        self.assertEqual(rows[1]["_time_slot"], 1)
+        self.assertEqual(rows[2]["_time_slot"], 0)
+
+    def test_dependency_compact_rows_keep_one_payload_per_step(self):
+        rows = []
+        for index in range(3):
+            rows.append({
+                "event": "rx_payload_reduce_start",
+                "_source_row": index,
+                "_phase_group": "reduce_scatter",
+                "_phase_order": 0,
+                "_event_order": 4,
+                "_rank": 0,
+                "_step": 0,
+                "_slice": index,
+                "_stream_id": 10,
+                "_start": float(index),
+                "_task_id": index,
+            })
+
+        compact = compact_dependency_rows(rows)
+        self.assertEqual(len(compact), 1)
+        self.assertEqual(compact[0]["_slice"], 0)
 if __name__ == "__main__":
     unittest.main()
