@@ -23,6 +23,7 @@ constexpr u32 TASK_SEMANTIC_PROBE_LOG_LIMIT = 32;
 constexpr u32 TASK_SEMANTIC_MAX_DEVICE_NUM = 64;
 constexpr u32 TASK_SEMANTIC_MAX_STREAM_NUM = 65536;
 using TaskSemanticStreamSeqArray = std::array<std::atomic<u64>, TASK_SEMANTIC_MAX_STREAM_NUM>;
+using TaskSemanticDeviceSeqArray = std::array<std::atomic<TaskSemanticStreamSeqArray *>, TASK_SEMANTIC_MAX_DEVICE_NUM>;
 thread_local bool g_taskSemanticValid = false;
 thread_local TaskSemanticTraceInfo g_taskSemanticInfo{};
 
@@ -65,10 +66,9 @@ bool HasReportableSemantic(const TaskSemanticTraceInfo &info)
         info.semantic != nullptr && info.semantic[0] != '\0';
 }
 
-u64 NextTaskSemanticSeq(u32 deviceId, u32 streamId)
+u64 NextTaskSeq(TaskSemanticDeviceSeqArray &seqByDevice, std::atomic<u64> &fallbackSeq, u32 deviceId,
+    u32 streamId)
 {
-    static std::array<std::atomic<TaskSemanticStreamSeqArray *>, TASK_SEMANTIC_MAX_DEVICE_NUM> seqByDevice{};
-    static std::atomic<u64> fallbackSeq{0};
     if (deviceId >= TASK_SEMANTIC_MAX_DEVICE_NUM || streamId >= TASK_SEMANTIC_MAX_STREAM_NUM) {
         return fallbackSeq.fetch_add(1, std::memory_order_relaxed);
     }
@@ -92,6 +92,20 @@ u64 NextTaskSemanticSeq(u32 deviceId, u32 streamId)
         }
     }
     return (*streamSeqs)[streamId].fetch_add(1, std::memory_order_relaxed);
+}
+
+u64 NextTaskProfilerSeq(u32 deviceId, u32 streamId)
+{
+    static TaskSemanticDeviceSeqArray seqByDevice{};
+    static std::atomic<u64> fallbackSeq{0};
+    return NextTaskSeq(seqByDevice, fallbackSeq, deviceId, streamId);
+}
+
+u64 NextTaskSemanticSeq(u32 deviceId, u32 streamId)
+{
+    static TaskSemanticDeviceSeqArray seqByDevice{};
+    static std::atomic<u64> fallbackSeq{0};
+    return NextTaskSeq(seqByDevice, fallbackSeq, deviceId, streamId);
 }
 } // namespace
 
@@ -158,6 +172,22 @@ void ClearTaskSemanticTraceInfo()
     }
 }
 
+HcclResult ReportTaskSemanticTraceProbe(u32 deviceId, u32 streamId, u32 taskId, const char *taskKind)
+{
+    if (!IsTaskSemanticTraceEnabled()) {
+        return HCCL_SUCCESS;
+    }
+    u64 profilerSeq = NextTaskProfilerSeq(deviceId, streamId);
+    static std::atomic<u32> logCount(0);
+    u32 curLogCount = logCount.fetch_add(1);
+    if (curLogCount < TASK_SEMANTIC_PROBE_LOG_LIMIT) {
+        HCCL_RUN_INFO("[HcclTaskSemanticProbe] report without context device_id[%u] stream_id[%u] task_id[%u] "
+            "profiler_seq[%llu] task_kind[%s]",
+            deviceId, streamId, taskId, profilerSeq, SafeStr(taskKind));
+    }
+    return HCCL_SUCCESS;
+}
+
 HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskType taskType)
 {
     TaskSemanticTraceInfo info{};
@@ -171,13 +201,14 @@ HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskT
     if (!IsTaskSemanticTraceEnabled()) {
         return HCCL_SUCCESS;
     }
+    u64 profilerSeq = NextTaskProfilerSeq(deviceId, streamId);
     if (info == nullptr) {
         static std::atomic<u32> logCount(0);
         u32 curLogCount = logCount.fetch_add(1);
         if (curLogCount < TASK_SEMANTIC_PROBE_LOG_LIMIT) {
             HCCL_RUN_INFO("[HcclTaskSemanticProbe] report without context device_id[%u] stream_id[%u] task_id[%u] "
-                "task_type[%u] task_kind[%s]",
-                deviceId, streamId, taskId, static_cast<u32>(taskType), TaskTypeToName(taskType));
+                "profiler_seq[%llu] task_type[%u] task_kind[%s]",
+                deviceId, streamId, taskId, profilerSeq, static_cast<u32>(taskType), TaskTypeToName(taskType));
         }
         return HCCL_SUCCESS;
     }
@@ -186,13 +217,13 @@ HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskT
     HCCL_RUN_INFO("[HcclTaskSemantic] schema_version[%u] op_id[%llu] op_type[%s] algorithm[%s] "
         "event[%s] phase[%s] step[%u] slice[%u] rank[%u] ranksize[%u] user_rank[%u] comm_rank[%u] "
         "rank_size[%u] peer_rank[%u] semantic[%s] device_id[%u] stream_id[%u] task_id[%u] "
-        "semantic_seq[%llu] task_type[%u] task_kind[%s] source[%s]",
+        "semantic_seq[%llu] profiler_seq[%llu] task_type[%u] task_kind[%s] source[%s]",
         TASK_SEMANTIC_SCHEMA_VERSION, info->opId, SafeStr(info->opType),
         SafeStr(info->algorithm), SafeStr(info->event), SafeStr(info->phase),
         info->step, info->slice, info->userRank, info->rankSize,
         info->userRank, info->commRank, info->rankSize,
         info->peerRank, SafeStr(info->semantic), deviceId,
-        streamId, taskId, semanticSeq, static_cast<u32>(taskType), TaskTypeToName(taskType),
+        streamId, taskId, semanticSeq, profilerSeq, static_cast<u32>(taskType), TaskTypeToName(taskType),
         SafeStr(info->source));
     return HCCL_SUCCESS;
 }

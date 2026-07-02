@@ -10,9 +10,9 @@ Current scope:
   verified `cann-hccl` prototype;
 - parse msprof `task_time.csv` rows;
 - skip `PROFILER_TRACE_EX` marker rows;
-- merge records by `(node_id, device_id, stream_id, semantic_seq)` when the
-  producer provides `semantic_seq`, and fall back to `(node_id, device_id,
-  stream_id, task_id)` for legacy logs;
+- merge records by `(node_id, device_id, stream_id, profiler_seq)` when the
+  producer provides `profiler_seq`, and fall back to legacy `semantic_seq`
+  or `(node_id, device_id, stream_id, task_id)` for older logs;
 - require semantic `device_id` by default instead of inferring it from rank;
 - dedupe duplicate semantic merge keys by default while reporting the input
   duplicate counts in the merge summary;
@@ -89,26 +89,31 @@ python -m tools.diagnosis.validate_trace \
   --min-match-rate 95
 ```
 
-Producer plog rows should include `semantic_seq`, a zero-based sequence number
-per `(device_id, stream_id)` in the same order as successful msprof task
-reports. The semantic context should be captured when `TaskData` is created
-and later reported from that task-owned snapshot; reading the current thread
-semantic scope in `TaskProfiling::Run` can mix unrelated events such as ACK,
-data-signal, and payload work. Logs without `semantic_seq` remain supported
-through the legacy `task_id` merge key. When `semantic_seq` is present but has
-no profiler sequence match, `merge_timeline` treats the row as unmatched
-instead of falling back to `task_id`.
+Producer plog rows should include two stream-local sequence numbers:
 
-`AI_CORE` profiler rows are kept while building per-stream sequence numbers,
-because `semantic_seq` is an absolute profiler-stream position. They are treated
+- `profiler_seq`: zero-based position among all task profiling reports on the
+  `(device_id, stream_id)` stream, including tasks without semantic context.
+  This is the primary key used to align semantic rows with msprof task_time
+  stream order.
+- `semantic_seq`: zero-based position among rows that actually emit
+  `[HcclTaskSemantic]`. This is for semantic ordering and diagnostics, not for
+  matching the full profiler stream.
+
+The semantic context should be captured when `TaskData` is created and later
+reported from that task-owned snapshot; reading the current thread semantic
+scope in `TaskProfiling::Run` can mix unrelated events such as ACK, data-signal,
+and payload work. Logs without `profiler_seq` remain supported through the
+legacy `semantic_seq` and `task_id` merge paths.
+
+`AI_CORE` profiler rows are kept while building per-stream sequence numbers
+because `profiler_seq` is an absolute profiler-stream position. They are treated
 as ignored unmatched profiler rows in the main summary, and dependency graph
 rendering stays focused on communication events: rx/tx ACK, rx/tx data signal,
 and payload copy/reduce. `merge_timeline` also validates the semantic
 `task_kind` against profiler `kernel_type`; incompatible sequence hits are
-reported as `type_mismatch`. When producer plog carries a non-degenerate graph
-`task_id`/ctxId, the merge can fall back to a type-compatible `(device, stream,
-task_id)` match. Revisit `AI_CORE` only after confirming it is produced by a
-semantic HCOMM AIV task that should participate in the communication graph.
+reported as `type_mismatch`. `task_id` and graph `ctxId` are diagnostic fields
+only for modern producer logs because they can be unavailable, local to a graph,
+or reused across repeated graph execution.
 
 Use `--keep-duplicate-semantic-keys` on `merge_timeline` only when inspecting
 raw producer-side duplicate behavior. The default merged CSV is intended for

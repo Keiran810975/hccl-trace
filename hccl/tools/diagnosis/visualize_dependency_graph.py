@@ -133,7 +133,7 @@ def read_rows(path: Path, events: Iterable[str], include_unmatched: bool = False
     rows: List[dict] = []
     with path.open("r", encoding="utf-8-sig", newline="") as source:
         for index, row in enumerate(csv.DictReader(source)):
-            if not include_unmatched and row.get("match_status") != "matched":
+            if not include_unmatched and row.get("match_status") not in ("matched", "semantic_only"):
                 continue
             phase = row.get("phase", "")
             if phase not in PHASE_ORDER:
@@ -523,7 +523,7 @@ def render_svg(rows: List[dict], edges: List[dict], output: Path, col_width: int
         '<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3 z" fill="#555"/></marker></defs>',
         '<rect x="0" y="0" width="100%" height="100%" fill="#fff"/>',
         f'<text x="{left}" y="30" font-family="Arial" font-size="22" font-weight="700">HCCL task dependency graph</text>',
-        f'<text x="{left}" y="54" font-family="Arial" font-size="12" fill="#555">Nodes are matched tasks. Edges show inferred single-ring step, upstream, phase, and ack/signal/payload dependencies.</text>',
+        f'<text x="{left}" y="54" font-family="Arial" font-size="12" fill="#555">Nodes are matched or semantic-only tasks. Edges show inferred single-ring step, upstream, phase, and ack/signal/payload dependencies.</text>',
     ]
 
     previous_phase = None

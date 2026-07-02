@@ -37,6 +37,7 @@ bool GetTaskSemanticTraceInfo(TaskSemanticTraceInfo &info);
 bool CaptureTaskSemanticTraceInfo(TaskSemanticTraceInfo &info);
 void SetTaskSemanticTraceInfo(const TaskSemanticTraceInfo &info);
 void ClearTaskSemanticTraceInfo();
+HcclResult ReportTaskSemanticTraceProbe(u32 deviceId, u32 streamId, u32 taskId, const char *taskKind);
 HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskType taskType);
 HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskType taskType,
     const TaskSemanticTraceInfo *info);

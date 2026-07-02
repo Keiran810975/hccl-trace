@@ -108,6 +108,34 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertEqual(len(records), 2)
         self.assertEqual({record.device_id for record in records}, {0, 1})
 
+    def test_parse_profiler_seq_field(self):
+        semantics = list(parse_legacy_block([
+            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[3] semantic_seq[0] profiler_seq[2] "
+            "task_kind[notify_wait] event[rx_ack_start] phase[reduce_scatter_direct] step[0] "
+            "rank[0] ranksize[2] slice[0] semantic[link_rx_ack]\n",
+        ]))
+
+        self.assertEqual(semantics[0].semantic_seq, 0)
+        self.assertEqual(semantics[0].profiler_seq, 2)
+
+    def test_profiler_seq_matches_profiler_stream_order(self):
+        semantics = list(parse_legacy_block([
+            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[0] semantic_seq[0] profiler_seq[1] "
+            "task_kind[notify_wait] event[rx_ack_start] phase[reduce_scatter_direct] step[0] "
+            "rank[0] ranksize[2] slice[0] semantic[link_rx_ack]\n",
+        ]))
+        profilers = list(parse_task_time_rows([
+            {"Device_id": "0", "stream_id": "12", "task_id": "100", "kernel_type": "MEMCPY_ASYNC", "task_start(us)": "10", "task_stop(us)": "11", "task_time(us)": "1"},
+            {"Device_id": "0", "stream_id": "12", "task_id": "101", "kernel_type": "NOTIFY_WAIT", "task_start(us)": "12", "task_stop(us)": "13", "task_time(us)": "1"},
+        ], default_node_id="node0"))
+
+        rows, stats = merge_records(semantics, profilers)
+
+        self.assertEqual(stats["matched"], 1)
+        self.assertEqual(stats["profiler_seq_matches"], 1)
+        self.assertEqual(stats["semantic_seq_matches"], 0)
+        self.assertEqual(rows[0]["task_start"], "12")
+
     def test_semantic_seq_matches_profiler_stream_order(self):
         semantics = list(parse_legacy_block([
             "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[0] semantic_seq[0] task_kind[notify_wait] "
@@ -130,6 +158,23 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertEqual([row["task_id"] for row in rows], [0, 0])
         self.assertEqual([row["semantic_seq"] for row in rows], [0, 1])
         self.assertEqual([row["task_start"] for row in rows], ["10", "12"])
+    def test_missing_kernel_kind_becomes_semantic_only(self):
+        semantics = list(parse_legacy_block([
+            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[0] semantic_seq[0] profiler_seq[0] "
+            "task_kind[reduce_inline] event[rx_payload_reduce_start] phase[reduce_scatter_direct] "
+            "step[0] rank[0] ranksize[2] slice[0] semantic[link_rx_payload_reduce]\n",
+        ]))
+        profilers = list(parse_task_time_rows([
+            {"Device_id": "0", "stream_id": "12", "task_id": "10", "kernel_type": "NOTIFY_RECORD", "task_start(us)": "10", "task_stop(us)": "11", "task_time(us)": "1"},
+        ], default_node_id="node0"))
+
+        rows, stats = merge_records(semantics, profilers)
+
+        self.assertEqual(stats["matched"], 0)
+        self.assertEqual(stats["semantic_only"], 1)
+        self.assertEqual(rows[0]["match_status"], "semantic_only")
+        self.assertEqual(rows[0]["task_start"], "")
+
     def test_semantic_seq_type_mismatch_is_not_matched(self):
         semantics = list(parse_legacy_block([
             "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[0] semantic_seq[0] task_kind[notify_wait] "
