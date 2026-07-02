@@ -23,5 +23,4 @@ build_out/
 third_party/
 deploy/
 out/
-
-test/
+new_out/
