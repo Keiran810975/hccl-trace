@@ -277,13 +277,21 @@ HcclResult ReduceScatterRingConcurrentDirect::ReducerRunSpInlineReduce(
     if (!isSdma_) {
         CHK_RET(PreSync());
     }
+    bool traceReduce = true;
+    bool traceCopy = true;
     for (ReducerMemoryInfo reduceMem : reducerMems) {
         if (isSdma_) {
             CHK_RET(PreSync());
         }
         const u64 dataBytes = reduceMem.remoteRcvTemp.size();
-        {
-            TaskSemanticEventScope semanticScope("rx_payload_reduce_start", "link_rx_payload_reduce");
+        if (traceReduce) {
+            TaskSemanticEventScope reduceScope("rx_payload_reduce_start", "link_rx_payload_reduce");
+            CHK_RET(
+                HcclReduceAsync(dispatcher, static_cast<s8 *>(remoteMem) + reduceMem.remoteMemOffset,
+                dataBytes / SIZE_TABLE[dataType_], dataType_, reductionOp_, stream, reduceMem.localsrc.ptr(),
+                link->GetRemoteRank(), link->GetLinkType(), INLINE_REDUCE_BIT));
+            traceReduce = false;
+        } else {
             CHK_RET(
                 HcclReduceAsync(dispatcher, static_cast<s8 *>(remoteMem) + reduceMem.remoteMemOffset,
                 dataBytes / SIZE_TABLE[dataType_], dataType_, reductionOp_, stream, reduceMem.localsrc.ptr(),
@@ -291,8 +299,13 @@ HcclResult ReduceScatterRingConcurrentDirect::ReducerRunSpInlineReduce(
         }
 
         if (reduceMem.localsrc != reduceMem.localdst) {
-            TaskSemanticEventScope semanticScope("rx_payload_copy_start", "link_rx_payload_copy");
-            ret = HcclD2DMemcpyAsync(dispatcher, reduceMem.localdst, reduceMem.localsrc, stream);
+            if (traceCopy) {
+                TaskSemanticEventScope copyScope("rx_payload_copy_start", "link_rx_payload_copy");
+                ret = HcclD2DMemcpyAsync(dispatcher, reduceMem.localdst, reduceMem.localsrc, stream);
+                traceCopy = false;
+            } else {
+                ret = HcclD2DMemcpyAsync(dispatcher, reduceMem.localdst, reduceMem.localsrc, stream);
+            }
             CHK_PRT_RET(ret != HCCL_SUCCESS,
                 HCCL_ERROR("[ReducerRun]memcpy_async localSrc[%p] localDst[%p] failed", reduceMem.localsrc.ptr(),
                 reduceMem.localdst.ptr()),
@@ -334,6 +347,7 @@ HcclResult ReduceScatterRingConcurrentDirect::ReducerRunNoSpInlineReduce(
             TaskSemanticEventScope semanticScope("rx_data_signal_start", "link_rx_data_signal");
             CHK_RET(link->RxDataSignal(stream));
         }
+        bool traceRxCopy = true;
         for (auto& mem : rxMems) {
             CHK_RET(PreSync());
             CHK_PTR_NULL(mem.dst);
@@ -342,19 +356,33 @@ HcclResult ReduceScatterRingConcurrentDirect::ReducerRunNoSpInlineReduce(
 
             DeviceMem srcDevMem(static_cast<s8 *>(srcMemPtr) + mem.srcOffset, mem.len);
             DeviceMem dstDevMem(static_cast<s8 *>(mem.dst), mem.len);
-            TaskSemanticEventScope semanticScope("rx_payload_copy_start", "link_rx_payload_copy");
-            CHK_RET(HcclD2DMemcpyAsync(dispatcher, dstDevMem, srcDevMem,
-                stream, link->GetRemoteRank(), link->GetLinkType()));
+            if (traceRxCopy) {
+                TaskSemanticEventScope copyScope("rx_payload_copy_start", "link_rx_payload_copy");
+                CHK_RET(HcclD2DMemcpyAsync(dispatcher, dstDevMem, srcDevMem,
+                    stream, link->GetRemoteRank(), link->GetLinkType()));
+                traceRxCopy = false;
+            } else {
+                CHK_RET(HcclD2DMemcpyAsync(dispatcher, dstDevMem, srcDevMem,
+                    stream, link->GetRemoteRank(), link->GetLinkType()));
+            }
         }
     }
     if (link->GetSupportDataReceivedAck()) {
         CHK_RET(link->DataReceivedAck(stream));
     }
+    bool traceRxReduce = true;
     for (RxWithReduceMemoryInfo rxReduceMem : rxWithReduceMems) {
-        TaskSemanticEventScope semanticScope("rx_payload_reduce_start", "link_rx_payload_reduce");
-        CHK_RET(HcclReduceAsync(dispatcher, rxReduceMem.reduceSrc, rxReduceMem.reduceDataCount, dataType_,
-            reductionOp_, stream, rxReduceMem.reduceDst, INVALID_VALUE_RANKID, LinkType::LINK_ONCHIP,
-            reduceAttr_));
+        if (traceRxReduce) {
+            TaskSemanticEventScope reduceScope("rx_payload_reduce_start", "link_rx_payload_reduce");
+            CHK_RET(HcclReduceAsync(dispatcher, rxReduceMem.reduceSrc, rxReduceMem.reduceDataCount, dataType_,
+                reductionOp_, stream, rxReduceMem.reduceDst, INVALID_VALUE_RANKID, LinkType::LINK_ONCHIP,
+                reduceAttr_));
+            traceRxReduce = false;
+        } else {
+            CHK_RET(HcclReduceAsync(dispatcher, rxReduceMem.reduceSrc, rxReduceMem.reduceDataCount, dataType_,
+                reductionOp_, stream, rxReduceMem.reduceDst, INVALID_VALUE_RANKID, LinkType::LINK_ONCHIP,
+                reduceAttr_));
+        }
     }
     return HCCL_SUCCESS;
 }

@@ -327,6 +327,7 @@ HcclResult AllGatherRingConcurrentDirect::RunAllGather(const u32 rank, const u32
                 TaskSemanticEventScope eventScope("rx_data_signal_start", "link_rx_data_signal");
                 CHK_RET(leftLink_->RxDataSignal(stream_));
             }
+            bool traceRxCopy = true;
             for (auto& mem : rxMems) {
                 CHK_RET(LocalNotify::Wait(stream_, dispatcher_, mainSignals_[0], profilerInput_.stage));
                 CHK_RET(AlgTemplateBase::ExecEmptyTask(inputMem_, outputMem_, stream_, dispatcher_));
@@ -337,10 +338,16 @@ HcclResult AllGatherRingConcurrentDirect::RunAllGather(const u32 rank, const u32
 
                 DeviceMem srcDevMem(static_cast<s8 *>(srcMemPtr) + mem.srcOffset, mem.len);
                 DeviceMem dstDevMem(static_cast<s8 *>(mem.dst), mem.len);
-                TaskSemanticScope semanticScope(rxTraceInfo);
-                TaskSemanticEventScope eventScope("rx_payload_copy_start", "link_rx_payload_copy");
-                CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dstDevMem, srcDevMem,
-                    stream_, leftLink_->GetRemoteRank(), leftLink_->GetLinkType()));
+                if (traceRxCopy) {
+                    TaskSemanticScope semanticScope(rxTraceInfo);
+                    TaskSemanticEventScope eventScope("rx_payload_copy_start", "link_rx_payload_copy");
+                    CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dstDevMem, srcDevMem,
+                        stream_, leftLink_->GetRemoteRank(), leftLink_->GetLinkType()));
+                    traceRxCopy = false;
+                } else {
+                    CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dstDevMem, srcDevMem,
+                        stream_, leftLink_->GetRemoteRank(), leftLink_->GetLinkType()));
+                }
             }
         }
 
