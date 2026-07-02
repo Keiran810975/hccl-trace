@@ -10,7 +10,6 @@
 
 #include "coll_all_reduce_ring_for_910_93_executor.h"
 #include "alg_template_register.h"
-#include "task_semantic_scope.h"
 
 namespace hccl {
 
@@ -154,9 +153,6 @@ HcclResult CollAllReduceRingFor91093Executor::RunIntraSeverAllGather(
 
 HcclResult CollAllReduceRingFor91093Executor::KernelRun(const OpParam &param, ExecMem &execMem)
 {
-    TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo("allreduce_executor", 0, topoAttr_.userRank,
-        topoAttr_.userRankSize, 0, "allreduce_start", "allreduce_executor", INVALID_VALUE_RANKID,
-        "AllReduceRingFor91093Executor"));
     HCCL_CONFIG_INFO(HCCL_ALG, "[%s] The CollAllReduceRingFor91093Executor starts", __func__);
     CHK_RET(ActiveSlaveStreams(param.stream));
     u32 perDataSize = 0;

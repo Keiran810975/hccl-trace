@@ -59,6 +59,12 @@ const char *SafeStr(const char *value)
     return value == nullptr ? "" : value;
 }
 
+bool HasReportableSemantic(const TaskSemanticTraceInfo &info)
+{
+    return info.event != nullptr && info.event[0] != '\0' &&
+        info.semantic != nullptr && info.semantic[0] != '\0';
+}
+
 u64 NextTaskSemanticSeq(u32 deviceId, u32 streamId)
 {
     static std::array<std::atomic<TaskSemanticStreamSeqArray *>, TASK_SEMANTIC_MAX_DEVICE_NUM> seqByDevice{};
@@ -113,7 +119,7 @@ bool GetTaskSemanticTraceInfo(TaskSemanticTraceInfo &info)
 
 bool CaptureTaskSemanticTraceInfo(TaskSemanticTraceInfo &info)
 {
-    if (!GetTaskSemanticTraceInfo(info)) {
+    if (!GetTaskSemanticTraceInfo(info) || !HasReportableSemantic(info)) {
         return false;
     }
     if (info.oneShot) {
