@@ -95,6 +95,22 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertEqual([row["task_id"] for row in rows], [0, 0])
         self.assertEqual([row["semantic_seq"] for row in rows], [0, 1])
         self.assertEqual([row["task_start"] for row in rows], ["10", "12"])
+    def test_semantic_seq_miss_does_not_fall_back_to_task_id(self):
+        semantics = list(parse_legacy_block([
+            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[100] semantic_seq[9] task_kind[notify_wait] "
+            "event[rx_ack_start] phase[reduce_scatter_direct] step[0] rank[0] ranksize[2] "
+            "slice[0] semantic[link_rx_ack]\n",
+        ]))
+        profilers = list(parse_task_time_rows([
+            {"Device_id": "0", "stream_id": "12", "task_id": "100", "kernel_type": "NOTIFY_WAIT", "task_start(us)": "10", "task_stop(us)": "11", "task_time(us)": "1"},
+        ], default_node_id="node0"))
+
+        rows, stats = merge_records(semantics, profilers)
+
+        self.assertEqual(stats["matched"], 0)
+        self.assertEqual(stats["semantic_seq_unmatched"], 1)
+        self.assertEqual(stats["unmatched_semantic"], 1)
+        self.assertEqual(rows[0]["match_status"], "unmatched_semantic")
     def test_rank_as_device_fallback_is_explicit(self):
         semantics = list(parse_legacy_block([
             "[HcclTaskSemantic] stream_id[12] task_id[34] task_kind[notify_wait] "

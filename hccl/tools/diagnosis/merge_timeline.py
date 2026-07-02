@@ -79,7 +79,8 @@ def merge_records(
             stats["semantic_missing_device_id"] += 1
 
         matches = []
-        if semantic.semantic_seq >= 0 and semantic.device_id >= 0:
+        uses_semantic_seq = semantic.semantic_seq >= 0 and semantic.device_id >= 0
+        if uses_semantic_seq:
             sequence_key = (semantic.node_id, semantic.device_id, semantic.stream_id, semantic.semantic_seq)
             matched_by_sequence = profiler_by_sequence_key.get(sequence_key)
             if not matched_by_sequence and not semantic.node_id:
@@ -91,15 +92,17 @@ def merge_records(
             if matched_by_sequence:
                 matches = [matched_by_sequence]
                 stats["semantic_seq_matches"] += 1
+            else:
+                stats["semantic_seq_unmatched"] += 1
 
-        if not matches:
+        if not matches and not uses_semantic_seq:
             matches = profiler_by_key.get(semantic.merge_key, [])
-        if not matches and not semantic.node_id and semantic.device_id >= 0:
+        if not matches and not uses_semantic_seq and not semantic.node_id and semantic.device_id >= 0:
             matches = _unique_device_task_match(profiler_by_device_task_key, semantic.device_id, semantic)
             if matches:
                 stats["node_id_fallback_matches"] += 1
 
-        if not matches and rank_as_device_fallback and not semantic.node_id and semantic.device_id < 0:
+        if not matches and not uses_semantic_seq and rank_as_device_fallback and not semantic.node_id and semantic.device_id < 0:
             matches = _rank_as_device_match(profiler_by_device_task_key, semantic)
             if matches:
                 stats["rank_device_fallback_matches"] += 1

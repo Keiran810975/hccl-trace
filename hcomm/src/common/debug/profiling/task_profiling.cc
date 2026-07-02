@@ -222,7 +222,6 @@ HcclResult TaskProfiling::Run(const StepData &stepData)
 
 HcclResult TaskProfiling::Run(const TaskData &taskData, bool isCapture)
 {
-    CHK_RET(ReportTaskSemanticTrace(deviceLogicId_, taskData.streamID, taskData.taskID, taskData.taskType));
     HCCLReportData hcclReportData{};
     auto &profilingManager = hccl::ProfilingManager::Instance();
     HcclResult is_subscribe = profilingManager.GetAddtionInfoState();
@@ -266,6 +265,7 @@ HcclResult TaskProfiling::Run(const TaskData &taskData, bool isCapture)
         hcclReportData.tag.c_str(), hcclReportData.profInfo.cclTag, hcclReportData.groupName.c_str(),
         hcclReportData.profInfo.groupName);
 
+    CHK_RET(ReportTaskSemanticTrace(deviceLogicId_, taskData.streamID, taskData.taskID, taskData.taskType));
     DumpReportDataInfo(hcclReportData.type, hcclReportData.profInfo);
     CHK_RET(ReportMsprofData(hcclReportData));
     return HCCL_SUCCESS;
