@@ -54,6 +54,7 @@ struct ProfReporterData {
 
 struct TaskData {
     u32 streamID;
+    u32 semanticStreamID;
     u32 taskID;
 
     TaskType taskType;
@@ -65,11 +66,12 @@ struct TaskData {
     bool hasSemanticTraceInfo{false};
     TaskSemanticTraceInfo semanticTraceInfo{};
 
-    TaskData() : streamID(-1), taskID(-1), taskType(TaskType::TASK_SDMA)
+    TaskData() : streamID(-1), semanticStreamID(-1), taskID(-1), taskType(TaskType::TASK_SDMA)
     {
     }
     TaskData(u32 &streamID, u32 &taskID, TaskType &taskType, const TaskParaDMA &para)
         : streamID(streamID),
+          semanticStreamID(streamID),
           taskID(taskID),
           taskType(taskType),
           DMA(para)
@@ -78,6 +80,7 @@ struct TaskData {
     }
     TaskData(u32 &streamID, u32 &taskID, TaskType &taskType, const TaskParaReduce &para)
         : streamID(streamID),
+          semanticStreamID(streamID),
           taskID(taskID),
           taskType(taskType),
           Reduce(para)
@@ -86,6 +89,7 @@ struct TaskData {
     }
     TaskData(u32 &streamID, u32 &taskID, TaskType &taskType, const TaskParaNotify &para)
         : streamID(streamID),
+          semanticStreamID(streamID),
           taskID(taskID),
           taskType(taskType),
           Notify(para)
@@ -94,11 +98,17 @@ struct TaskData {
     }
     TaskData(u32 &streamID, u32 &taskID, TaskType &taskType, const TaskParaAiv &para)
         : streamID(streamID),
+          semanticStreamID(streamID),
           taskID(taskID),
           taskType(taskType),
           Aiv(para)
     {
         CaptureSemanticTraceInfo();
+    }
+
+    void SetSemanticStreamID(u32 streamID)
+    {
+        semanticStreamID = streamID;
     }
 
 private:

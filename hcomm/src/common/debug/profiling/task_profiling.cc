@@ -267,7 +267,7 @@ HcclResult TaskProfiling::Run(const TaskData &taskData, bool isCapture)
 
     const TaskSemanticTraceInfo *semanticInfo =
         taskData.hasSemanticTraceInfo ? &taskData.semanticTraceInfo : nullptr;
-    CHK_RET(ReportTaskSemanticTrace(deviceLogicId_, taskData.streamID, taskData.taskID, taskData.taskType, semanticInfo));
+    CHK_RET(ReportTaskSemanticTrace(deviceLogicId_, taskData.semanticStreamID, taskData.taskID, taskData.taskType, semanticInfo));
     DumpReportDataInfo(hcclReportData.type, hcclReportData.profInfo);
     CHK_RET(ReportMsprofData(hcclReportData));
     return HCCL_SUCCESS;
@@ -281,6 +281,7 @@ HcclResult TaskProfiling::Run(const std::string &opName, const std::string &tag)
 HcclResult TaskProfiling::Save(u32 captureStreamID, u32 streamID, u32 taskID, TaskType &taskType, const TaskParaReduce &paraReduce)
 {
     TaskData taskData(captureStreamID, taskID, taskType, paraReduce);
+    taskData.SetSemanticStreamID(streamID);
     Run(taskData, true);
     return HCCL_SUCCESS;
 }
@@ -295,6 +296,7 @@ HcclResult TaskProfiling::Save(u32 &streamID, u32 &taskID, TaskType &taskType, c
 HcclResult TaskProfiling::Save(u32 captureStreamID, u32 streamID, u32 taskID, TaskType &taskType, const TaskParaDMA &paraDMA)
 {
     TaskData taskData(captureStreamID, taskID, taskType, paraDMA);
+    taskData.SetSemanticStreamID(streamID);
     Run(taskData, true);
     return HCCL_SUCCESS;
 }
@@ -309,6 +311,7 @@ HcclResult TaskProfiling::Save(u32 &streamID, u32 &taskID, TaskType &taskType, c
 HcclResult TaskProfiling::Save(u32 captureStreamID, u32 streamID, u32 taskID, TaskType &taskType, const TaskParaNotify &paraNotify)
 {
     TaskData taskData(captureStreamID, taskID, taskType, paraNotify);
+    taskData.SetSemanticStreamID(streamID);
     Run(taskData, true);
     return HCCL_SUCCESS;
 }
