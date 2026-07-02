@@ -171,18 +171,18 @@ HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskT
     if (!IsTaskSemanticTraceEnabled()) {
         return HCCL_SUCCESS;
     }
-    u64 semanticSeq = NextTaskSemanticSeq(deviceId, streamId);
     if (info == nullptr) {
         static std::atomic<u32> logCount(0);
         u32 curLogCount = logCount.fetch_add(1);
         if (curLogCount < TASK_SEMANTIC_PROBE_LOG_LIMIT) {
             HCCL_RUN_INFO("[HcclTaskSemanticProbe] report without context device_id[%u] stream_id[%u] task_id[%u] "
-                "semantic_seq[%llu] task_type[%u] task_kind[%s]",
-                deviceId, streamId, taskId, semanticSeq, static_cast<u32>(taskType), TaskTypeToName(taskType));
+                "task_type[%u] task_kind[%s]",
+                deviceId, streamId, taskId, static_cast<u32>(taskType), TaskTypeToName(taskType));
         }
         return HCCL_SUCCESS;
     }
 
+    u64 semanticSeq = NextTaskSemanticSeq(deviceId, streamId);
     HCCL_RUN_INFO("[HcclTaskSemantic] schema_version[%u] op_id[%llu] op_type[%s] algorithm[%s] "
         "event[%s] phase[%s] step[%u] slice[%u] rank[%u] ranksize[%u] user_rank[%u] comm_rank[%u] "
         "rank_size[%u] peer_rank[%u] semantic[%s] device_id[%u] stream_id[%u] task_id[%u] "

@@ -181,7 +181,9 @@ def _compatible_task_id_match(profiler_by_key, profiler_by_device_task_key, sema
     if len(matches) == 1:
         return matches
     if not semantic.node_id and semantic.device_id >= 0:
-        return _unique_device_task_match(profiler_by_device_task_key, semantic.device_id, semantic)
+        device_matches = profiler_by_device_task_key.get((semantic.device_id, semantic.stream_id, semantic.task_id), [])
+        compatible_device_matches = _compatible_profiler_matches(semantic, device_matches)
+        return compatible_device_matches if len(compatible_device_matches) == 1 else []
     return []
 
 
