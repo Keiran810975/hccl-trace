@@ -16,6 +16,7 @@
 #include "profiling_manager.h"
 #include "profiler_manager_impl.h"
 #include "stream_utils.h"
+#include "task_semantic_trace.h"
 
 namespace hccl {
 ProfilerManagerImpl::ProfilerManagerImpl(s32 devicePhyId, s32 deviceLogicId, u32 realUserRank)
@@ -242,11 +243,38 @@ void ProfilerManagerImpl::TaskAivProfilerHandle(void *param, u32 length)
         return;
     }
 
+    HCCL_RUN_INFO("[HcclTaskSemanticAivDebug] handle enter device_id[%d] stream_ptr[%p] is_main_stream[%u] "
+        "begin_time[%llu] cmd_type[%d] tag[%u] size[%llu] block_dim[%u] rank[%u] rank_size[%u] "
+        "aiv_step[%d] is_opbase[%u] trace_enabled[%u]",
+        deviceLogicId_, taskParaGeneral->stream, static_cast<u32>(taskParaGeneral->isMainStream),
+        taskParaGeneral->beginTime, static_cast<s32>(taskParaGeneral->aiv.cmdType), taskParaGeneral->aiv.tag,
+        taskParaGeneral->aiv.size, taskParaGeneral->aiv.blockDim, taskParaGeneral->aiv.rank,
+        taskParaGeneral->aiv.rankSize, taskParaGeneral->aiv.aivRdmaStep,
+        static_cast<u32>(taskParaGeneral->aiv.isOpbase), static_cast<u32>(IsTaskSemanticTraceEnabled()));
+
     TaskAivProfiler(ProfilerType::TASK_ALL, taskParaGeneral->stream, taskParaGeneral->aiv);
-    
-    if (GetIfProfile()){
+
+    bool profileOn = GetIfProfile();
+    HCCL_RUN_INFO("[HcclTaskSemanticAivDebug] after callback device_id[%d] get_if_profile[%u]",
+        deviceLogicId_, static_cast<u32>(profileOn));
+    if (profileOn) {
+        u32 taskID = 0;
+        u32 streamID = 0;
+        HcclResult ret = hrtGetTaskIdAndStreamID(taskID, streamID);
+        HCCL_RUN_INFO("[HcclTaskSemanticAivDebug] get task info device_id[%d] ret[%d] stream_id[%u] task_id[%u]",
+            deviceLogicId_, ret, streamID, taskID);
+        if (ret == HCCL_SUCCESS) {
+            HcclResult placeholderRet = ReportTaskSemanticTracePlaceholder(deviceLogicId_, streamID, taskID, "aiv");
+            HCCL_RUN_INFO("[HcclTaskSemanticAivDebug] placeholder ret[%d] device_id[%d] stream_id[%u] task_id[%u]",
+                placeholderRet, deviceLogicId_, streamID, taskID);
+        } else {
+            HCCL_WARNING("[ProfilerManagerImpl][%s]hrtGet task id and stream id fail, ret[%d]", __func__, ret);
+        }
+        HCCL_RUN_INFO("[HcclTaskSemanticAivDebug] report msprof api device_id[%d] is_main_stream[%u] begin_time[%llu]",
+            deviceLogicId_, static_cast<u32>(taskParaGeneral->isMainStream), taskParaGeneral->beginTime);
         auto &profilingManager = hccl::ProfilingManager::Instance();
-        (void)profilingManager.CallMsprofReportTaskApi(taskParaGeneral->isMainStream, taskParaGeneral->beginTime, ProfTaskType::TASK_AIV);
+        (void)profilingManager.CallMsprofReportTaskApi(taskParaGeneral->isMainStream, taskParaGeneral->beginTime,
+            ProfTaskType::TASK_AIV);
     }
 }
 
