@@ -265,7 +265,9 @@ HcclResult TaskProfiling::Run(const TaskData &taskData, bool isCapture)
         hcclReportData.tag.c_str(), hcclReportData.profInfo.cclTag, hcclReportData.groupName.c_str(),
         hcclReportData.profInfo.groupName);
 
-    CHK_RET(ReportTaskSemanticTrace(deviceLogicId_, taskData.streamID, taskData.taskID, taskData.taskType));
+    const TaskSemanticTraceInfo *semanticInfo =
+        taskData.hasSemanticTraceInfo ? &taskData.semanticTraceInfo : nullptr;
+    CHK_RET(ReportTaskSemanticTrace(deviceLogicId_, taskData.streamID, taskData.taskID, taskData.taskType, semanticInfo));
     DumpReportDataInfo(hcclReportData.type, hcclReportData.profInfo);
     CHK_RET(ReportMsprofData(hcclReportData));
     return HCCL_SUCCESS;

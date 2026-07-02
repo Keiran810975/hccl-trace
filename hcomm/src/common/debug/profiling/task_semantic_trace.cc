@@ -111,6 +111,17 @@ bool GetTaskSemanticTraceInfo(TaskSemanticTraceInfo &info)
     return true;
 }
 
+bool CaptureTaskSemanticTraceInfo(TaskSemanticTraceInfo &info)
+{
+    if (!GetTaskSemanticTraceInfo(info)) {
+        return false;
+    }
+    if (info.oneShot) {
+        g_taskSemanticValid = false;
+    }
+    return true;
+}
+
 void SetTaskSemanticTraceInfo(const TaskSemanticTraceInfo &info)
 {
     if (!IsTaskSemanticTraceEnabled()) {
@@ -143,11 +154,19 @@ void ClearTaskSemanticTraceInfo()
 
 HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskType taskType)
 {
+    TaskSemanticTraceInfo info{};
+    const TaskSemanticTraceInfo *infoPtr = CaptureTaskSemanticTraceInfo(info) ? &info : nullptr;
+    return ReportTaskSemanticTrace(deviceId, streamId, taskId, taskType, infoPtr);
+}
+
+HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskType taskType,
+    const TaskSemanticTraceInfo *info)
+{
     if (!IsTaskSemanticTraceEnabled()) {
         return HCCL_SUCCESS;
     }
     u64 semanticSeq = NextTaskSemanticSeq(deviceId, streamId);
-    if (!g_taskSemanticValid) {
+    if (info == nullptr) {
         static std::atomic<u32> logCount(0);
         u32 curLogCount = logCount.fetch_add(1);
         if (curLogCount < TASK_SEMANTIC_PROBE_LOG_LIMIT) {
@@ -162,16 +181,13 @@ HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskT
         "event[%s] phase[%s] step[%u] slice[%u] rank[%u] ranksize[%u] user_rank[%u] comm_rank[%u] "
         "rank_size[%u] peer_rank[%u] semantic[%s] device_id[%u] stream_id[%u] task_id[%u] "
         "semantic_seq[%llu] task_type[%u] task_kind[%s] source[%s]",
-        TASK_SEMANTIC_SCHEMA_VERSION, g_taskSemanticInfo.opId, SafeStr(g_taskSemanticInfo.opType),
-        SafeStr(g_taskSemanticInfo.algorithm), SafeStr(g_taskSemanticInfo.event), SafeStr(g_taskSemanticInfo.phase),
-        g_taskSemanticInfo.step, g_taskSemanticInfo.slice, g_taskSemanticInfo.userRank, g_taskSemanticInfo.rankSize,
-        g_taskSemanticInfo.userRank, g_taskSemanticInfo.commRank, g_taskSemanticInfo.rankSize,
-        g_taskSemanticInfo.peerRank, SafeStr(g_taskSemanticInfo.semantic), deviceId,
+        TASK_SEMANTIC_SCHEMA_VERSION, info->opId, SafeStr(info->opType),
+        SafeStr(info->algorithm), SafeStr(info->event), SafeStr(info->phase),
+        info->step, info->slice, info->userRank, info->rankSize,
+        info->userRank, info->commRank, info->rankSize,
+        info->peerRank, SafeStr(info->semantic), deviceId,
         streamId, taskId, semanticSeq, static_cast<u32>(taskType), TaskTypeToName(taskType),
-        SafeStr(g_taskSemanticInfo.source));
-    if (g_taskSemanticInfo.oneShot) {
-        g_taskSemanticValid = false;
-    }
+        SafeStr(info->source));
     return HCCL_SUCCESS;
 }
 } // namespace hccl

@@ -91,10 +91,12 @@ python -m tools.diagnosis.validate_trace \
 
 Producer plog rows should include `semantic_seq`, a zero-based sequence number
 per `(device_id, stream_id)` in the same order as successful msprof task
-reports. It must be consumed only for tasks that proceed to `ReportMsprofData`;
-otherwise sequence-based matching drifts. Logs without `semantic_seq` remain
-supported through the legacy `task_id` merge key. When `semantic_seq` is present
-but has no profiler sequence match, `merge_timeline` treats the row as unmatched
+reports. The semantic context should be captured when `TaskData` is created
+and later reported from that task-owned snapshot; reading the current thread
+semantic scope in `TaskProfiling::Run` can mix unrelated events such as ACK,
+data-signal, and payload work. Logs without `semantic_seq` remain supported
+through the legacy `task_id` merge key. When `semantic_seq` is present but has
+no profiler sequence match, `merge_timeline` treats the row as unmatched
 instead of falling back to `task_id`.
 
 Use `--keep-duplicate-semantic-keys` on `merge_timeline` only when inspecting

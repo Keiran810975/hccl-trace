@@ -23,6 +23,7 @@
 #include "profiler_base_pub.h"
 #include "adapter_prof.h"
 #include "prof_common.h"
+#include "task_semantic_trace.h"
 
 namespace hccl {
 constexpr u64 SHIFT_BITS_PLANE_ID = 28;
@@ -61,6 +62,8 @@ struct TaskData {
     TaskParaReduce Reduce;  // taskType = inline/CCE Reduce使用
     TaskParaNotify Notify;  // taskType = Noitfy Record/Wait使用
     TaskParaAiv Aiv;        // taskType = Aiv   使用
+    bool hasSemanticTraceInfo{false};
+    TaskSemanticTraceInfo semanticTraceInfo{};
 
     TaskData() : streamID(-1), taskID(-1), taskType(TaskType::TASK_SDMA)
     {
@@ -71,6 +74,7 @@ struct TaskData {
           taskType(taskType),
           DMA(para)
     {
+        CaptureSemanticTraceInfo();
     }
     TaskData(u32 &streamID, u32 &taskID, TaskType &taskType, const TaskParaReduce &para)
         : streamID(streamID),
@@ -78,6 +82,7 @@ struct TaskData {
           taskType(taskType),
           Reduce(para)
     {
+        CaptureSemanticTraceInfo();
     }
     TaskData(u32 &streamID, u32 &taskID, TaskType &taskType, const TaskParaNotify &para)
         : streamID(streamID),
@@ -85,6 +90,7 @@ struct TaskData {
           taskType(taskType),
           Notify(para)
     {
+        CaptureSemanticTraceInfo();
     }
     TaskData(u32 &streamID, u32 &taskID, TaskType &taskType, const TaskParaAiv &para)
         : streamID(streamID),
@@ -92,6 +98,13 @@ struct TaskData {
           taskType(taskType),
           Aiv(para)
     {
+        CaptureSemanticTraceInfo();
+    }
+
+private:
+    void CaptureSemanticTraceInfo()
+    {
+        hasSemanticTraceInfo = CaptureTaskSemanticTraceInfo(semanticTraceInfo);
     }
 };
 
