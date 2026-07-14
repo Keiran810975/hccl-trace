@@ -23,6 +23,7 @@ struct TaskSemanticTraceInfo {
     const char *semantic{nullptr};
     const char *source{"host"};
     u64 opId{0};
+    u64 deviceTs{0};        // device timestamp in same domain as CSV task_start(us), for alignment
     u32 step{0};
     u32 slice{0};
     u32 userRank{0};

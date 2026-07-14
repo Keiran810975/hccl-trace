@@ -75,8 +75,6 @@ def parse_legacy_block(lines: Iterable[str]) -> Iterator[SemanticRecord]:
 def semantic_from_mapping(data: Dict[str, str]) -> SemanticRecord:
     return SemanticRecord(
         schema_version=parse_int(data.get("schema_version"), SCHEMA_VERSION),
-        op_id=data.get("op_id", ""),
-        op_type=data.get("op_type", data.get("operation", "")),
         algorithm=data.get("algorithm", ""),
         phase=data.get("phase", ""),
         step=parse_int(data.get("step")),
@@ -88,12 +86,13 @@ def semantic_from_mapping(data: Dict[str, str]) -> SemanticRecord:
         event=data.get("event", ""),
         semantic=data.get("semantic", ""),
         stream_id=parse_int(data.get("stream_id")),
-        task_id=parse_int(data.get("task_id")),
+        task_id=parse_int(data.get("hccl_task_id", data.get("task_id"))),
         semantic_seq=parse_int(data.get("semantic_seq", data.get("task_seq"))),
         profiler_seq=parse_int(data.get("profiler_seq", data.get("submit_seq"))),
         task_kind=data.get("task_kind", data.get("task_type", "")),
         source=data.get("source", ""),
         device_id=parse_int(data.get("device_id", data.get("device"))),
+        device_ts=parse_int(data.get("device_ts")),
         node_id=data.get("node_id", ""),
         pid=parse_int(data.get("pid")),
     )

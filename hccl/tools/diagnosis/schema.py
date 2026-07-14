@@ -14,8 +14,6 @@ PROFILER_TRACE_EX = "PROFILER_TRACE_EX"
 
 SEMANTIC_FIELDS = (
     "schema_version",
-    "op_id",
-    "op_type",
     "algorithm",
     "phase",
     "step",
@@ -33,6 +31,7 @@ SEMANTIC_FIELDS = (
     "task_kind",
     "source",
     "device_id",
+    "device_ts",
     "node_id",
     "pid",
 )
@@ -67,8 +66,6 @@ MERGED_FIELDS = (
 @dataclass(frozen=True)
 class SemanticRecord:
     schema_version: int = SCHEMA_VERSION
-    op_id: str = ""
-    op_type: str = ""
     algorithm: str = ""
     phase: str = ""
     step: int = -1
@@ -86,6 +83,7 @@ class SemanticRecord:
     task_kind: str = ""
     source: str = ""
     device_id: int = -1
+    device_ts: int = 0
     node_id: str = ""
     pid: int = -1
 

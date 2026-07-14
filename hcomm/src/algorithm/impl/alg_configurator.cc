@@ -376,8 +376,9 @@ HcclResult AlgConfigurator::GetDefaultAlgoLevel0Module(AlgTypeLevel0 &algType)
         topoAttr_.pairLinkCounter[static_cast<u32>(LinkTypeInServer::HCCS_TYPE)] ==
         FACTOR_NUM_TWO * deviceNumPerAggregation * (deviceNumPerAggregation - 1)) &&
         topoAttr_.deviceType == DevType::DEV_TYPE_910B) {
-        algType = AlgTypeLevel0::ALG_LEVEL0_NP_MESH;
-        HCCL_DEBUG("[GetDefaultAlgoLevel0Module] AlgTypeLevel0 is set to ALG_LEVEL0_NP_MESH (HCCS links is enabled).");
+        // [TEST PATCH] Force SINGLE_RING to trigger AllReduceRingFor91093Executor (TaskSemanticScope instrumentation)
+        algType = AlgTypeLevel0::ALG_LEVEL0_NP_SINGLE_RING;
+        HCCL_DEBUG("[GetDefaultAlgoLevel0Module] AlgTypeLevel0 is set to ALG_LEVEL0_NP_SINGLE_RING (TEST PATCH: force ring).");
     }
 
     if (topoAttr_.deviceType == DevType::DEV_TYPE_910_93) {

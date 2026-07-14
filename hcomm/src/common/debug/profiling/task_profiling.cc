@@ -267,7 +267,15 @@ HcclResult TaskProfiling::Run(const TaskData &taskData, bool isCapture)
 
     const TaskSemanticTraceInfo *semanticInfo =
         taskData.hasSemanticTraceInfo ? &taskData.semanticTraceInfo : nullptr;
-    CHK_RET(ReportTaskSemanticTrace(deviceLogicId_, taskData.semanticStreamID, taskData.taskID, taskData.taskType, semanticInfo));
+    // Inject device timestamp into semantic trace for alignment with CSV/JSON
+    TaskSemanticTraceInfo enrichedInfo;
+    if (semanticInfo != nullptr) {
+        enrichedInfo = *semanticInfo;
+        enrichedInfo.deviceTs = hcclReportData.ts;
+        semanticInfo = &enrichedInfo;
+    }
+    CHK_RET(ReportTaskSemanticTrace(deviceLogicId_, taskData.semanticStreamID, taskData.taskID,
+        taskData.taskType, semanticInfo));
     DumpReportDataInfo(hcclReportData.type, hcclReportData.profInfo);
     CHK_RET(ReportMsprofData(hcclReportData));
     return HCCL_SUCCESS;

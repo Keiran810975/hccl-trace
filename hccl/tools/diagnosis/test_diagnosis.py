@@ -57,8 +57,8 @@ class DiagnosisToolTest(unittest.TestCase):
 
     def test_ai_core_keeps_sequence_but_is_not_unmatched_noise(self):
         semantics = list(parse_legacy_block([
-            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[0] semantic_seq[1] task_kind[notify_wait] "
-            "event[rx_ack_start] phase[reduce_scatter_direct] step[0] rank[0] ranksize[2] "
+            "[HcclTaskSemantic] device_id[0] stream_id[12] hccl_task_id[0] semantic_seq[1] task_kind[notify_wait] "
+            "event[rx_ack_start] phase[reduce_scatter_direct] step[0] user_rank[0] comm_rank[0] rank_size[2] "
             "slice[0] semantic[link_rx_ack]\n",
         ]))
         profilers = list(parse_task_time_rows([
@@ -97,9 +97,10 @@ class DiagnosisToolTest(unittest.TestCase):
                 with open(path, "w", encoding="utf-8") as output:
                     output.write(
                         "[INFO] HCCL(502444,python):2026-01-01-00:00:00.000.000 "
-                        "[task_semantic_trace.cc:126] [502444][HcclTaskSemantic] "
-                        f"device_id[{rank}] stream_id[12] task_id[34] task_kind[notify_wait] "
-                        f"event[rx_ack_start] phase[reduce_scatter_direct] step[0] rank[{rank}] ranksize[2] "
+                        "[task_semantic_trace.cc:217] [502444][HcclTaskSemantic] "
+                        f"device_id[{rank}] stream_id[12] hccl_task_id[34] task_kind[notify_wait] "
+                        f"event[rx_ack_start] phase[reduce_scatter_direct] step[0] "
+                        f"user_rank[{rank}] comm_rank[{rank}] rank_size[2] "
                         "slice[0] semantic[link_rx_ack]\n"
                     )
 
@@ -110,19 +111,43 @@ class DiagnosisToolTest(unittest.TestCase):
 
     def test_parse_profiler_seq_field(self):
         semantics = list(parse_legacy_block([
-            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[3] semantic_seq[0] profiler_seq[2] "
+            "[HcclTaskSemantic] device_id[0] stream_id[12] hccl_task_id[3] semantic_seq[0] profiler_seq[2] "
             "task_kind[notify_wait] event[rx_ack_start] phase[reduce_scatter_direct] step[0] "
-            "rank[0] ranksize[2] slice[0] semantic[link_rx_ack]\n",
+            "user_rank[0] comm_rank[0] rank_size[2] slice[0] semantic[link_rx_ack]\n",
         ]))
 
         self.assertEqual(semantics[0].semantic_seq, 0)
         self.assertEqual(semantics[0].profiler_seq, 2)
 
+    def test_parse_device_ts_field(self):
+        semantics = list(parse_legacy_block([
+            "[HcclTaskSemantic] schema_version[1] algorithm[single_ring_direct] "
+            "event[copy_start] phase[reduce_scatter_direct] step[0] slice[5] "
+            "user_rank[7] comm_rank[7] rank_size[8] peer_rank[4294967295] semantic[hccl_local_copy] "
+            "device_id[7] stream_id[45] hccl_task_id[0] "
+            "semantic_seq[0] profiler_seq[3] task_type[0] task_kind[sdma] "
+            "device_ts[1783015731413749] source[host]\n",
+        ]))
+        self.assertEqual(semantics[0].device_ts, 1783015731413749)
+        self.assertEqual(semantics[0].task_id, 0)
+        self.assertEqual(semantics[0].stream_id, 45)
+        self.assertEqual(semantics[0].device_id, 7)
+        self.assertEqual(semantics[0].task_kind, "sdma")
+        self.assertEqual(semantics[0].event, "copy_start")
+
+    def test_parse_legacy_task_id_fallback(self):
+        semantics = list(parse_legacy_block([
+            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[34] semantic_seq[0] profiler_seq[2] "
+            "task_kind[notify_wait] event[rx_ack_start] phase[reduce_scatter_direct] step[0] "
+            "user_rank[0] comm_rank[0] rank_size[2] slice[0] semantic[link_rx_ack]\n",
+        ]))
+        self.assertEqual(semantics[0].task_id, 34)
+
     def test_profiler_seq_matches_profiler_stream_order(self):
         semantics = list(parse_legacy_block([
-            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[0] semantic_seq[0] profiler_seq[1] "
+            "[HcclTaskSemantic] device_id[0] stream_id[12] hccl_task_id[0] semantic_seq[0] profiler_seq[1] "
             "task_kind[notify_wait] event[rx_ack_start] phase[reduce_scatter_direct] step[0] "
-            "rank[0] ranksize[2] slice[0] semantic[link_rx_ack]\n",
+            "user_rank[0] comm_rank[0] rank_size[2] slice[0] semantic[link_rx_ack]\n",
         ]))
         profilers = list(parse_task_time_rows([
             {"Device_id": "0", "stream_id": "12", "task_id": "100", "kernel_type": "MEMCPY_ASYNC", "task_start(us)": "10", "task_stop(us)": "11", "task_time(us)": "1"},
@@ -138,11 +163,11 @@ class DiagnosisToolTest(unittest.TestCase):
 
     def test_semantic_seq_matches_profiler_stream_order(self):
         semantics = list(parse_legacy_block([
-            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[0] semantic_seq[0] task_kind[notify_wait] "
-            "event[rx_ack_start] phase[reduce_scatter_direct] step[0] rank[0] ranksize[2] "
+            "[HcclTaskSemantic] device_id[0] stream_id[12] hccl_task_id[0] semantic_seq[0] task_kind[notify_wait] "
+            "event[rx_ack_start] phase[reduce_scatter_direct] step[0] user_rank[0] comm_rank[0] rank_size[2] "
             "slice[0] semantic[link_rx_ack]\n",
-            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[0] semantic_seq[1] task_kind[notify_wait] "
-            "event[rx_ack_start] phase[reduce_scatter_direct] step[1] rank[0] ranksize[2] "
+            "[HcclTaskSemantic] device_id[0] stream_id[12] hccl_task_id[0] semantic_seq[1] task_kind[notify_wait] "
+            "event[rx_ack_start] phase[reduce_scatter_direct] step[1] user_rank[0] comm_rank[0] rank_size[2] "
             "slice[1] semantic[link_rx_ack]\n",
         ]))
         profilers = list(parse_task_time_rows([
@@ -160,9 +185,9 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertEqual([row["task_start"] for row in rows], ["10", "12"])
     def test_missing_kernel_kind_becomes_semantic_only(self):
         semantics = list(parse_legacy_block([
-            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[0] semantic_seq[0] profiler_seq[0] "
+            "[HcclTaskSemantic] device_id[0] stream_id[12] hccl_task_id[0] semantic_seq[0] profiler_seq[0] "
             "task_kind[reduce_inline] event[rx_payload_reduce_start] phase[reduce_scatter_direct] "
-            "step[0] rank[0] ranksize[2] slice[0] semantic[link_rx_payload_reduce]\n",
+            "step[0] user_rank[0] comm_rank[0] rank_size[2] slice[0] semantic[link_rx_payload_reduce]\n",
         ]))
         profilers = list(parse_task_time_rows([
             {"Device_id": "0", "stream_id": "12", "task_id": "10", "kernel_type": "NOTIFY_RECORD", "task_start(us)": "10", "task_stop(us)": "11", "task_time(us)": "1"},
@@ -177,8 +202,8 @@ class DiagnosisToolTest(unittest.TestCase):
 
     def test_semantic_seq_type_mismatch_is_not_matched(self):
         semantics = list(parse_legacy_block([
-            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[0] semantic_seq[0] task_kind[notify_wait] "
-            "event[rx_ack_start] phase[reduce_scatter_direct] step[0] rank[0] ranksize[2] "
+            "[HcclTaskSemantic] device_id[0] stream_id[12] hccl_task_id[0] semantic_seq[0] task_kind[notify_wait] "
+            "event[rx_ack_start] phase[reduce_scatter_direct] step[0] user_rank[0] comm_rank[0] rank_size[2] "
             "slice[0] semantic[link_rx_ack]\n",
         ]))
         profilers = list(parse_task_time_rows([
@@ -194,11 +219,11 @@ class DiagnosisToolTest(unittest.TestCase):
 
     def test_type_mismatch_can_fallback_to_compatible_task_id(self):
         semantics = list(parse_legacy_block([
-            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[11] semantic_seq[0] task_kind[notify_wait] "
-            "event[rx_ack_start] phase[reduce_scatter_direct] step[0] rank[0] ranksize[2] "
+            "[HcclTaskSemantic] device_id[0] stream_id[12] hccl_task_id[11] semantic_seq[0] task_kind[notify_wait] "
+            "event[rx_ack_start] phase[reduce_scatter_direct] step[0] user_rank[0] comm_rank[0] rank_size[2] "
             "slice[0] semantic[link_rx_ack]\n",
-            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[12] semantic_seq[2] task_kind[notify_record] "
-            "event[tx_ack_start] phase[reduce_scatter_direct] step[0] rank[0] ranksize[2] "
+            "[HcclTaskSemantic] device_id[0] stream_id[12] hccl_task_id[12] semantic_seq[2] task_kind[notify_record] "
+            "event[tx_ack_start] phase[reduce_scatter_direct] step[0] user_rank[0] comm_rank[0] rank_size[2] "
             "slice[0] semantic[link_tx_ack]\n",
         ]))
         profilers = list(parse_task_time_rows([
@@ -216,8 +241,8 @@ class DiagnosisToolTest(unittest.TestCase):
 
     def test_task_id_fallback_keeps_type_check_for_node_id_fallback(self):
         semantics = list(parse_legacy_block([
-            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[11] semantic_seq[0] task_kind[notify_wait] "
-            "event[rx_ack_start] phase[reduce_scatter_direct] step[0] rank[0] ranksize[2] "
+            "[HcclTaskSemantic] device_id[0] stream_id[12] hccl_task_id[11] semantic_seq[0] task_kind[notify_wait] "
+            "event[rx_ack_start] phase[reduce_scatter_direct] step[0] user_rank[0] comm_rank[0] rank_size[2] "
             "slice[0] semantic[link_rx_ack]\n",
         ]))
         profilers = list(parse_task_time_rows([
@@ -234,8 +259,8 @@ class DiagnosisToolTest(unittest.TestCase):
 
     def test_semantic_seq_miss_does_not_fall_back_to_task_id(self):
         semantics = list(parse_legacy_block([
-            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[100] semantic_seq[9] task_kind[notify_wait] "
-            "event[rx_ack_start] phase[reduce_scatter_direct] step[0] rank[0] ranksize[2] "
+            "[HcclTaskSemantic] device_id[0] stream_id[12] hccl_task_id[100] semantic_seq[9] task_kind[notify_wait] "
+            "event[rx_ack_start] phase[reduce_scatter_direct] step[0] user_rank[0] comm_rank[0] rank_size[2] "
             "slice[0] semantic[link_rx_ack]\n",
         ]))
         profilers = list(parse_task_time_rows([
@@ -250,8 +275,8 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertEqual(rows[0]["match_status"], "unmatched_semantic")
     def test_rank_as_device_fallback_is_explicit(self):
         semantics = list(parse_legacy_block([
-            "[HcclTaskSemantic] stream_id[12] task_id[34] task_kind[notify_wait] "
-            "event[rx_ack_start] phase[reduce_scatter_direct] step[0] rank[0] ranksize[8] "
+            "[HcclTaskSemantic] stream_id[12] hccl_task_id[34] task_kind[notify_wait] "
+            "event[rx_ack_start] phase[reduce_scatter_direct] step[0] user_rank[0] comm_rank[0] rank_size[8] "
             "slice[7] semantic[link_rx_ack]\n"
         ]))
         profilers = list(parse_task_time_rows([
@@ -278,11 +303,11 @@ class DiagnosisToolTest(unittest.TestCase):
 
     def test_duplicate_semantic_keys_are_deduped_by_default(self):
         semantics = list(parse_legacy_block([
-            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[34] task_kind[sdma] "
-            "event[allreduce_start] phase[allreduce_executor] step[0] rank[0] ranksize[8] "
+            "[HcclTaskSemantic] device_id[0] stream_id[12] hccl_task_id[34] task_kind[sdma] "
+            "event[allreduce_start] phase[allreduce_executor] step[0] user_rank[0] comm_rank[0] rank_size[8] "
             "slice[0] semantic[allreduce_executor]\n",
-            "[HcclTaskSemantic] device_id[0] stream_id[12] task_id[34] task_kind[sdma] "
-            "event[copy_start] phase[reduce_scatter_direct] step[0] rank[0] ranksize[8] "
+            "[HcclTaskSemantic] device_id[0] stream_id[12] hccl_task_id[34] task_kind[sdma] "
+            "event[copy_start] phase[reduce_scatter_direct] step[0] user_rank[0] comm_rank[0] rank_size[8] "
             "slice[6] semantic[hccl_local_copy]\n",
         ]))
         profilers = list(parse_task_time_rows([
