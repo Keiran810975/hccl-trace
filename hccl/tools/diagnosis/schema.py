@@ -9,7 +9,6 @@ from typing import Dict, Iterable, List, Optional
 
 SCHEMA_VERSION = 1
 TRACE_TAG = "[HcclTaskSemantic]"
-PROFILER_TRACE_EX = "PROFILER_TRACE_EX"
 
 
 SEMANTIC_FIELDS = (
@@ -31,7 +30,11 @@ SEMANTIC_FIELDS = (
     "task_kind",
     "source",
     "device_id",
-    "device_ts",
+    "submit_ts",
+    "notify_id",
+    "notify_stage",
+    "notify_remote_rank",
+    "notify_ctx_id",
     "node_id",
     "pid",
 )
@@ -47,6 +50,11 @@ PROFILER_FIELDS = (
     "task_stop",
     "duration",
     "kernel_type",
+    "event_name",
+    "subtask_id",
+    "connection_id",
+    "model_id",
+    "flow_id",
 )
 
 
@@ -56,10 +64,19 @@ MERGED_FIELDS = (
     "duplicate_profiler",
 ) + SEMANTIC_FIELDS + (
     "profiler_task_kind",
+    "profiler_stream_id",
+    "profiler_task_id",
     "task_start",
     "task_stop",
     "duration",
     "kernel_type",
+    "event_name",
+    "subtask_id",
+    "connection_id",
+    "model_id",
+    "flow_id",
+    "match_method",
+    "match_confidence",
 )
 
 
@@ -83,7 +100,11 @@ class SemanticRecord:
     task_kind: str = ""
     source: str = ""
     device_id: int = -1
-    device_ts: int = 0
+    submit_ts: int = 0
+    notify_id: int = -1
+    notify_stage: int = -1
+    notify_remote_rank: int = -1
+    notify_ctx_id: int = -1
     node_id: str = ""
     pid: int = -1
 
@@ -106,10 +127,19 @@ class ProfilerTask:
     task_stop: str = ""
     duration: str = ""
     kernel_type: str = ""
+    event_name: str = ""
+    subtask_id: int = -1
+    connection_id: int = -1
+    model_id: int = -1
+    flow_id: str = ""
 
     @property
     def merge_key(self):
         return (self.node_id, self.device_id, self.stream_id, self.task_id)
+
+    @property
+    def execution_key(self):
+        return self.merge_key + (self.subtask_id, self.connection_id)
 
     def to_row(self) -> Dict[str, object]:
         return _to_row(self, PROFILER_FIELDS)
@@ -130,14 +160,6 @@ def parse_int(value: Optional[str], default: int = -1) -> int:
         return int(text, 0)
     except ValueError:
         return default
-
-
-def first_present(row: Dict[str, str], names: Iterable[str], default: str = "") -> str:
-    lowered = {key.strip().lower(): value for key, value in row.items()}
-    for name in names:
-        if name.lower() in lowered and str(lowered[name.lower()]).strip() != "":
-            return str(lowered[name.lower()]).strip()
-    return default
 
 
 def normalize_task_kind(value: str) -> str:

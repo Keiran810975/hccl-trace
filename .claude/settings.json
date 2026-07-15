@@ -5,7 +5,11 @@
       "Bash(git -C c:/Users/Admin/Desktop/ATC/hccl-trace/hccl diff 28946c2..4600cb6)",
       "Bash(git -C c:/Users/Admin/Desktop/ATC/hccl-trace/hcomm log --oneline dev-innerDia -8)",
       "Bash(git -C c:/Users/Admin/Desktop/ATC/hccl-trace/hcomm diff 9e60ec27..7db54477 --stat)",
-      "Bash(git -C c:/Users/Admin/Desktop/ATC/hccl-trace/hcomm diff 9e60ec27..7db54477)"
+      "Bash(git -C c:/Users/Admin/Desktop/ATC/hccl-trace/hcomm diff 9e60ec27..7db54477)",
+      "Bash(xargs -I{} dirname \"{}\")",
+      "Bash(grep -v \"^-1$\")",
+      "Bash(sort -t= -k2 -n)",
+      "Read(//c/Users/Admin/.claude/projects/c--Users-Admin-Desktop-ATC-hccl-trace/b45f0b83-5f24-478f-90df-9bd14f1da51d/tool-results/**)"
     ]
   }
 }

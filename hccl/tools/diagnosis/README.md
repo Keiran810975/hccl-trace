@@ -1,133 +1,92 @@
-# HCCL Step Trace Diagnosis Tools
+# HCCL fine-grained trace diagnosis
 
-This directory contains the offline tooling for step-level trace data described
-in `docs/help/step-trace-causal-diagnosis-migration-plan.md`.
+诊断链只接受两个事实源：HCOMM `[HcclTaskSemantic]` plog 与 msprof
+`msprof_*.json`。`task_time.csv` 会把 FFts 图压缩为一个 `AI_CORE` 父任务，已不再支持。
 
-Current scope:
+## 数据流
 
-- parse `[HcclTaskSemantic]` plog rows;
-- support both `field=value` rows and legacy `field[value]` rows from the
-  verified `cann-hccl` prototype;
-- parse msprof `task_time.csv` rows;
-- skip `PROFILER_TRACE_EX` marker rows;
-- merge records by `(node_id, device_id, stream_id, profiler_seq)` when the
-  producer provides `profiler_seq`, and fall back to legacy `semantic_seq`
-  or `(node_id, device_id, stream_id, task_id)` for older logs;
-- require semantic `device_id` by default instead of inferring it from rank;
-- dedupe duplicate semantic merge keys by default while reporting the input
-  duplicate counts in the merge summary;
-- for single-node legacy plog rows without `device_id`,
-  `--rank-as-device-fallback` can explicitly use semantic `rank` as the msprof
-  `Device_id` when the profiler task match is unique;
-- render matched merged rows as a standalone SVG timeline; default layout uses
-  logical phase/step/event columns to avoid dense task rectangles collapsing
-  into one another;
-- render inferred task dependency edges as a standalone SVG graph, including
-  same-rank program order, right-neighbor ACK dependencies, upstream data-signal
-  dependencies, same-rank/upstream payload step edges, RS-to-AG phase bridge
-  edges, and ack/signal/payload edges when the events are present;
-- report duplicate, unmatched semantic, and unmatched profiler records.
+```text
+plog semantic ─┐
+               ├─ merge_timeline.py ── merged.csv
+msprof JSON ───┘                         ├─ validate_trace.py
+                                        ├─ visualize_dependency_graph.py → edge/node CSV
+                                        └─ visualize_html.py → interactive HTML
+```
 
-Example:
+JSON 解析保留物理 stream/task/subtask、`connection_id`、HostToDevice flow id、硬件事件名
+和执行起止时间。合并结果同时保留未标注的 `profiler_only` 执行单元。
+
+## 聚合
 
 ```bash
 python -m tools.diagnosis.merge_timeline \
-  --plog tools/diagnosis/fixtures/sample.plog \
-  --task-time tools/diagnosis/fixtures/task_time.csv \
-  --node-id node0 \
-  -o tools/diagnosis/fixtures/merged.csv \
-  --summary tools/diagnosis/fixtures/summary.csv
-
-# Multi-rank runs usually produce one plog per worker and one task_time*.csv per
-# profiler process. Use directory inputs to merge all ranks at once.
-python -m tools.diagnosis.merge_timeline \
-  --plog-dir /path/to/plog_dir \
-  --task-time-dir /path/to/msprof_final \
+  --plog-dir /path/to/plog \
+  --msprof-json-dir /path/to/msprof \
   --node-id node0 \
   -o merged.csv \
   --summary summary.csv
-
-python -m tools.diagnosis.visualize_timeline \
-  tools/diagnosis/fixtures/merged.csv \
-  --output tools/diagnosis/fixtures/timeline.svg
-
-python -m tools.diagnosis.visualize_dependency_graph \
-  tools/diagnosis/fixtures/merged.csv \
-  --output tools/diagnosis/fixtures/dependency.svg
-
-# For dense real traces, prefer HTML/canvas output. It avoids creating tens of
-# thousands of SVG DOM nodes and supports wheel/keyboard/minimap navigation plus hover details.
-python -m tools.diagnosis.visualize_html \
-  tools/diagnosis/fixtures/merged.csv \
-  --view timeline \
-  --layout time \
-  --output tools/diagnosis/fixtures/timeline_time.html
-
-python -m tools.diagnosis.visualize_html \
-  tools/diagnosis/fixtures/merged.csv \
-  --view dependency \
-  --output tools/diagnosis/fixtures/dependency.html
-
-# If semantic user_rank collapses to one value while Device_id spans multiple
-# cards, the default --rank-field auto renders rows by device/card. Force a
-# field explicitly when needed:
-python -m tools.diagnosis.visualize_dependency_graph \
-  tools/diagnosis/fixtures/merged.csv \
-  --rank-field device_id \
-  --output tools/diagnosis/fixtures/dependency_by_card.svg
-
-# Time layout stacks overlapping tasks inside each lane. The default
-# --time-scale minimum keeps at least --min-px-per-us, so the SVG may become
-# wider than --max-width; use --time-scale fit when a capped overview is needed.
-python -m tools.diagnosis.visualize_timeline \
-  tools/diagnosis/fixtures/merged.csv \
-  --layout time \
-  --output tools/diagnosis/fixtures/timeline_time.svg
-
-python -m tools.diagnosis.validate_trace \
-  tools/diagnosis/fixtures/merged.csv \
-  --min-match-rate 95
 ```
 
-Producer plog rows should include two stream-local sequence numbers:
+匹配分为：
 
-- `profiler_seq`: zero-based position among all task profiling reports on the
-  `(device_id, stream_id)` stream, including tasks without semantic context.
-  This is the primary key used to align semantic rows with msprof task_time
-  stream order.
-- `semantic_seq`: zero-based position among rows that actually emit
-  `[HcclTaskSemantic]`. This is for semantic ordering and diagnostics, not for
-  matching the full profiler stream.
+- `json_task_id / exact`：普通任务的 device/physical-stream/task id 与 task kind 唯一一致。
+- `json_composite_profiler_seq / heuristic`：FFts 将一条父任务展开为多个 subtask，现有
+  plog 没有 subtask correlation id，只能在已验证的 direct-ring 图结构内按相对序关联。
+- `unmatched_semantic`：无法唯一认领物理执行单元；不得用时间最近原则强行匹配。
+- `profiler_only`：JSON 中存在但没有语义声明的执行单元。
 
-The semantic context should be captured when `TaskData` is created and later
-reported from that task-owned snapshot; reading the current thread semantic
-scope in `TaskProfiling::Run` can mix unrelated events such as ACK, data-signal,
-and payload work. Logs without `profiler_seq` remain supported through the
-legacy `semantic_seq` and `task_id` merge paths.
+`submit_ts` 是 msprof host-cycle 提交时间，只能缩小候选窗口和做一致性检查，不能替代
+task/subtask correlation id。设备执行起止时间始终来自 JSON。
 
-`AI_CORE` profiler rows are kept while building per-stream sequence numbers
-because `profiler_seq` is an absolute profiler-stream position. They are treated
-as ignored unmatched profiler rows in the main summary, and dependency graph
-rendering stays focused on communication events: rx/tx ACK, rx/tx data signal,
-and payload copy/reduce. `merge_timeline` also validates the semantic
-`task_kind` against profiler `kernel_type`; incompatible sequence hits are
-reported as `type_mismatch`. `task_id` and graph `ctxId` are diagnostic fields
-only for modern producer logs because they can be unavailable, local to a graph,
-or reused across repeated graph execution.
+## 依赖图
 
-Use `--keep-duplicate-semantic-keys` on `merge_timeline` only when inspecting
-raw producer-side duplicate behavior. The default merged CSV is intended for
-validation and visualization.
+```bash
+python -m tools.diagnosis.visualize_dependency_graph merged.csv \
+  -o dependency
 
-`visualize_dependency_graph` currently infers dependencies from the merged task
-rows only. It does not require the legacy prototype's interval or flow-order CSV
-files, so it can run directly after `merge_timeline`. The default `--rank-field
-auto` uses `user_rank` when it is usable, and falls back to `device_id` for
-visual rows when all semantic rows report the same user rank but multiple
-profiler devices are present. The default `--node-mode compact` keeps one RxAck,
-one Signal, and one payload representative per phase/rank/step; use
-`--node-mode task` only when inspecting every matched slice/task row. Deeper
-wait-interval and multi-node NHR edges should be added as separate analysis
-layers when those intermediate artifacts are available.
+python -m tools.diagnosis.visualize_html merged.csv \
+  --view dependency \
+  --output dependency.html
+```
 
-The tools use only the Python standard library.
+依赖边包含证据等级：
+
+- `stream_order_observed`：JSON 中同一物理 stream 的相邻执行顺序，`observed`。
+- `notify_sync_observed`：重新采集后 plog 中 record/wait 具有相同 `notify_id`，`observed`。
+- `notify_sync_inferred`：旧样本无 notify id，按同 device/connection、跨 stream、事件类型
+  和唯一时间候选推断，`inferred`。
+- `peer_signal_semantic` / `peer_payload_semantic`：显式 peer rank、phase、step、slice 相同，
+  再按 occurrence 顺序配对，`semantic`。
+
+旧实现中的“右邻居上一 payload”“上一 step”等算法规则不再作为默认边；它们不是 JSON
+观测事实。多节点精确边仍需要 collective instance id、统一时钟或单独的时钟校准 artifact。
+
+## 交互可视化
+
+```bash
+python -m tools.diagnosis.visualize_html merged.csv \
+  --view timeline --layout time -o timeline.html
+```
+
+Dependency HTML 使用类似 Perfetto 的固定高度物理 stream 轨道，水平时间缩放不会再压缩
+纵向轨道。默认不绘制全局依赖边；单击任务后只高亮该任务、直接前驱、直接后继和对应
+依赖边，右侧详情面板可沿依赖继续跳转，双击任务会聚焦到该任务。它支持 device、rank、
+stream、event、edge kind 和文本筛选，并提供时间标尺与全局 overview。
+
+Dependency HTML 不做密度聚合。零时长任务始终显示为菱形 marker；非零任务在当前缩放
+下真实持续时间不足 2 个屏幕像素时也显示为 marker，放大后自动恢复为真实宽度矩形。
+同一点击位置存在多个任务时，右侧详情面板列出候选任务供进一步选择。
+
+Timeline HTML 继续支持 device、rank、stream、event、时间范围和文本筛选。鼠标悬停显示
+task/subtask、语义、硬件事件、匹配方式与置信度。
+
+## 验证
+
+```bash
+python -m py_compile hccl/tools/diagnosis/*.py
+python -m unittest hccl.tools.diagnosis.test_diagnosis -v
+python -m tools.diagnosis.validate_trace merged.csv --min-match-rate 95
+```
+
+质量结论必须同时报告 exact rate、heuristic count、kind mismatch、unmatched semantic 和
+duplicate execution key。总匹配率不能单独证明细粒度因果关系正确。

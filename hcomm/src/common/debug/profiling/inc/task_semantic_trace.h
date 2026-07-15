@@ -23,7 +23,11 @@ struct TaskSemanticTraceInfo {
     const char *semantic{nullptr};
     const char *source{"host"};
     u64 opId{0};
-    u64 deviceTs{0};        // device timestamp in same domain as CSV task_start(us), for alignment
+    u64 submitTs{0};        // msprof host-cycle submit timestamp; candidate window/validation only
+    u64 notifyId{0};
+    s32 notifyStage{-1};
+    u32 notifyRemoteRank{INVALID_VALUE_RANKID};
+    u32 notifyCtxId{INVALID_VALUE_RANKID};
     u32 step{0};
     u32 slice{0};
     u32 userRank{0};

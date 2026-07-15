@@ -7,7 +7,7 @@
 功能测试要证明：
 
 - `HCCL_STEP_TRACE=1` 时，运行 single-ring AllReduce 能在 plog 中产生 `[HcclTaskSemantic]` 记录。
-- 语义记录能与 msprof `task_time.csv` 按 `(node_id, device_id, stream_id, task_id)` 合并。
+- 仅与 msprof Chrome-trace JSON 聚合，保留 AI_CORE 内的 SDMA、Write Value、Notify Wait 和 `Subtask Id`。
 - `validate_trace` 的匹配率达到阈值，建议先用 `--min-match-rate 95`。
 - 输出中覆盖 `allreduce_executor`、`reduce_scatter_direct`、`allgather_direct`，以及 `tx_payload_start`、`rx_payload_copy_start`、`rx_payload_reduce_start`、`copy_start` 等事件。
 
@@ -24,7 +24,7 @@
 - CANN Toolkit/driver 环境可用，`set_env.sh` 已 source。
 - 当前 `hcomm` 改动已构建并被运行时加载。HCOMM 变更需要在 `hcomm` 仓库自身验证，不要只构建 `hccl`。
 - 有一条稳定的单机 AllReduce 命令，最好是 8 卡 single-ring 路径。
-- 能采集 HCCL plog 和 msprof `task_time.csv`。
+- 能采集 HCCL plog 和 msprof `msprof_*.json`。
 
 建议先完成构建：
 
@@ -64,7 +64,7 @@ msprof --application="./some_all_reduce_test --rank-size 8 --count 268435456" --
 1. 清理旧输出目录和旧 profiler 输出。
 2. 开启 `HCCL_STEP_TRACE=1` 运行 AllReduce。
 3. 从 HCCL plog 中找到包含 `[HcclTaskSemantic]` 的文件。
-4. 从 msprof 输出目录找到 `task_time.csv`。
+4. 从 msprof 输出目录找到 `mindstudio_profiler_output/msprof_*.json`。
 5. 执行 merge 和 validate。
 
 示例：
@@ -75,7 +75,7 @@ cd /path/to/hccl-trace
 bash test/run_step_trace_function_test.sh \
   --out-dir test/out/function \
   --plog /path/to/hccl/plog.log \
-  --task-time /path/to/msprof/task_time.csv \
+  --msprof-json-dir /path/to/msprof \
   --node-id node0 \
   --min-match-rate 95 \
   -- \
@@ -87,25 +87,25 @@ bash test/run_step_trace_function_test.sh \
 ```bash
 bash test/run_step_trace_function_test.sh \
   --plog /path/to/hccl/plog.log \
-  --task-time /path/to/msprof/task_time.csv
+  --msprof-json-dir /path/to/msprof
 ```
 
 功能通过的最低标准：
 
 - 脚本退出码为 0。
 - `semantic_total > 0`。
-- `match_rate_percent >= 95`。
+- `match_rate_percent >= 95`，同时单独检查 `exact_match_rate_percent` 和 `heuristic_matched`；总匹配率不能证明 AI_CORE 子任务的一对一因果关系。
 - `duplicate_semantic_rows == 0` 且 `duplicate_profiler_rows == 0`。
 - `test/out/function/merged.csv` 中 `match_status` 主要为 `matched`。
-- 默认生成 `test/out/function/timeline.svg`，使用 phase/step/event 逻辑列展示任务，避免真实时间轴下密集 task 挤在一起；如需原始时间轴可手动运行 `visualize_timeline --layout time`。
+- 默认生成逻辑 `timeline.svg`、物理依赖 `dependency.html` 和可筛选的 `timeline_time.html`。
 
 若不通过，优先检查：
 
 - plog 是否来自新 HCOMM/HCCL 产物。
 - workload 是否真的走到 single-ring AllReduce 910/93 路径。
-- `task_time.csv` 是否和 plog 来自同一次运行。
-- profiler 的 `Device_id`、`stream_id`、`task_id` 是否完整。
-- 是否误用了旧的 `PROFILER_TRACE_EX` marker 数据；当前工具会跳过该类行。
+- `msprof_*.json` 是否和 plog 来自同一次运行。
+- JSON 的 `Physic Stream Id`、`Task Id`、`Subtask Id`、`connection_id` 是否完整，且每个 PROF 目录能唯一对应一个 `device_N`。
+- JSON 是否包含带物理 stream/task id 的 device execution 事件。
 
 ## 5. 开销测试流程
 
@@ -149,9 +149,8 @@ python3 test/measure_step_trace_overhead.py \
 - 被测 commit：`git -C hcomm rev-parse HEAD` 和 `git -C hccl rev-parse HEAD`。
 - 构建日志和运行命令。
 - plog 原始文件。
-- msprof `task_time.csv`。
-- `merged.csv`、`summary.csv`、`validate.log`、`timeline.svg`。
+- msprof 原始 `msprof_*.json`。
+- `merged.csv`、`summary.csv`、`validate.log`、`dependency.html`、`timeline_time.html`。
 - `overhead.csv`、`summary.txt`。
 
 这样后续定位 unmatched task、duplicate key 或性能抖动时，可以直接回放离线工具。
-

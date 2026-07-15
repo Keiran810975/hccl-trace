@@ -39,6 +39,14 @@ EVENT_COLOR = {
     "rx_payload_copy_start": ("#d7f2ff", "#1683a8"),
 }
 
+HARDWARE_COLOR = {
+    "sdma": ("#d7f2ff", "#1683a8"),
+    "notify_record": ("#fff3c4", "#9a7500"),
+    "notify_wait": ("#ffe8d2", "#b26000"),
+    "reduce_inline": ("#ffd9bd", "#b45f06"),
+    "rdma": ("#ddf7e7", "#26844a"),
+}
+
 PHASE_ORDER = {
     "allreduce_executor": 0,
     "reduce_scatter_direct": 1,
@@ -80,11 +88,14 @@ def to_float(value: object, default: float = math.nan) -> float:
         return default
 
 
-def read_rows(path: Path, include_unmatched: bool = False) -> List[dict]:
+def read_rows(path: Path, include_profiler_only: bool = False) -> List[dict]:
     rows: List[dict] = []
     with path.open("r", encoding="utf-8-sig", newline="") as source:
         for index, row in enumerate(csv.DictReader(source)):
-            if not include_unmatched and row.get("match_status") != "matched":
+            status = row.get("match_status")
+            if status == "profiler_only" and not include_profiler_only:
+                continue
+            if status not in ("matched", "profiler_only"):
                 continue
             start = to_float(row.get("task_start"))
             stop = to_float(row.get("task_stop"))
@@ -105,6 +116,8 @@ def read_rows(path: Path, include_unmatched: bool = False) -> List[dict]:
                 "_rank": to_int(row.get("user_rank", row.get("rank"))),
                 "_stream_id": to_int(row.get("stream_id")),
                 "_task_id": to_int(row.get("task_id")),
+                "_profiler_task_id": to_int(row.get("profiler_task_id", row.get("task_id"))),
+                "_subtask_id": to_int(row.get("subtask_id")),
                 "_phase": row.get("phase", ""),
                 "_event": row.get("event", ""),
                 "_semantic": row.get("semantic", ""),
@@ -146,7 +159,13 @@ def short_label(row: dict) -> str:
         "rx_payload_reduce_start": "rx_reduce",
         "rx_payload_copy_start": "rx_copy",
     }
-    return labels.get(event, event or semantic or row.get("profiler_task_kind", "") or row.get("kernel_type", ""))
+    return labels.get(event, event or semantic or row.get("event_name", "") or row.get("profiler_task_kind", "") or row.get("kernel_type", ""))
+
+
+def row_color(row: dict):
+    if row.get("_event"):
+        return EVENT_COLOR.get(row["_event"], ("#eeeeee", "#777777"))
+    return HARDWARE_COLOR.get(row.get("profiler_task_kind", ""), ("#eeeeee", "#777777"))
 
 
 def phase_label(phase: str) -> str:
@@ -211,6 +230,11 @@ def export_nodes(path: Path, rows: Iterable[dict]) -> None:
             "rank": row.get("user_rank", ""),
             "stream_id": row.get("stream_id", ""),
             "task_id": row.get("task_id", ""),
+            "profiler_task_id": row.get("profiler_task_id", ""),
+            "subtask_id": row.get("subtask_id", ""),
+            "connection_id": row.get("connection_id", ""),
+            "match_method": row.get("match_method", ""),
+            "match_confidence": row.get("match_confidence", ""),
             "phase": row.get("phase", ""),
             "event": row.get("event", ""),
             "semantic": row.get("semantic", ""),
@@ -226,8 +250,10 @@ def export_nodes(path: Path, rows: Iterable[dict]) -> None:
 
 def task_title(row: dict) -> str:
     return (
-        f'device={row["_device_id"]} rank={row["_rank"]} stream={row["_stream_id"]} task={row["_task_id"]}\n'
+        f'device={row["_device_id"]} rank={row["_rank"]} stream={row["_stream_id"]} '
+        f'semantic_task={row["_task_id"]} profiler_task={row["_profiler_task_id"]} subtask={row["_subtask_id"]}\n'
         f'phase={row["_phase"]} event={row["_event"]} semantic={row["_semantic"]}\n'
+        f'hardware={row.get("event_name", "")} match={row.get("match_method", "")} confidence={row.get("match_confidence", "")}\n'
         f'step={row["_step"]} slice={row["_slice"]}\n'
         f'{row["_start"]:.3f}..{row["_stop"]:.3f} us duration={row["_duration"]:.3f} us'
     )
@@ -314,7 +340,7 @@ def render_logical_svg(rows: List[dict], output: Path, col_width: int, node_widt
         slot_cursor[slot_key] += 1
         x = left + col_index[col_key] * col_width + (col_width - node_width) / 2
         y = lane_y[lane] + 4 + slot * (node_h + slot_gap)
-        fill, stroke = EVENT_COLOR.get(row["_event"], ("#eeeeee", "#777777"))
+        fill, stroke = row_color(row)
         label = short_label(row)
         title = task_title(row)
         parts.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{node_width}" height="{node_h}" rx="3" ry="3" fill="{fill}" stroke="{stroke}" stroke-width="1"><title>{html.escape(title)}</title></rect>')
@@ -445,7 +471,7 @@ def render_time_svg(rows: List[dict], gaps: List[dict], output: Path, max_width:
         w = max(min_node_w, row["_duration"] * px_per_us)
         yy = lane_y[lane_key(row)] + 4 + row.get("_time_slot", 0) * (node_h + slot_gap)
         h = node_h
-        fill, stroke = EVENT_COLOR.get(row["_event"], ("#eeeeee", "#777777"))
+        fill, stroke = row_color(row)
         parts.append(f'<rect x="{x:.1f}" y="{yy:.1f}" width="{w:.1f}" height="{h:.1f}" rx="2" ry="2" fill="{fill}" stroke="{stroke}"><title>{html.escape(task_title(row))}</title></rect>')
         if w > 42:
             parts.append(f'<text x="{x + w / 2:.1f}" y="{yy + 14:.1f}" text-anchor="middle" font-family="Arial" font-size="8.5">{html.escape(short_label(row))}</text>')
@@ -459,7 +485,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Render merged HCCL step trace rows as an SVG timeline.")
     parser.add_argument("merged_csv", type=Path)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--include-unmatched", action="store_true")
     parser.add_argument("--layout", choices=("logical", "time"), default="logical")
     parser.add_argument("--col-width", type=int, default=146)
     parser.add_argument("--node-width", type=int, default=112)
@@ -470,7 +495,10 @@ def main() -> int:
     args = parser.parse_args()
 
     output = args.output or args.merged_csv.with_name(args.merged_csv.stem + "_timeline.svg")
-    rows = read_rows(args.merged_csv, include_unmatched=args.include_unmatched)
+    rows = read_rows(
+        args.merged_csv,
+        include_profiler_only=args.layout == "time",
+    )
     gaps = build_gap_rows(rows)
     if args.layout == "logical":
         render_logical_svg(rows, output, args.col_width, args.node_width)

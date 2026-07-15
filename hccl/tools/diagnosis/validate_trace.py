@@ -11,15 +11,27 @@ from collections import Counter
 def validate_rows(rows, min_match_rate):
     stats = Counter()
     for row in rows:
-        stats["total"] += 1
         status = row.get("match_status", "")
+        if status == "profiler_only":
+            stats["profiler_only"] += 1
+            if row.get("duplicate_profiler") == "1":
+                stats["duplicate_profiler_rows"] += 1
+            continue
+        stats["total"] += 1
         stats[status] += 1
+        if status == "matched" and row.get("match_confidence") == "heuristic":
+            stats["heuristic_matched"] += 1
+        elif status == "matched":
+            stats["exact_matched"] += 1
         if row.get("duplicate_semantic") == "1":
             stats["duplicate_semantic_rows"] += 1
         if row.get("duplicate_profiler") == "1":
             stats["duplicate_profiler_rows"] += 1
     matched = stats.get("matched", 0)
     stats["match_rate_percent"] = round((matched * 100.0 / stats["total"]), 2) if stats["total"] else 0
+    stats["exact_match_rate_percent"] = round(
+        stats.get("exact_matched", 0) * 100.0 / stats["total"], 2
+    ) if stats["total"] else 0
     ok = stats["total"] > 0 and stats["match_rate_percent"] >= min_match_rate
     if stats.get("duplicate_semantic_rows", 0) or stats.get("duplicate_profiler_rows", 0):
         ok = False

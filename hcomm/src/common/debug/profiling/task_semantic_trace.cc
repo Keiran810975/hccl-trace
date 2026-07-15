@@ -202,7 +202,7 @@ HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskT
         "user_rank[%u] comm_rank[%u] rank_size[%u] peer_rank[%u] semantic[%s] "
         "device_id[%u] stream_id[%u] hccl_task_id[%u] "
         "semantic_seq[%llu] profiler_seq[%llu] task_type[%u] task_kind[%s] "
-        "device_ts[%llu] source[%s]",
+        "submit_ts[%llu] notify_id[%llu] notify_stage[%d] notify_remote_rank[%u] notify_ctx_id[%u] source[%s]",
         TASK_SEMANTIC_SCHEMA_VERSION,
         SafeStr(info->algorithm), SafeStr(info->event), SafeStr(info->phase),
         info->step, info->slice,
@@ -210,7 +210,8 @@ HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskT
         info->peerRank, SafeStr(info->semantic), deviceId,
         streamId, taskId, semanticSeq, profilerSeq,
         static_cast<u32>(taskType), TaskTypeToName(taskType),
-        info->deviceTs, SafeStr(info->source));
+        info->submitTs, info->notifyId, info->notifyStage, info->notifyRemoteRank, info->notifyCtxId,
+        SafeStr(info->source));
     return HCCL_SUCCESS;
 }
 

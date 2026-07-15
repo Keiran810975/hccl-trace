@@ -54,7 +54,7 @@ TaskProfiling::Run()                      parse_plog.py ──→ semantic CSV
   └─ ReportTaskSemanticTrace()               │
        └─ plog [HcclTaskSemantic] ──────────→┤
                                               ├─→ merge_timeline.py ──→ merged CSV
-msprof task_time.csv ────────────────────────→┘         │
+msprof msprof_*.json ───────────────────────→┘         │
                                                         ├─→ validate_trace.py (质量门禁)
                                                         ├─→ visualize_timeline.py (SVG)
                                                         └─→ visualize_dependency_graph.py (SVG)
@@ -77,7 +77,7 @@ msprof task_time.csv ───────────────────�
 |------|----------|------|
 | `schema.py` | — | 共享数据模型：`SemanticRecord`、`ProfilerTask`、`MERGED_FIELDS`、`merge_key` |
 | `parse_plog.py` | `python -m tools.diagnosis.parse_plog` | 解析 plog 中的 `[HcclTaskSemantic]` 行 |
-| `parse_msprof.py` | `python -m tools.diagnosis.parse_msprof` | 解析 msprof `task_time.csv` |
+| `parse_msprof_json.py` | `python -m tools.diagnosis.parse_msprof_json` | 解析 msprof JSON 物理 task/subtask |
 | `merge_timeline.py` | `python -m tools.diagnosis.merge_timeline` | 按 `(node_id, device_id, stream_id, task_id)` 合并语义与 profiler 数据 |
 | `validate_trace.py` | `python -m tools.diagnosis.validate_trace` | 校验匹配合并率 ≥ 阈值，检测 duplicate key |
 | `visualize_timeline.py` | `python -m tools.diagnosis.visualize_timeline` | 渲染 SVG 时间线（默认逻辑布局，支持 `--layout time`） |
@@ -98,9 +98,9 @@ msprof task_time.csv ───────────────────�
 | `comm_rank` | 通信算法内部的 rank 编号 | `[HcclTaskSemantic]` 的 `comm_rank[N]` |
 | `peer_rank` | 对端 rank | `[HcclTaskSemantic]` 的 `peer_rank[N]` |
 | `rank_size` | 通信域总 rank 数 | `[HcclTaskSemantic]` 的 `rank_size[N]` |
-| profiler `Device_id` | msprof CSV 中的设备列 | `task_time.csv` 列 `Device_id` |
+| profiler device | msprof PROF 目录对应的物理卡 | 唯一 `device_N` 目录 |
 
-**关键规则**：不要从 rank 推断 `device_id`。`device_id` 必须由生产端显式注入，仅在处理历史遗留数据时使用 rank-as-device fallback。
+**关键规则**：不要从 rank 推断 `device_id`。语义侧由生产端显式注入，JSON 侧由唯一 `device_N` 目录推断。
 
 ### Merge Key
 
@@ -114,7 +114,7 @@ msprof task_time.csv ───────────────────�
 
 ### 语义字段
 
-`SEMANTIC_FIELDS`（20 列）：`schema_version`、`algorithm`、`phase`、`step`、`slice`、`user_rank`、`comm_rank`、`rank_size`、`peer_rank`、`event`、`semantic`、`stream_id`、`task_id`、`semantic_seq`、`profiler_seq`、`task_kind`、`source`、`device_id`、`device_ts`、`node_id`、`pid`
+`SEMANTIC_FIELDS`（25 列）在原 phase/step/rank/task 字段之外，包含 `submit_ts`、`notify_id`、`notify_stage`、`notify_remote_rank`、`notify_ctx_id`、`node_id`、`pid`。
 
 ### 事件体系
 
@@ -146,9 +146,9 @@ msprof task_time.csv ───────────────────�
 
 ### Schema 与匹配
 
-1. **`PROFILER_TRACE_EX` 行必须跳过** — `parse_msprof.py` 在 `kernel_type == "PROFILER_TRACE_EX"` 时 `continue`。这些是 profiler 自身的 marker，不是真实 task。
+1. **只使用 msprof JSON 物理执行事件** — 仅解析 `ph=X` 且具有 `Physic Stream Id`/`Task Id` 的事件；flow 仅作为关联元数据。
 2. **`AI_CORE` kernel type** — 不匹配任何语义记录，但被明确排除在 `unmatched_profiler` 噪声之外（`IGNORED_UNMATCHED_PROFILER_KERNEL_TYPES`）。
-3. **plog 时间戳不可用于 task duration** — `device_ts` 仅在 probe 记录中有值，完整记录中为 0。duration 应从 profiler `task_start`/`task_stop` 获取。
+3. **`submit_ts` 不可用于 task duration** — 它是 host-cycle 提交时间，只能辅助候选窗口；duration 从 JSON `ts`/`dur` 获取。
 4. **Duplicate key 是硬错误** — `validate_trace.py` 在 `duplicate_semantic_rows > 0` 或 `duplicate_profiler_rows > 0` 时返回失败。
 5. **`oneShot` 机制** — 生产端 `TaskSemanticEventScope` 在析构时设置 `oneShot = true`，`ReportTaskSemanticTrace` 在输出完整记录后立即将 `g_taskSemanticValid` 置为 false，防止同一 scope 覆盖多个 task 导致 duplicate merge key。
 
@@ -160,8 +160,8 @@ msprof task_time.csv ───────────────────�
 
 ### msprof 解析
 
-- `first_present()` 在多可能列名中按优先级查找，兼容不同版本的 msprof CSV 列名差异。
-- `default_node_id` 参数补充历史数据缺失的 node_id 字段。
+- 保留 `Task Id`、`Subtask Id`、`connection_id`、物理 stream、硬件事件名和真实起止时间。
+- 每个 PROF 目录必须能唯一推断一个 `device_N`；`node_id` 在输入边界统一补齐。
 
 ---
 
@@ -185,7 +185,7 @@ HCOMM 变更需要在 `hcomm` 仓库自身验证，不要只构建 `hccl`。构�
 # 完整流程：运行 workload + merge + validate + visualize
 bash test/run_step_trace_function_test.sh \
   --plog <plog> \
-  --task-time <task_time.csv> \
+  --msprof-json-dir <msprof_dir> \
   --node-id node0 \
   --min-match-rate 95 \
   -- \
@@ -194,7 +194,7 @@ bash test/run_step_trace_function_test.sh \
 # 仅 merge/validate（不运行 workload）
 bash test/run_step_trace_function_test.sh \
   --plog <plog> \
-  --task-time <task_time.csv>
+  --msprof-json-dir <msprof_dir>
 ```
 
 功能通过标准：
@@ -238,12 +238,9 @@ python3 -m unittest hccl.tools.diagnosis.test_diagnosis
 
 ### 依赖图 (Dependency Graph)
 
-- 不要仅连接 payload 节点。对 single-ring AllReduce，有价值的一阶边包括：
-  - **同 rank 程序序**：RxAck → Signal → Payload
-  - **`right_neighbor_ack_dep`**：RxAck wait 依赖右邻居的上一 payload
-  - **`upstream_data_signal_dep`**：data-signal wait 依赖上游生产者的上一 payload
-  - **Payload 级简化边**：同 rank 上一步、上游上一 payload、reduce_scatter 到 allgather 的 phase bridge
-- 更深层的 wait interval、NHR、多节点时钟对齐因果边属于未来规划。
+- 默认依赖边按证据分层：同物理 stream 顺序为 `observed`；相同 `notify_id` 的 record→wait 为 `observed`；旧数据的 connection/time notify 边为 `inferred`；显式 peer 语义边为 `semantic`。
+- 不再默认生成 right-neighbor/previous-step/phase-bridge 等纯算法假设边。
+- 多节点精确依赖仍需要 op instance、protocol sequence 和时钟校准。
 
 ---
 
@@ -307,7 +304,7 @@ python3 -m unittest hccl.tools.diagnosis.test_diagnosis
 ```bash
 # 运行完整诊断流水线
 PYTHONPATH=hccl python3 -m tools.diagnosis.merge_timeline \
-  --plog <plog> --task-time <task_time.csv> \
+  --plog <plog> --msprof-json <msprof.json> \
   -o merged.csv --summary summary.csv --node-id node0
 
 # 校验合并结果
@@ -317,10 +314,10 @@ PYTHONPATH=hccl python3 -m tools.diagnosis.validate_trace merged.csv --min-match
 PYTHONPATH=hccl python3 -m tools.diagnosis.visualize_timeline merged.csv -o timeline.svg
 
 # 渲染依赖图
-PYTHONPATH=hccl python3 -m tools.diagnosis.visualize_dependency_graph merged.csv -o dependency.svg
+PYTHONPATH=hccl python3 -m tools.diagnosis.visualize_dependency_graph merged.csv -o dependency
 
 # 渲染交互式 HTML
-PYTHONPATH=hccl python3 -m tools.diagnosis.visualize_html merged.csv -o report.html
+PYTHONPATH=hccl python3 -m tools.diagnosis.visualize_html merged.csv --view dependency -o dependency.html
 
 # 编译检查所有诊断工具
 python3 -m py_compile hccl/tools/diagnosis/*.py

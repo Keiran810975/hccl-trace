@@ -5,8 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${ROOT_DIR}/test/out/function"
 PLOG=""
 PLOG_DIR=""
-TASK_TIME=""
-TASK_TIME_DIR=""
+MSPROF_JSON=""
+MSPROF_JSON_DIR=""
 NODE_ID="node0"
 MIN_MATCH_RATE="95"
 VISUALIZE="1"
@@ -21,17 +21,17 @@ Options:
   --out-dir DIR              Output directory. Default: test/out/function
   --plog FILE                HCCL plog containing [HcclTaskSemantic] rows.
   --plog-dir DIR            Directory containing plog*.log files.
-  --task-time FILE           msprof task_time.csv.
-  --task-time-dir DIR        Directory containing msprof task_time*.csv files.
-  --node-id ID               Node id used for task_time rows. Default: node0
+  --msprof-json FILE         Fine-grained msprof_*.json.
+  --msprof-json-dir DIR      Directory containing msprof_*.json files.
+  --node-id ID               Node id assigned to this capture. Default: node0
   --min-match-rate PERCENT   validate_trace threshold. Default: 95
   --python BIN               Python executable. Default: $PYTHON_BIN or python3
-  --no-visualize             Do not render timeline.svg and dependency.svg after merge
+  --no-visualize             Do not render timeline/dependency reports after merge
   -h, --help                 Show this help.
 
 If command is provided after --, it is run once with HCCL_STEP_TRACE=1 before
 merge/validate. If no command is provided, the script only validates the
-provided --plog/--plog-dir and --task-time/--task-time-dir files.
+provided plog and msprof JSON files.
 USAGE
 }
 
@@ -49,12 +49,12 @@ while [[ $# -gt 0 ]]; do
             PLOG_DIR="$2"
             shift 2
             ;;
-        --task-time)
-            TASK_TIME="$2"
+        --msprof-json)
+            MSPROF_JSON="$2"
             shift 2
             ;;
-        --task-time-dir)
-            TASK_TIME_DIR="$2"
+        --msprof-json-dir)
+            MSPROF_JSON_DIR="$2"
             shift 2
             ;;
         --node-id)
@@ -100,8 +100,9 @@ if [[ $# -gt 0 ]]; then
     ) 2>&1 | tee "${OUT_DIR}/workload.log"
 fi
 
-if [[ ( -z "${PLOG}" && -z "${PLOG_DIR}" ) || ( -z "${TASK_TIME}" && -z "${TASK_TIME_DIR}" ) ]]; then
-    echo "one of --plog/--plog-dir and one of --task-time/--task-time-dir are required for merge/validate." >&2
+if [[ ( -z "${PLOG}" && -z "${PLOG_DIR}" ) || \
+      ( -z "${MSPROF_JSON}" && -z "${MSPROF_JSON_DIR}" ) ]]; then
+    echo "plog input and msprof JSON input are required for merge/validate." >&2
     exit 2
 fi
 
@@ -115,13 +116,12 @@ if [[ -n "${PLOG_DIR}" && ! -d "${PLOG_DIR}" ]]; then
     exit 2
 fi
 
-if [[ -n "${TASK_TIME}" && ! -f "${TASK_TIME}" ]]; then
-    echo "task_time.csv not found: ${TASK_TIME}" >&2
+if [[ -n "${MSPROF_JSON}" && ! -f "${MSPROF_JSON}" ]]; then
+    echo "msprof JSON not found: ${MSPROF_JSON}" >&2
     exit 2
 fi
-
-if [[ -n "${TASK_TIME_DIR}" && ! -d "${TASK_TIME_DIR}" ]]; then
-    echo "task_time dir not found: ${TASK_TIME_DIR}" >&2
+if [[ -n "${MSPROF_JSON_DIR}" && ! -d "${MSPROF_JSON_DIR}" ]]; then
+    echo "msprof JSON dir not found: ${MSPROF_JSON_DIR}" >&2
     exit 2
 fi
 
@@ -130,9 +130,10 @@ SUMMARY_CSV="${OUT_DIR}/summary.csv"
 MERGE_LOG="${OUT_DIR}/merge.log"
 VALIDATE_LOG="${OUT_DIR}/validate.log"
 TIMELINE_SVG="${OUT_DIR}/timeline.svg"
-DEPENDENCY_SVG="${OUT_DIR}/dependency.svg"
+DEPENDENCY_HTML="${OUT_DIR}/dependency.html"
+TIMELINE_HTML="${OUT_DIR}/timeline_time.html"
 
-echo "[step-trace] Merging semantic plog and task_time.csv"
+echo "[step-trace] Merging semantic plog and msprof profiler events"
 MERGE_ARGS=(
     --node-id "${NODE_ID}"
     --output "${MERGED_CSV}"
@@ -144,11 +145,11 @@ fi
 if [[ -n "${PLOG_DIR}" ]]; then
     MERGE_ARGS+=(--plog-dir "${PLOG_DIR}")
 fi
-if [[ -n "${TASK_TIME}" ]]; then
-    MERGE_ARGS+=(--task-time "${TASK_TIME}")
+if [[ -n "${MSPROF_JSON}" ]]; then
+    MERGE_ARGS+=(--msprof-json "${MSPROF_JSON}")
 fi
-if [[ -n "${TASK_TIME_DIR}" ]]; then
-    MERGE_ARGS+=(--task-time-dir "${TASK_TIME_DIR}")
+if [[ -n "${MSPROF_JSON_DIR}" ]]; then
+    MERGE_ARGS+=(--msprof-json-dir "${MSPROF_JSON_DIR}")
 fi
 PYTHONPATH="${ROOT_DIR}/hccl" "${PYTHON_BIN}" -m tools.diagnosis.merge_timeline \
     "${MERGE_ARGS[@]}" \
@@ -160,10 +161,15 @@ if [[ "${VISUALIZE}" == "1" ]]; then
         "${MERGED_CSV}" \
         --output "${TIMELINE_SVG}"
 
-    echo "[step-trace] Rendering dependency SVG"
-    PYTHONPATH="${ROOT_DIR}/hccl" "${PYTHON_BIN}" -m tools.diagnosis.visualize_dependency_graph \
-        "${MERGED_CSV}" \
-        --output "${DEPENDENCY_SVG}"
+    echo "[step-trace] Rendering physical dependency HTML"
+    PYTHONPATH="${ROOT_DIR}/hccl" "${PYTHON_BIN}" -m tools.diagnosis.visualize_html \
+        "${MERGED_CSV}" --view dependency --output "${OUT_DIR}/dependency.html"
+
+    if [[ -n "${MSPROF_JSON}" || -n "${MSPROF_JSON_DIR}" ]]; then
+        echo "[step-trace] Rendering fine-grained interactive time view"
+        PYTHONPATH="${ROOT_DIR}/hccl" "${PYTHON_BIN}" -m tools.diagnosis.visualize_html \
+            "${MERGED_CSV}" --view timeline --layout time --output "${TIMELINE_HTML}"
+    fi
 fi
 
 echo "[step-trace] Validating merged trace"
@@ -178,5 +184,8 @@ echo "  summary:  ${SUMMARY_CSV}"
 echo "  validate: ${VALIDATE_LOG}"
 if [[ "${VISUALIZE}" == "1" ]]; then
     echo "  timeline:   ${TIMELINE_SVG}"
-    echo "  dependency: ${DEPENDENCY_SVG}"
+    echo "  dependency: ${DEPENDENCY_HTML}"
+    if [[ -n "${MSPROF_JSON}" || -n "${MSPROF_JSON_DIR}" ]]; then
+        echo "  time HTML:  ${TIMELINE_HTML}"
+    fi
 fi
