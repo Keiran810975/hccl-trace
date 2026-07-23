@@ -93,6 +93,16 @@ def read_rows(path: Path, include_profiler_only: bool = False) -> List[dict]:
     with path.open("r", encoding="utf-8-sig", newline="") as source:
         for index, row in enumerate(csv.DictReader(source)):
             status = row.get("match_status")
+            if status == "matched" and row.get("match_confidence") == "heuristic":
+                if not include_profiler_only:
+                    continue
+                row = dict(row)
+                row["match_status"] = "profiler_only"
+                row["phase"] = ""
+                row["event"] = ""
+                row["semantic"] = ""
+                row["task_kind"] = ""
+                status = "profiler_only"
             if status == "profiler_only" and not include_profiler_only:
                 continue
             if status not in ("matched", "profiler_only"):

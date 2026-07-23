@@ -281,7 +281,7 @@ HcclResult TaskProfiling::Run(const TaskData &taskData, bool isCapture)
         semanticInfo = &enrichedInfo;
     }
     CHK_RET(ReportTaskSemanticTrace(deviceLogicId_, taskData.semanticStreamID, taskData.taskID,
-        taskData.taskType, semanticInfo));
+        taskData.taskType, semanticInfo, taskData.GetFftsCtxId()));
     DumpReportDataInfo(hcclReportData.type, hcclReportData.profInfo);
     CHK_RET(ReportMsprofData(hcclReportData));
     return HCCL_SUCCESS;
@@ -339,7 +339,7 @@ HcclResult TaskProfiling::Save(u32 &streamID, u32 &taskID, TaskType &taskType, c
 
 HcclResult TaskProfiling::Save(u32 captureStreamID, u32 streamID, u32 taskID)
 {
-    return HCCL_SUCCESS;
+    return ReportTaskSemanticGraphCorrelation(deviceLogicId_, streamID, taskID);
 }
 
 HcclResult TaskProfiling::Save(u32 captureStreamID, u32 streamID, u32 taskID, const TaskParaAiv &paraAiv) 
@@ -403,7 +403,7 @@ HcclResult TaskProfiling::Save(u32 streamID, u32 taskID, const TaskParaAiv &para
 
 HcclResult TaskProfiling::Save(u32 &streamID, u32 &taskID)
 {
-    return HCCL_SUCCESS;
+    return ReportTaskSemanticGraphCorrelation(deviceLogicId_, streamID, taskID);
 }
 
 HcclResult TaskProfiling::SaveToLog(const TaskParaHost &paraHost)

@@ -12,9 +12,27 @@ from typing import Dict, Iterable, Iterator, List
 
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from diagnosis.schema import SCHEMA_VERSION, SEMANTIC_FIELDS, TRACE_TAG, SemanticRecord, parse_int, write_csv
+    from diagnosis.schema import (
+        GRAPH_CORRELATION_TAG,
+        SCHEMA_VERSION,
+        SEMANTIC_FIELDS,
+        TRACE_TAG,
+        GraphCorrelation,
+        SemanticRecord,
+        parse_int,
+        write_csv,
+    )
 else:
-    from .schema import SCHEMA_VERSION, SEMANTIC_FIELDS, TRACE_TAG, SemanticRecord, parse_int, write_csv
+    from .schema import (
+        GRAPH_CORRELATION_TAG,
+        SCHEMA_VERSION,
+        SEMANTIC_FIELDS,
+        TRACE_TAG,
+        GraphCorrelation,
+        SemanticRecord,
+        parse_int,
+        write_csv,
+    )
 
 
 KEY_VALUE_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=([^,\s]+)")
@@ -23,6 +41,8 @@ PID_TS_RE = re.compile(
     r"HCCL\((?P<pid>\d+),(?P<process>[^)]*)\):"
     r"(?P<log_ts>\d{4}-\d{2}-\d{2}-\d{2}:\d{2}:\d{2}\.\d+\.\d+)"
 )
+UINT32_MAX = 0xFFFFFFFF
+UINT64_MAX = 0xFFFFFFFFFFFFFFFF
 
 
 def parse_plog_lines(lines: Iterable[str]) -> Iterator[SemanticRecord]:
@@ -74,7 +94,7 @@ def parse_legacy_block(lines: Iterable[str]) -> Iterator[SemanticRecord]:
 
 def semantic_from_mapping(data: Dict[str, str]) -> SemanticRecord:
     return SemanticRecord(
-        schema_version=parse_int(data.get("schema_version"), SCHEMA_VERSION),
+        schema_version=parse_int(data.get("schema_version"), 1),
         algorithm=data.get("algorithm", ""),
         phase=data.get("phase", ""),
         step=parse_int(data.get("step")),
@@ -90,6 +110,9 @@ def semantic_from_mapping(data: Dict[str, str]) -> SemanticRecord:
         semantic_seq=parse_int(data.get("semantic_seq", data.get("task_seq"))),
         profiler_seq=parse_int(data.get("profiler_seq", data.get("submit_seq"))),
         task_kind=data.get("task_kind", data.get("task_type", "")),
+        execution_mode=data.get("execution_mode", ""),
+        ffts_ctx_id=_parse_unsigned_identity(data.get("ffts_ctx_id"), UINT32_MAX),
+        graph_instance_id=_parse_unsigned_identity(data.get("graph_instance_id"), UINT64_MAX),
         source=data.get("source", ""),
         device_id=parse_int(data.get("device_id", data.get("device"))),
         submit_ts=parse_int(data.get("submit_ts")),
@@ -100,6 +123,36 @@ def semantic_from_mapping(data: Dict[str, str]) -> SemanticRecord:
         node_id=data.get("node_id", ""),
         pid=parse_int(data.get("pid")),
     )
+
+
+def graph_correlation_from_mapping(data: Dict[str, str]) -> GraphCorrelation:
+    return GraphCorrelation(
+        schema_version=parse_int(data.get("schema_version"), 1),
+        graph_instance_id=_parse_unsigned_identity(data.get("graph_instance_id"), UINT64_MAX),
+        device_id=parse_int(data.get("device_id", data.get("device"))),
+        anchor_task_id=parse_int(data.get("anchor_task_id")),
+        parent_stream_id=parse_int(data.get("parent_stream_id")),
+        parent_task_id=parse_int(data.get("parent_task_id")),
+        node_id=data.get("node_id", ""),
+        pid=parse_int(data.get("pid")),
+    )
+
+
+def parse_graph_correlation_lines(lines: Iterable[str]) -> Iterator[GraphCorrelation]:
+    for line in lines:
+        if GRAPH_CORRELATION_TAG not in line:
+            continue
+        after_tag = line.split(GRAPH_CORRELATION_TAG, 1)[1].strip()
+        data = _parse_bracket_values(after_tag)
+        if not data and "=" in after_tag:
+            data = _parse_key_values(after_tag)
+        if data:
+            yield graph_correlation_from_mapping(_with_line_metadata(data, line))
+
+
+def _parse_unsigned_identity(value: str, invalid_value: int) -> int:
+    parsed = parse_int(value)
+    return -1 if parsed == invalid_value else parsed
 
 
 def semantic_from_legacy_tokens(tokens: List[str]) -> SemanticRecord:
@@ -155,6 +208,11 @@ def _with_line_metadata(data: Dict[str, str], line: str) -> Dict[str, str]:
 def parse_file(path: str) -> List[SemanticRecord]:
     with open(path, "r", encoding="utf-8", errors="replace") as source:
         return list(parse_legacy_block(source))
+
+
+def parse_graph_correlations_file(path: str) -> List[GraphCorrelation]:
+    with open(path, "r", encoding="utf-8", errors="replace") as source:
+        return list(parse_graph_correlation_lines(source))
 
 
 def main() -> int:

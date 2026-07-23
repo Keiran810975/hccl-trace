@@ -44,8 +44,13 @@ void SetTaskSemanticTraceInfo(const TaskSemanticTraceInfo &info);
 void ClearTaskSemanticTraceInfo();
 HcclResult ReportTaskSemanticTraceProbe(u32 deviceId, u32 streamId, u32 taskId, const char *taskKind);
 HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskType taskType);
+// fftsCtxId is the zero-based graph context id (TaskPara.ctxId), which maps to
+// msprof JSON Subtask Id only after the graph parent has been identified.
 HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskType taskType,
-    const TaskSemanticTraceInfo *info);
+    const TaskSemanticTraceInfo *info, u32 fftsCtxId = INVALID_UINT);
+// Complete the pending graph built on this thread with the physical parent
+// identity observed immediately after LaunchGraph.
+HcclResult ReportTaskSemanticGraphCorrelation(u32 deviceId, u32 parentStreamId, u32 parentTaskId);
 } // namespace hccl
 
 #endif // TASK_SEMANTIC_TRACE_H

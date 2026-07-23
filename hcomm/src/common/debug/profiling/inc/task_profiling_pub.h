@@ -111,6 +111,23 @@ struct TaskData {
         semanticStreamID = streamID;
     }
 
+    u32 GetFftsCtxId() const
+    {
+        switch (taskType) {
+            case TaskType::TASK_SDMA:
+            case TaskType::TASK_RDMA:
+                return DMA.ctxId;
+            case TaskType::TASK_REDUCE_INLINE:
+            case TaskType::TASK_REDUCE_TBE:
+                return Reduce.ctxId;
+            case TaskType::TASK_NOTIFY_RECORD:
+            case TaskType::TASK_NOTIFY_WAIT:
+                return Notify.ctxId;
+            default:
+                return INVALID_UINT;
+        }
+    }
+
 private:
     void CaptureSemanticTraceInfo()
     {

@@ -18,13 +18,25 @@
 
 namespace hccl {
 namespace {
-constexpr u32 TASK_SEMANTIC_SCHEMA_VERSION = 1;
+constexpr u32 TASK_SEMANTIC_SCHEMA_VERSION = 2;
+constexpr u32 TASK_GRAPH_CORRELATION_SCHEMA_VERSION = 1;
 constexpr u32 TASK_SEMANTIC_MAX_DEVICE_NUM = 64;
 constexpr u32 TASK_SEMANTIC_MAX_STREAM_NUM = 65536;
 using TaskSemanticStreamSeqArray = std::array<std::atomic<u64>, TASK_SEMANTIC_MAX_STREAM_NUM>;
 using TaskSemanticDeviceSeqArray = std::array<std::atomic<TaskSemanticStreamSeqArray *>, TASK_SEMANTIC_MAX_DEVICE_NUM>;
 thread_local bool g_taskSemanticValid = false;
 thread_local TaskSemanticTraceInfo g_taskSemanticInfo{};
+// DispatcherGraph adds contexts and launches the graph synchronously on the
+// same thread. Keep one pending build per thread until the launch callback
+// supplies its physical parent stream/task.
+struct PendingFftsGraph {
+    bool valid{false};
+    u32 deviceId{INVALID_UINT};
+    u32 anchorTaskId{INVALID_UINT};
+    u64 graphInstanceId{0};
+};
+thread_local PendingFftsGraph g_pendingFftsGraph{};
+std::atomic<u64> g_nextGraphInstanceId{1};
 
 const char *TaskTypeToName(TaskType taskType)
 {
@@ -63,6 +75,27 @@ bool HasReportableSemantic(const TaskSemanticTraceInfo &info)
 {
     return info.event != nullptr && info.event[0] != '\0' &&
         info.semantic != nullptr && info.semantic[0] != '\0';
+}
+
+u64 ObserveFftsGraphTask(u32 deviceId, u32 anchorTaskId)
+{
+    if (!g_pendingFftsGraph.valid) {
+        g_pendingFftsGraph.valid = true;
+        g_pendingFftsGraph.deviceId = deviceId;
+        g_pendingFftsGraph.anchorTaskId = anchorTaskId;
+        g_pendingFftsGraph.graphInstanceId =
+            g_nextGraphInstanceId.fetch_add(1, std::memory_order_relaxed);
+    } else if (g_pendingFftsGraph.deviceId != deviceId ||
+        g_pendingFftsGraph.anchorTaskId != anchorTaskId) {
+        HCCL_WARNING("[HcclTaskGraphCorrelation] replace pending graph without launch "
+            "old_device_id[%u] old_anchor_task_id[%u] new_device_id[%u] new_anchor_task_id[%u]",
+            g_pendingFftsGraph.deviceId, g_pendingFftsGraph.anchorTaskId, deviceId, anchorTaskId);
+        g_pendingFftsGraph.deviceId = deviceId;
+        g_pendingFftsGraph.anchorTaskId = anchorTaskId;
+        g_pendingFftsGraph.graphInstanceId =
+            g_nextGraphInstanceId.fetch_add(1, std::memory_order_relaxed);
+    }
+    return g_pendingFftsGraph.graphInstanceId;
 }
 
 u64 NextTaskSeq(TaskSemanticDeviceSeqArray &seqByDevice, std::atomic<u64> &fallbackSeq, u32 deviceId,
@@ -179,20 +212,24 @@ HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskT
 {
     TaskSemanticTraceInfo info{};
     const TaskSemanticTraceInfo *infoPtr = CaptureTaskSemanticTraceInfo(info) ? &info : nullptr;
-    return ReportTaskSemanticTrace(deviceId, streamId, taskId, taskType, infoPtr);
+    return ReportTaskSemanticTrace(deviceId, streamId, taskId, taskType, infoPtr, INVALID_UINT);
 }
 
 HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskType taskType,
-    const TaskSemanticTraceInfo *info)
+    const TaskSemanticTraceInfo *info, u32 fftsCtxId)
 {
     if (!IsTaskSemanticTraceEnabled()) {
         return HCCL_SUCCESS;
     }
+    const bool isFfts = fftsCtxId != INVALID_UINT;
+    const u64 graphInstanceId = isFfts ? ObserveFftsGraphTask(deviceId, taskId) : 0;
     u64 profilerSeq = NextTaskProfilerSeq(deviceId, streamId);
     if (info == nullptr) {
         HCCL_DEBUG("[HcclTaskSemanticProbe] report without context device_id[%u] stream_id[%u] "
-            "profiler_seq[%llu] task_type[%u] task_kind[%s]",
-            deviceId, streamId, profilerSeq, static_cast<u32>(taskType), TaskTypeToName(taskType));
+            "profiler_seq[%llu] task_type[%u] task_kind[%s] execution_mode[%s] "
+            "ffts_ctx_id[%u] graph_instance_id[%llu]",
+            deviceId, streamId, profilerSeq, static_cast<u32>(taskType), TaskTypeToName(taskType),
+            isFfts ? "ffts" : "direct", fftsCtxId, graphInstanceId);
         return HCCL_SUCCESS;
     }
 
@@ -202,6 +239,7 @@ HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskT
         "user_rank[%u] comm_rank[%u] rank_size[%u] peer_rank[%u] semantic[%s] "
         "device_id[%u] stream_id[%u] hccl_task_id[%u] "
         "semantic_seq[%llu] profiler_seq[%llu] task_type[%u] task_kind[%s] "
+        "execution_mode[%s] ffts_ctx_id[%u] graph_instance_id[%llu] "
         "submit_ts[%llu] notify_id[%llu] notify_stage[%d] notify_remote_rank[%u] notify_ctx_id[%u] source[%s]",
         TASK_SEMANTIC_SCHEMA_VERSION,
         SafeStr(info->algorithm), SafeStr(info->event), SafeStr(info->phase),
@@ -210,8 +248,35 @@ HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskT
         info->peerRank, SafeStr(info->semantic), deviceId,
         streamId, taskId, semanticSeq, profilerSeq,
         static_cast<u32>(taskType), TaskTypeToName(taskType),
+        isFfts ? "ffts" : "direct", fftsCtxId, graphInstanceId,
         info->submitTs, info->notifyId, info->notifyStage, info->notifyRemoteRank, info->notifyCtxId,
         SafeStr(info->source));
+    return HCCL_SUCCESS;
+}
+
+HcclResult ReportTaskSemanticGraphCorrelation(u32 deviceId, u32 parentStreamId, u32 parentTaskId)
+{
+    if (!IsTaskSemanticTraceEnabled()) {
+        return HCCL_SUCCESS;
+    }
+    if (!g_pendingFftsGraph.valid) {
+        HCCL_DEBUG("[HcclTaskGraphCorrelation] launch without pending semantic graph "
+            "device_id[%u] parent_stream_id[%u] parent_task_id[%u]",
+            deviceId, parentStreamId, parentTaskId);
+        return HCCL_SUCCESS;
+    }
+    if (g_pendingFftsGraph.deviceId != deviceId) {
+        HCCL_WARNING("[HcclTaskGraphCorrelation] launch device mismatch "
+            "pending_device_id[%u] launch_device_id[%u] graph_instance_id[%llu]",
+            g_pendingFftsGraph.deviceId, deviceId, g_pendingFftsGraph.graphInstanceId);
+        g_pendingFftsGraph = PendingFftsGraph{};
+        return HCCL_SUCCESS;
+    }
+    HCCL_RUN_INFO("[HcclTaskGraphCorrelation] schema_version[%u] graph_instance_id[%llu] "
+        "device_id[%u] anchor_task_id[%u] parent_stream_id[%u] parent_task_id[%u]",
+        TASK_GRAPH_CORRELATION_SCHEMA_VERSION, g_pendingFftsGraph.graphInstanceId,
+        deviceId, g_pendingFftsGraph.anchorTaskId, parentStreamId, parentTaskId);
+    g_pendingFftsGraph = PendingFftsGraph{};
     return HCCL_SUCCESS;
 }
 

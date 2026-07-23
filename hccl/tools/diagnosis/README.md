@@ -30,8 +30,12 @@ python -m tools.diagnosis.merge_timeline \
 匹配分为：
 
 - `json_task_id / exact`：普通任务的 device/physical-stream/task id 与 task kind 唯一一致。
-- `json_composite_profiler_seq / heuristic`：FFts 将一条父任务展开为多个 subtask，现有
-  plog 没有 subtask correlation id，只能在已验证的 direct-ring 图结构内按相对序关联。
+- `json_ffts_parent_ctx / exact`：schema v2 plog 先用 graph correlation 定位 FFts parent，
+  再用 `ffts_ctx_id == Subtask Id` 定位物理子任务。
+- `json_composite_profiler_seq / heuristic`：仅用于显式启用
+  `--allow-legacy-composite-heuristic` 的旧数据调查，不计入质量门禁或语义物理图。
+- `invalid_heuristic` / `correlation_kind_mismatch`：身份候选与物理 kind 冲突，属于硬错误，
+  不得按 matched 使用。
 - `unmatched_semantic`：无法唯一认领物理执行单元；不得用时间最近原则强行匹配。
 - `profiler_only`：JSON 中存在但没有语义声明的执行单元。
 
@@ -88,5 +92,5 @@ python -m unittest hccl.tools.diagnosis.test_diagnosis -v
 python -m tools.diagnosis.validate_trace merged.csv --min-match-rate 95
 ```
 
-质量结论必须同时报告 exact rate、heuristic count、kind mismatch、unmatched semantic 和
-duplicate execution key。总匹配率不能单独证明细粒度因果关系正确。
+质量门禁使用 exact rate；heuristic 即使命中也不进入 95% 分子。质量结论必须同时报告
+exact rate、heuristic count、kind mismatch、unmatched semantic 和 duplicate execution key。

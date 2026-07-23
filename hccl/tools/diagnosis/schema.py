@@ -7,8 +7,9 @@ from dataclasses import dataclass, fields
 from typing import Dict, Iterable, List, Optional
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 TRACE_TAG = "[HcclTaskSemantic]"
+GRAPH_CORRELATION_TAG = "[HcclTaskGraphCorrelation]"
 
 
 SEMANTIC_FIELDS = (
@@ -28,6 +29,9 @@ SEMANTIC_FIELDS = (
     "semantic_seq",
     "profiler_seq",
     "task_kind",
+    "execution_mode",
+    "ffts_ctx_id",
+    "graph_instance_id",
     "source",
     "device_id",
     "submit_ts",
@@ -75,6 +79,8 @@ MERGED_FIELDS = (
     "connection_id",
     "model_id",
     "flow_id",
+    "correlation_parent_stream_id",
+    "correlation_parent_task_id",
     "match_method",
     "match_confidence",
 )
@@ -98,6 +104,9 @@ class SemanticRecord:
     semantic_seq: int = -1
     profiler_seq: int = -1
     task_kind: str = ""
+    execution_mode: str = ""
+    ffts_ctx_id: int = -1
+    graph_instance_id: int = -1
     source: str = ""
     device_id: int = -1
     submit_ts: int = 0
@@ -114,6 +123,22 @@ class SemanticRecord:
 
     def to_row(self) -> Dict[str, object]:
         return _to_row(self, SEMANTIC_FIELDS)
+
+
+@dataclass(frozen=True)
+class GraphCorrelation:
+    schema_version: int = 1
+    graph_instance_id: int = -1
+    device_id: int = -1
+    anchor_task_id: int = -1
+    parent_stream_id: int = -1
+    parent_task_id: int = -1
+    node_id: str = ""
+    pid: int = -1
+
+    @property
+    def merge_key(self):
+        return (self.node_id, self.device_id, self.pid, self.graph_instance_id)
 
 
 @dataclass(frozen=True)

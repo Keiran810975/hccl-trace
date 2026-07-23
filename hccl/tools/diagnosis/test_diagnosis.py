@@ -12,14 +12,18 @@ if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from diagnosis.merge_timeline import merge_records, parse_plog_inputs
     from diagnosis.parse_msprof_json import parse_events
-    from diagnosis.parse_plog import parse_legacy_block
+    from diagnosis.parse_plog import parse_graph_correlation_lines, parse_legacy_block
+    from diagnosis.schema import GraphCorrelation
+    from diagnosis.validate_trace import validate_rows
     from diagnosis.visualize_dependency_graph import build_execution_edges
     from diagnosis.visualize_html import build_execution_dependency_model
     from diagnosis.visualize_timeline import assign_time_slots
 else:
     from .merge_timeline import merge_records, parse_plog_inputs
     from .parse_msprof_json import parse_events
-    from .parse_plog import parse_legacy_block
+    from .parse_plog import parse_graph_correlation_lines, parse_legacy_block
+    from .schema import GraphCorrelation
+    from .validate_trace import validate_rows
     from .visualize_dependency_graph import build_execution_edges
     from .visualize_html import build_execution_dependency_model
     from .visualize_timeline import assign_time_slots
@@ -85,7 +89,7 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertEqual(model["edges"][0]["kind"], "stream_order_observed")
         self.assertIn("adjacent executions", model["edges"][0]["reason"])
 
-    def test_json_composite_and_exact_matches_are_distinguished(self):
+    def test_legacy_composite_heuristic_is_disabled_by_default(self):
         events = [
             json_event(name, 45, 1, 100 + subtask, subtask=subtask)
             for subtask, name in enumerate(("SDMA", "SDMA", "SDMA", "Write Value", "Notify Wait"))
@@ -104,11 +108,118 @@ class DiagnosisToolTest(unittest.TestCase):
         rows, stats = merge_records(semantics, profilers)
         matched = [row for row in rows if row["match_status"] == "matched"]
 
+        self.assertEqual(stats["matched"], 1)
+        self.assertEqual(stats["unmatched_semantic"], 1)
+        self.assertEqual(matched[0]["profiler_task_id"], 2)
+        self.assertEqual(matched[0]["match_confidence"], "exact")
+
+        legacy_rows, legacy_stats = merge_records(
+            semantics, profilers, allow_legacy_composite_heuristic=True)
+        self.assertEqual(legacy_stats["legacy_composite_kind_mismatches"], 1)
+        self.assertEqual(
+            [row for row in legacy_rows if row["match_status"] == "invalid_heuristic"][0]
+            ["subtask_id"],
+            3,
+        )
+
+    def test_ffts_parent_ctx_correlation_matches_exact_subtask(self):
+        events = [
+            json_event("Write Value", 45, 1, 100, subtask=8),
+            json_event("SDMA", 45, 1, 101, subtask=13),
+        ]
+        profilers = list(parse_events(events, device_id=0, default_node_id="node0"))
+        semantics = list(parse_legacy_block([
+            "[HcclTaskSemantic] schema_version[2] device_id[0] stream_id[45] task_id[0] "
+            "semantic_seq[0] profiler_seq[6] task_kind[notify_record] event[tx_ack_start] "
+            "phase[reduce_scatter_direct] execution_mode[ffts] ffts_ctx_id[8] "
+            "graph_instance_id[7]\n",
+            "[HcclTaskSemantic] schema_version[2] device_id[0] stream_id[13] task_id[0] "
+            "semantic_seq[0] profiler_seq[3] task_kind[reduce_inline] "
+            "event[rx_payload_reduce_start] phase[reduce_scatter_direct] execution_mode[ffts] "
+            "ffts_ctx_id[13] graph_instance_id[7]\n",
+        ]))
+        correlations = [
+            GraphCorrelation(
+                graph_instance_id=7,
+                device_id=0,
+                anchor_task_id=0,
+                parent_stream_id=45,
+                parent_task_id=1,
+                node_id="node0",
+            )
+        ]
+
+        rows, stats = merge_records(semantics, profilers, correlations)
+        matched = [row for row in rows if row["match_status"] == "matched"]
+
+        self.assertEqual(stats["json_ffts_parent_ctx_matches"], 2)
         self.assertEqual(stats["matched"], 2)
-        self.assertEqual(matched[0]["subtask_id"], 3)
-        self.assertEqual(matched[0]["match_confidence"], "heuristic")
-        self.assertEqual(matched[1]["profiler_task_id"], 2)
-        self.assertEqual(matched[1]["match_confidence"], "exact")
+        self.assertEqual({row["subtask_id"] for row in matched}, {8, 13})
+        self.assertEqual({row["match_method"] for row in matched}, {"json_ffts_parent_ctx"})
+        self.assertEqual({row["match_confidence"] for row in matched}, {"exact"})
+        self.assertEqual({row["profiler_stream_id"] for row in matched}, {45})
+
+    def test_graph_correlation_plog_is_parsed(self):
+        records = list(parse_graph_correlation_lines([
+            "[INFO] HCCL(123,python):2026-07-15-16:32:01.129.303 "
+            "[HcclTaskGraphCorrelation] schema_version[1] graph_instance_id[9] "
+            "device_id[2] anchor_task_id[40] parent_stream_id[45] parent_task_id[41]\n"
+        ]))
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].graph_instance_id, 9)
+        self.assertEqual(records[0].parent_stream_id, 45)
+        self.assertEqual(records[0].parent_task_id, 41)
+        self.assertEqual(records[0].pid, 123)
+
+    def test_v1_and_invalid_ffts_fields_are_backward_compatible(self):
+        semantics = list(parse_legacy_block([
+            "[HcclTaskSemantic] schema_version[1] device_id[0] stream_id[45] task_id[2] "
+            "task_kind[sdma] event[copy_start] phase[allgather_direct]\n",
+            "[HcclTaskSemantic] schema_version[2] device_id[0] stream_id[45] task_id[3] "
+            "task_kind[sdma] event[copy_start] phase[allgather_direct] "
+            "ffts_ctx_id[4294967295] graph_instance_id[18446744073709551615]\n",
+        ]))
+        self.assertEqual(semantics[0].schema_version, 1)
+        self.assertEqual(semantics[0].ffts_ctx_id, -1)
+        self.assertEqual(semantics[0].graph_instance_id, -1)
+        self.assertEqual(semantics[1].ffts_ctx_id, -1)
+        self.assertEqual(semantics[1].graph_instance_id, -1)
+
+    def test_duplicate_graph_correlation_is_not_used(self):
+        profilers = list(parse_events(
+            [json_event("Write Value", 45, 1, 100, subtask=8)], 0, "node0"))
+        semantics = list(parse_legacy_block([
+            "[HcclTaskSemantic] schema_version[2] device_id[0] stream_id[45] task_id[0] "
+            "semantic_seq[0] task_kind[notify_record] event[tx_ack_start] "
+            "phase[reduce_scatter_direct] execution_mode[ffts] ffts_ctx_id[8] "
+            "graph_instance_id[7]\n",
+        ]))
+        correlations = [
+            GraphCorrelation(graph_instance_id=7, device_id=0, parent_stream_id=45,
+                             parent_task_id=1, node_id="node0"),
+            GraphCorrelation(graph_instance_id=7, device_id=0, parent_stream_id=45,
+                             parent_task_id=2, node_id="node0"),
+        ]
+        rows, stats = merge_records(semantics, profilers, correlations)
+        self.assertEqual(stats["duplicate_graph_correlation_keys"], 1)
+        self.assertEqual(stats["matched"], 0)
+        self.assertEqual(
+            [row for row in rows if row["match_status"] == "unmatched_semantic"][0]
+            ["ffts_ctx_id"],
+            8,
+        )
+
+    def test_validation_gate_counts_only_exact_matches(self):
+        rows = [
+            {"match_status": "matched", "match_confidence": "exact",
+             "duplicate_semantic": "0", "duplicate_profiler": "0"},
+            {"match_status": "matched", "match_confidence": "heuristic",
+             "duplicate_semantic": "0", "duplicate_profiler": "0"},
+        ]
+        ok, stats = validate_rows(rows, 75.0)
+        self.assertFalse(ok)
+        self.assertEqual(stats["match_rate_percent"], 100.0)
+        self.assertEqual(stats["exact_match_rate_percent"], 50.0)
 
     def test_exact_allgather_wins_reused_reduce_scatter_task_id(self):
         profilers = list(parse_events(

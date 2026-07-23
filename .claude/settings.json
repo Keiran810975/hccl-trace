@@ -9,7 +9,14 @@
       "Bash(xargs -I{} dirname \"{}\")",
       "Bash(grep -v \"^-1$\")",
       "Bash(sort -t= -k2 -n)",
-      "Read(//c/Users/Admin/.claude/projects/c--Users-Admin-Desktop-ATC-hccl-trace/b45f0b83-5f24-478f-90df-9bd14f1da51d/tool-results/**)"
+      "Read(//c/Users/Admin/.claude/projects/c--Users-Admin-Desktop-ATC-hccl-trace/b45f0b83-5f24-478f-90df-9bd14f1da51d/tool-results/**)",
+      "Bash(dir /s /b \"c:\\\\Users\\\\Admin\\\\Desktop\\\\ATC\\\\hccl-trace\\\\src\\\\algorithm\\\\impl\\\\coll_executer*\")",
+      "Bash(dir /s /b \"c:\\\\Users\\\\Admin\\\\Desktop\\\\ATC\\\\hccl-trace\\\\src\\\\algorithm\\\\*\")",
+      "Bash(dir /b /s \"c:\\\\Users\\\\Admin\\\\Desktop\\\\ATC\\\\hccl-trace\\\\src\\\\*executor*\")",
+      "Bash(dir /b /s \"c:\\\\Users\\\\Admin\\\\Desktop\\\\ATC\\\\hccl-trace\\\\src\\\\*Executor*\")",
+      "Bash(Get-ChildItem \"c:\\\\Users\\\\Admin\\\\Desktop\\\\ATC\\\\hccl-trace\\\\src\" -Recurse -Depth 3)",
+      "Bash(Select-Object FullName)",
+      "Bash(Select-Object -First 100)"
     ]
   }
 }
