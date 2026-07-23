@@ -218,25 +218,27 @@ sdma, rdma, reduce_inline, reduce_tbe, notify_record, notify_wait,
 host, graph_launch, batch_report, flip, unknown
 ```
 
-### 6.2 序号
+### 6.2 本地 task 序号已废弃
 
-代码为每个 `(device_id, stream_id)` 维护两套从 0 开始的原子序号：
+schema v4 删除 `semantic_seq/profiler_seq`。审计确认：
 
-- `profiler_seq`：每次进入语义 report/probe 路径都递增，包括没有语义 context 的 task；
-- `semantic_seq`：仅在实际输出 `[HcclTaskSemantic]` 时递增。
+- 两者都不参与 direct `task_id/exact` 或 FFts `parent+context/exact` 匹配；
+- 两者都不参与 operation scope、Notify relation、stream order 或质量门禁；
+- producer 与 consumer 位于不同 rank/stream，两个本地序号不能作为共享同步 token；
+- `profiler_seq` 原有 probe 计数不能证明 FFts lowering 后的 physical subtask 顺序。
 
-正常范围限定为：
+旧实现曾为每个活跃 device 分别懒分配两套 65,536 `atomic<u64>` stream 表，并在越界或
+分配失败时退化为进程级 fallback。这些状态、分配和热路径原子操作现已全部删除。
+`g_nextGraphInstanceId` 仍保留，因为它标识 FFts graph occurrence，不是本地 task 序号。
+
+语义去重改用可解释的实际身份：
 
 ```text
-0 <= device_id < 64
-0 <= stream_id < 65536
+direct = (node_id, device_id, stream_id, task_id)
+FFts   = (node_id, device_id, pid, graph_instance_id, ffts_ctx_id)
 ```
 
-每个首次出现的 device 会分别为 profiler 和 semantic 序号懒分配一个包含
-65536 个 `atomic<u64>` 的数组。越界或分配失败时使用进程级 fallback 序号。
-
-`semantic_seq` 可作为同 device/stream 内的语义记录身份和去重依据；
-`profiler_seq` 旨在表达上报顺序，但当前不等价于 FFts 编译后 subtask id。
+因此 CSV 重排不会影响去重，也不需要一个只为去重而存在的额外计数器。
 
 ### 6.3 完整日志
 
@@ -258,8 +260,6 @@ semantic
 device_id
 stream_id
 hccl_task_id
-semantic_seq
-profiler_seq
 task_type
 task_kind
 ffts_ctx_id
@@ -270,10 +270,11 @@ notify_stage
 source
 ```
 
-格式为 HCCL 现有的 `field[value]` 风格。字段精简后当前 semantic schema version 为 3。
-消费端接受已经完成设备验证的 version 2 和当前 version 3，明确拒绝 version 1、无版本记录
-以及旧空格 token 格式。version 2 中多出的 `execution_mode/notify_remote_rank/notify_ctx_id`
-会被忽略。`[HcclTaskGraphCorrelation]` 使用独立的 version 1 schema，不属于 semantic v1。
+格式为 HCCL 现有的 `field[value]` 风格。字段精简后当前 semantic schema version 为 4。
+消费端接受已完成设备验证的 version 2/3 和当前 version 4，明确拒绝 version 1、无版本记录
+以及旧空格 token 格式。version 2/3 中多出的
+`execution_mode/notify_remote_rank/notify_ctx_id/semantic_seq/profiler_seq` 会被忽略。
+`[HcclTaskGraphCorrelation]` 使用独立的 version 1 schema，不属于 semantic v1。
 
 字段删除由 `test/out` 的 28,502 条 matched semantic 和 44,008 条物理 execution 验证：
 
@@ -282,7 +283,8 @@ source
 - 9,380 条有效 `notify_ctx_id` 与通用 `ffts_ctx_id` 全部一致；
 - 44,008 条 profiler row 的 `kernel_type` 与 `event_name` 全部一致。
 
-因此删除这四列不会减少当前匹配或语义信息，merged CSV 从 47 列降为 43 列。
+因此删除这些重复列不会减少当前匹配或语义信息。operation scope 加入后曾为 44 列；
+schema v4 再删除两个本地序号，当前 merged CSV 为 42 列。
 
 没有写入日志的已预留字段是 `opType` 和 `opId`。`node_id` 不由 HCOMM 生成，
 由离线工具在输入边界补齐；`pid` 由 plog 行前缀解析。
@@ -290,10 +292,11 @@ source
 ### 6.4 Probe
 
 没有有效语义快照时只使用 `HCCL_DEBUG` 输出 `[HcclTaskSemanticProbe]`。
-Probe 会推进 `profiler_seq`，但不会进入离线语义数据集。
+Probe 不进入离线语义数据集，也不再维护本地序号。probe 现在输出 `device_id`、
+`stream_id`、`hccl_task_id` 和 task kind；FFts report-without-context 还输出 task type、
+context 和 graph instance。
 
-AIV 的专用 `Save()` 当前只调用 probe，不输出完整语义记录；传入 probe 的 `taskId`
-当前也没有被写入 probe 文本。
+AIV 的专用 `Save()` 当前只调用 probe，不输出完整语义记录。
 
 ### 6.5 submit 与 notify 元数据
 
@@ -428,9 +431,8 @@ DB `TASK.contextId`。精确键为：
   + ffts_ctx_id
 ```
 
-`profiler_seq` 只保留为提交顺序和旧数据调查字段，不再作为默认 composite 匹配键。
-
-`semantic_seq` 用于语义记录去重；它不表示物理设备 subtask 顺序。
+schema v4 不再输出或消费 `semantic_seq/profiler_seq`。FFts semantic 按
+graph/context identity 去重，direct semantic 按 physical merge key 去重。
 Notify record/wait 的物理资源可由相同 `notify_id` 识别，但 record/wait 通常位于不同
 device；精确 relation 还必须包含 operation、graph/protocol sequence 和规范化 rank 角色。
 
@@ -495,7 +497,7 @@ parent correlation + `ffts_ctx_id` 精确映射到同 `contextId`，kind mismatc
 
 这正是必须同时输出 graph parent correlation 的原因。
 
-### 8.3 schema v3 的关联机制
+### 8.3 schema v3/v4 的关联机制
 
 生产端在首个有效 FFts context 上创建 thread-local pending graph，分配
 `graph_instance_id`。同一构图批次的每条语义输出：
@@ -537,8 +539,8 @@ thread-local 单 pending slot。
 ### 8.4 版本与精确匹配规则
 
 - semantic v1、无 `schema_version` 和旧空格 token 记录直接拒绝；
-- semantic v2 仅作为已验证数据的迁移输入，新增生产端统一输出 v3；
-- `task_id + 1`、固定 ordinal 和 `profiler_seq` composite heuristic 已从代码及 CLI 删除；
+- semantic v2/v3 仅作为已验证数据的迁移输入，新增生产端统一输出 v4；
+- `task_id + 1`、固定 ordinal 和本地序号 composite heuristic 已从代码及 CLI 删除；
 - direct task 只允许 `task_id/exact`；
 - FFts task 只允许 `ffts_parent_ctx/exact`；
 - kind mismatch 输出 `correlation_kind_mismatch` 并使质量门禁失败。
@@ -547,6 +549,8 @@ thread-local 单 pending slot。
 其中 14,405/14,405 FFts semantic 使用 parent+ctx exact；335 条 graph correlation，
 duplicate 和 invalid 均为 0。精简字段后复算结果保持不变，merged 列数由 47 降至 43。
 DB 主输入不再需要 Chrome HostToDevice `flow_id`，因此当前 merged 列数进一步降至 42。
+DEP-002 增加两个紧凑 operation scope 字段后 merged 合同曾为 44 列；schema v4 删除
+`semantic_seq/profiler_seq` 后为 42 列，未重新引入原始 `op_name/group_name/opId`。
 
 ### 8.5 msprof DB 主输入合同
 
@@ -581,6 +585,345 @@ task-level identity 与旧输入完全一致；但旧 connection/time Notify heu
 消除 JSON 舍入并列而从 3,016 条变化为 5,094 条。这一差异进一步证明时间最近关系不是
 稳定因果证据，依赖图迁移必须按 DEP-008 删除该默认推断，不能为保持旧边数而重新舍入时间。
 
+### 8.6 单机依赖图合同（DEP-001）
+
+依赖分析采用两层图，而不是让一个节点模型同时承担事实记录和性能解释：
+
+| 图层 | 节点 | 用途 | 无损要求 |
+|---|---|---|---|
+| execution graph | 每个 msprof physical execution，包括 Notify record/wait | 保存设备真实执行、控制原语和全部证据 | DB 中每个目标 TASK 必须恰好出现一次 |
+| resource graph | 实际消耗数据通路资源的 SDMA/RDMA/Reduce/Compute execution | 关键路径、瓶颈与资源竞争分析 | 每条派生边必须能反查 execution 节点、控制节点及收缩规则 |
+
+execution graph 是规范事实层；resource graph 是它的确定性派生视图。Notify 不会从事实层
+删除。只有在 producer/consumer 与控制节点关系均已唯一确认时，resource graph 才可把
+`payload_before -> notify_record -> notify_wait -> payload_after` 收缩为一条同步边。收缩边
+至少保留原始 control node ID、relation identity、evidence 和 ambiguity 状态；缺失、多候选
+或冲突时保留控制节点，不猜测收缩。
+
+#### 8.6.1 稳定身份
+
+单机 physical execution identity 定义为：
+
+```text
+(node_id, device_id, physical_stream_id, task_id, subtask_id, connection_id)
+```
+
+其 `graph_id` 是上述规范元组的版本化稳定摘要。CSV 行号、开始/结束时间、
+`globalTaskId`、本地 operation `opId` 和 operation connection 均不进入身份：
+
+- 行号和时间是输出顺序/观测值，重排或提高时间精度不能改变节点；
+- `globalTaskId`、operation `opId`、operation connection 都是单 DB 的本地引用，
+  不得用于跨 device/rank 连接；
+- 同一输入中重复 execution identity 是硬错误，不能用行号静默拆成两个节点。
+
+operation scope 来源于 DB 的 `(node_id, group_name, op_name)`，输出为不暴露原始名称的
+`profiler_op_scope` 稳定摘要。`opId` 仅在同一 `(node_id, device_id)` 内验证
+`opId <-> (group_name, op_name)` 是否一一映射。每个 physical execution 同时输出：
+
+- `unique`：本地引用与 scope 一一对应，可作为后续 operation 分区证据；
+- `missing`：该 TASK 没有 operation metadata，仍保留为 execution 节点；
+- `ambiguous`：名称不完整、缺少本地引用或一对多/多对一，不得参与 exact 分区。
+
+operation scope 状态与 semantic-profiler 的 `match_status/match_confidence` 正交：一个
+semantic 可以 exact 匹配 physical task，但 operation scope 仍可能 missing/ambiguous。
+
+#### 8.6.2 边、证据与歧义
+
+规范边身份为：
+
+```text
+(graph_schema_version, edge_kind, src_graph_id, dst_graph_id, relation_identity)
+```
+
+证据强度从高到低为：
+
+1. `observed`：同一硬件执行域内的直接顺序或唯一、共享同步 token；
+2. `semantic`：生产端显式声明的 peer/phase/protocol 关系；
+3. `inferred`：由受约束元数据唯一推导，但生产端未显式声明；
+4. `heuristic`：时间最近、出现顺序 zip 等研究性猜测。
+
+`heuristic` 永远不能标为 exact/observed，也不能默认进入因果图。多个候选必须输出
+ambiguity（候选及原因），不能通过“最近时间”选一个。当前 edge ID 仍是单次导出的顺序号；
+DEP-011 将按上述规范边身份稳定化。
+
+#### 8.6.3 边权与控制收缩
+
+execution graph 的执行节点保存 `task_start/task_stop/duration`，顺序/同步边本身不把
+`duration` 重复解释为耗时。resource graph 的边权按以下口径生成：
+
+- 普通先后边权为 `0`；
+- 已唯一收缩的 Notify 同步边，等待权重为 consumer 可执行时刻减去其已满足前驱时刻，
+  下限为 `0`；
+- 无法唯一确定满足时刻时权重为 unknown，不使用跨 stream 的 wall-clock 最近值填充。
+
+因此关键路径长度由资源节点 duration 与可证明的同步等待共同组成，避免把 Notify wait
+任务自身 duration 和收缩边等待重复计费。图 artifact 使用
+`graph_schema_version=1`；未来更改 identity、收缩或权重语义必须升级版本。
+
+### 8.7 单机 stream 顺序规则（DEP-003/DEP-004）
+
+direct 与 FFts 使用不同的顺序证据，禁止再把所有 context 按 parent physical stream
+混成一条链：
+
+| 类型 | 进入条件 | 分组 identity | 排序证据 | 边类型/强度 |
+|---|---|---|---|---|
+| direct | `subtask_id < 0` | `(node, device, physical_stream)` | DB 精确 start/stop | `direct_stream_order_observed / observed` |
+| FFts | exact matched、scope unique、parent/ctx 完整 | `(node, device, pid, op_scope, graph_instance, parent_stream, parent_task, semantic_stream)` | `contextId` 声明序 | `ffts_logical_stream_order / semantic` |
+
+direct 时间排序使用 CSV 十进制微秒的 `Decimal` 值，不把大绝对时间先转成 `float`。绘图仍可
+使用 float，但不能让浮点舍入改变构边。同一 start 的 execution 构成无序 bucket：
+
+- bucket 内不建边；
+- 相邻 start bucket 之间只对 `src.stop <= dst.start` 的 pair 建边；
+- 因此重复时间处理与 CSV 行顺序、`graph_id` 哈希顺序无关；
+- 该边表示 direct 子序列中的可证明先后，不宣称中间不存在未标注 execution。
+
+FFts builder 不读取 start/stop 来决定先后。候选必须同时满足：
+
+1. `match_status=matched` 且 `ffts_ctx_id/subtask_id >= 0`；
+2. `ffts_ctx_id == subtask_id`；
+3. `profiler_op_scope_status=unique`；
+4. pid、graph instance、parent stream/task 和 semantic logical stream 全部有效；
+5. 同一逻辑流组内 context id 唯一。
+
+组内按 context id 连接相邻声明。该边表达“同一 logical stream 的 graph context 声明序”，
+证据等级是 semantic，不声称两个 context 在设备上不重叠。重复 context 是硬错误；缺少
+semantic、operation 或 parent evidence 的 profiler-only FFts context 保留为 execution node，
+但不猜测 stream 顺序。
+
+`test/out` DB 回放结果：
+
+| 指标 | 结果 |
+|---|---:|
+| direct execution / physical stream group / edge | 27,544 / 32 / 27,512 |
+| FFts exact context / logical stream group / edge | 14,405 / 670 / 13,735 |
+| 新 stream-order edge 合计 | 41,247 |
+| 旧 physical-stream edge | 43,976 |
+| 旧边保留 / 删除 / 新增 | 36,556 / 7,420 / 4,691 |
+| 旧 FFts 双向跨 logical-stream 伪边 | 4,690 |
+| 新跨 logical-stream 边 | 0 |
+
+任务清单中的 2,352 条是旧输入阶段的估计。当前 consolidated DB 逐端点复核得到 4,690 条：
+`stream 45 -> 13` 和 `13 -> 45` 各 2,345 条；两类都不能代表 FFts 内部依赖，现已全部删除。
+
+### 8.8 Notify relation identity（DEP-005）
+
+Notify resource 与一次同步 relation 是两个不同对象：
+
+```text
+resource identity = (node_id, notify_id)
+```
+
+resource 只回答“使用哪块 Notify 存储”。它会跨 step、graph launch 和 collective operation
+复用，不能直接生成 record→wait 边。一次同步 occurrence 的规范 identity 为：
+
+```text
+(
+  graph_schema_version,
+  node_id,
+  operation_scope,
+  rank_domain,
+  producer_rank,
+  consumer_rank,
+  signal_kind,
+  phase,
+  step,
+  slice,
+  notify_id,
+  sequence_kind,
+  sequence_value
+)
+```
+
+其中：
+
+- `operation_scope` 隔离 collective invocation；
+- `rank_domain` 当前固定为 `user`，禁止把 user rank 与 comm rank 混用；
+- producer/consumer 是规范化方向，不使用“本地/远端”这种随端点变化的描述；
+- `signal_kind` 当前为 `ack` 或 `data_signal`；
+- phase/step/slice 隔离同一 operation 内的算法位置；
+- `notify_id` 保留物理资源证据，但不是 occurrence sequence；
+- `sequence_kind/value` 隔离同一资源在同一算法位置的多次复用。
+
+sequence 支持三种合同：
+
+| `sequence_kind` | 来源 | 适用范围 |
+|---|---|---|
+| `ffts_graph_instance` | HCOMM `graph_instance_id` | 当前单机 FFts graph occurrence |
+| `protocol_sequence` | 后续生产端协议序号 | direct、跨 rank/channel |
+| `dependency_token` | 后续生产端显式共享 token | 无可靠自然序号的同步关系 |
+
+当前 FFts graph instance 仍是进程内生成值，只能在相同 node、operation scope 和规范 rank
+角色下作为单机候选 sequence，不能当成跨节点全局 ID。如果各 rank graph 序列不一致，
+端点必须进入 single/ambiguous 状态，禁止按时间补配。direct 当前
+`graph_instance_id=-1`，在 DEP-007 输出共享 sequence 前 relation identity 不完整。
+
+#### 8.8.1 端点角色归一化
+
+| task kind / event | 角色 | producer | consumer | signal |
+|---|---|---|---|---|
+| `notify_record / tx_ack_start` | producer | `user_rank` | `peer_rank` | `ack` |
+| `notify_wait / rx_ack_start` | consumer | `peer_rank` | `user_rank` | `ack` |
+| `notify_record / tx_data_signal_start` | producer | `user_rank` | `peer_rank` | `data_signal` |
+| `notify_record / tx_payload_start` | producer | `user_rank` | `peer_rank` | `data_signal` |
+| `notify_wait / rx_data_signal_start` | consumer | `peer_rank` | `user_rank` | `data_signal` |
+
+`tx_payload_start` 只有在 task kind 为 `notify_record` 时才归一化为 payload-ready
+data signal；SDMA/RDMA payload execution 不属于 Notify endpoint。
+
+#### 8.8.2 完整性与歧义
+
+relation identity 不包含 `task_start/task_stop/submit_ts`、`connection_id`、本地 opId 或
+operation connection。完整 identity 必须具有有效 op scope、rank 角色、signal、
+phase/step/slice、Notify resource 和 sequence。按完整 identity 分组后：
+
+- 恰好一个 producer record 和一个 consumer wait：`unique`；
+- 只有一端：`single`，保留候选和缺失角色；
+- 任一角色多于一个或身份字段冲突：`ambiguous`；
+- 缺少 sequence/op/rank/algorithm position：`incomplete`。
+
+只有 `unique` 才允许后续生成精确同步边；其他状态不得使用最近时间、出现顺序 zip 或
+`connection_id` 自动消歧。
+
+当前 `test/out` FFts 数据包含 9,380 个 Notify endpoint 和 16 个可复用 resource。完整
+identity 产生 4,704 个 candidate：4,676 个 `producer+consumer`、14 个 producer-only、
+14 个 consumer-only。若去掉 graph sequence，同一个 key 会聚合 11～12 个端点，直接证明
+resource/op/step/slice 仍不足以避免跨 graph 串轮。
+
+### 8.9 FFts Notify 精确配对（DEP-006）
+
+消费端只对 `matched` FFts physical execution 提取 Notify endpoint。候选必须满足：
+
+1. `subtask_id >= 0`，且 semantic `task_kind/event` 命中规范端点角色表；
+2. `profiler_op_scope_status=unique`；
+3. node、producer/consumer user rank、signal、phase/step/slice、notify resource 完整；
+4. sequence 固定使用 `ffts_graph_instance`，值为有效 `graph_instance_id`。
+
+随后按完整 `NotifyRelationIdentity.stable_id` 分组，规则是：
+
+| 端点构成 | 状态/产物 | 是否构边 |
+|---|---|---|
+| 1 producer + 1 consumer | `ffts_notify_sync_observed`，保存 relation ID | 是 |
+| 只有 1 个端点 | `single`，记录缺失角色 | 否 |
+| producer 或 consumer 任一侧多于 1 | `ambiguous`，记录全部 endpoint graph ID | 否 |
+| identity 缺字段 | `incomplete`，逐端点记录缺失字段 | 否 |
+
+配对过程不读取 `task_start/task_stop`，不按 source row、task id 或 occurrence order 排序，
+也不做 `zip`。因此增加时间精度、CSV 重排或 producer/consumer 执行先后变化不会改变
+relation；证据不足只会增加 ambiguity，不会生成猜测边。
+
+`visualize_dependency_graph.py` 现在同时输出：
+
+```text
+<prefix>_nodes.csv
+<prefix>_edges.csv
+<prefix>_notify_ambiguities.csv
+```
+
+ambiguity artifact 保留 relation 字段、状态、两侧计数、缺失角色/字段和全部 endpoint
+`graph_id`，可直接定位未闭合或重复的控制关系。当前 DB golden replay 结果为：
+
+| 指标 | 数量 |
+|---|---:|
+| FFts Notify endpoint | 9,380 |
+| `ffts_notify_sync_observed` | 4,676 |
+| `single` | 28 |
+| `ambiguous` | 0 |
+| `incomplete` | 0 |
+
+28 个 single 中 producer-only 与 consumer-only 各 14 个；它们保持显式边界，不按相邻
+graph、时间或 resource 猜测另一端。
+
+#### 8.9.1 28 个 single 的来源
+
+这里的 single 不是“只有一端的边”，而是只有一个可观测 endpoint 的 relation candidate，
+所以不会生成 dependency edge。28 条全部集中在：
+
+```text
+rank 7
+reduce_scatter_direct
+graph_instance_id = 16
+step = 0..6
+signal = ack / data_signal
+```
+
+rank 7 的 plog 中 graph instance 序列为 `1..15, 17..42`，没有 16；graph correlation
+也只有 41 条。相邻 rank 0 和 rank 6 的 graph 16 则各有完整 43 条 semantic context。
+因此 rank 7 整个 FFts launch 缺少可关联 semantic/correlation，产生四组边界：
+
+| 已观测端点 | 缺失端点 | 每个 step | 合计 |
+|---|---|---:|---:|
+| rank 0 → 7 ACK producer | rank 7 consumer | 1 | 7 |
+| rank 0 的 data-signal consumer | rank 7 producer | 1 | 7 |
+| rank 6 的 ACK consumer | rank 7 producer | 1 | 7 |
+| rank 6 → 7 data-signal producer | rank 7 consumer | 1 | 7 |
+
+即 `7 steps × 2 signals × 2 neighbor directions = 28`。这说明缺失单位是一整个 rank-7
+graph launch，而不是 28 次独立配对算法失败。可能原因位于生产端 graph observation/
+correlation 生命周期或日志缺失，需要新设备采集检查同一时刻的
+`HcclTaskSemanticProbe`、`launch without pending semantic graph` 和 plog 丢弃信息；
+现有离线证据不足以在这些可能性之间定责。
+
+### 8.10 删除 connection/time 默认推断（DEP-008）
+
+旧 builder 在同一 `(node, device, connection_id)` 内选择 wait 完成前“时间最近”的
+Notify record。相同设备数据在 JSON 浮点时间下得到 3,016 条，在 DB 整数纳秒下得到
+5,094 条，证明结果依赖展示精度而不是稳定身份。
+
+默认 builder、edge vocabulary 和 HTML 图例现已完全删除 `notify_sync_inferred`：
+
+- `connection_id` 仍作为 physical execution identity 的组成部分保留；
+- 时间仍用于 direct physical stream 的可证明顺序；
+- 两者不再组合成跨 stream Notify 因果边；
+- 当前没有隐式 research fallback。未来若需要研究模式，必须提供独立显式入口，并把边
+  标为 `heuristic`，不得写入默认 artifact。
+
+DB replay 中 inferred 从 5,094 降为 0，总边数从 58,871 降为 53,777；节点 44,008、
+FFts exact Notify 4,676、single 28 均不变。
+
+### 8.11 direct Notify token 的阻塞结论（DEP-007）
+
+现有生产端没有满足“跨 rank 共享、每次同步唯一”的 direct sequence：
+
+- `notify_id` 标识可复用 Notify 存储，同一 resource 跨 operation/step 多次使用；
+- 已废弃的 `semantic_seq/profiler_seq` 原本按本地 device/stream 分配，producer 与
+  consumer 数值不同，不能作为共享 token；
+- physical `task_id` 是本地 stream task identity；
+- `connection_id` 来自 msprof physical execution/operation 本地关联，不由 HCOMM 同步协议
+  作为共享 occurrence token 输出；
+- `notify_stage` 在当前 transport direct 信号路径为 invalid，不能当作协议轮次。
+
+当前 9,399 个 direct Notify endpoint 在缺少 sequence 时折叠成 784 个候选组，每组
+11～12 个端点，证明现有字段不足以精确配对。给 producer/consumer 各自维护一个本地
+自增计数器在理想 SPMD 顺序下可能暂时对齐，但不满足验收：
+
+- 单侧 retry 会使计数错位，并把后续 consumer 错配给前一 producer；
+- 多 channel/transport 若从同一初值开始，会产生相同 sequence；
+- 无显式 epoch 的整数 wrap 会复用历史 identity；
+- collective 并发或调用序差异无法由本地计数检测。
+
+因此 DEP-007 被 ID-001～ID-004 阻塞，当前不向 schema 写入伪
+`dependency_token/protocol_seq`。正确生产合同应由 invocation 与 transport 两层共同提供：
+
+```text
+dependency token =
+(
+  op_instance_id,
+  retry_generation,
+  channel_id,
+  producer_rank,
+  consumer_rank,
+  signal_kind,
+  protocol_seq_or_epoch_seq
+)
+```
+
+`op_instance_id/retry_generation` 隔离 collective invocation 与重试，channel 隔离并行
+transport，协议序号隔离同一资源的连续 occurrence；序号耗尽时必须转入 invalid/新 epoch，
+不能静默回绕。该合同需要先完成并序列化 ID-004，再在 transport 协议层赋值，并由新设备
+采集验证正常、并发、retry、channel 与 wrap/饱和边界。仅增加未赋值字段或本地计数器不视为
+DEP-007 完成。
+
 ## 9. 兼容性与非目标
 
 当前实现没有引入旧版 marker 路径：
@@ -611,32 +954,28 @@ PROFILER_TRACE_EX
 2. **存在提前返回导致语义丢失的窗口。**
    `TaskData` 构造时可能已消费 one-shot context，但 `TaskProfiling::Run()` 在
    `GetAddtionInfoState()`、OP_BASE、非 capture 条件下会在语义上报前直接返回。
-   结果是语义被消费却没有日志，同时 `profiler_seq` 也不会推进。
+   结果是语义被消费却没有日志。
 
 ### P1：正确性与精确关联
 
 1. **缺少 op instance。** `opId/opType` 虽存在于结构体，但当前不赋值、不序列化，
    多轮 AllReduce 的语义配对可能串轮。
-2. **FFts correlation 已通过 v2 设备数据验收，v3 仍需构建确认。** `test/out` 已证明
+2. **FFts correlation 已通过 v2 设备数据验收，v4 仍需构建确认。** `test/out` 已证明
    `graph_instance_id/ffts_ctx_id` 和 graph parent correlation 能 100% exact；
-   v3 只删除冗余日志字段，但仍需 HCOMM 构建和一轮短采集确认格式。
+   v4 删除本地序号，但仍需 HCOMM 构建和一轮短采集确认格式。
 3. **vector 只标首任务。** `traceXxx` 布尔量牺牲了完整 slice/subtask 语义覆盖。
 4. **AIV 只有 probe。** 专用 AIV Save 路径不会产生完整 `[HcclTaskSemantic]`。
-5. **空 task 未计序。** 返回成功但不执行 report/probe 的 Save 重载不会推进
-   `profiler_seq`，序号不一定覆盖所有实际 graph 节点。
+5. **空 task 语义行为未定义。** 返回成功但不执行 report/probe 的 Save 重载是否对应
+   physical execution 尚未完成逐项审计。
 6. **phase 归属可能重叠。** RS/AG 对共享或竞争的物理 memcpy 可能给出不同 phase 声明，
    需要 correlation 后按物理 task 验证唯一归属。
 
 ### P2：可维护性与资源
 
 1. **字符串是裸指针。** 当前字面量安全，但 API 没有表达或强制生命周期要求。
-2. **序号表内存固定。** 每个活跃 device、每套序号分配 65536 个原子计数器，
-   且按进程生命周期保留；应以实测 stream 范围评估内存。
-3. **fallback 序号改变作用域。** device/stream 越界或分配失败后退化为进程级全局序号，
-   不再满足严格的 per-device/per-stream 语义。
-4. **当前没有 C++ 单元测试。** 开关缓存、嵌套恢复、one-shot、capture stream、
-   并发序号和提前返回均缺少直接回归测试。
-5. **`profiler_manager_impl.cc` 是无功能格式变更。** 应避免与功能提交混合，降低审查噪声。
+2. **当前没有 C++ 单元测试。** 开关缓存、嵌套恢复、one-shot、capture stream、
+   graph instance 并发和提前返回均缺少直接回归测试。
+3. **`profiler_manager_impl.cc` 是无功能格式变更。** 应避免与功能提交混合，降低审查噪声。
 
 ## 11. 当前可验证的验收口径
 

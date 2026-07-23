@@ -79,8 +79,6 @@ def semantic_from_mapping(data: Dict[str, str]) -> SemanticRecord:
         semantic=data.get("semantic", ""),
         stream_id=parse_int(data.get("stream_id")),
         task_id=parse_int(data.get("hccl_task_id")),
-        semantic_seq=parse_int(data.get("semantic_seq")),
-        profiler_seq=parse_int(data.get("profiler_seq")),
         task_kind=data.get("task_kind", ""),
         ffts_ctx_id=_parse_unsigned_identity(data.get("ffts_ctx_id"), UINT32_MAX),
         graph_instance_id=_parse_unsigned_identity(data.get("graph_instance_id"), UINT64_MAX),

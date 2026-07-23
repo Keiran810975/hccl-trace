@@ -7,8 +7,8 @@ from dataclasses import dataclass, fields
 from typing import Dict, Iterable, List, Optional
 
 
-SCHEMA_VERSION = 3
-SUPPORTED_SEMANTIC_SCHEMA_VERSIONS = frozenset((2, 3))
+SCHEMA_VERSION = 4
+SUPPORTED_SEMANTIC_SCHEMA_VERSIONS = frozenset((2, 3, 4))
 TRACE_TAG = "[HcclTaskSemantic]"
 GRAPH_CORRELATION_TAG = "[HcclTaskGraphCorrelation]"
 
@@ -27,8 +27,6 @@ SEMANTIC_FIELDS = (
     "semantic",
     "stream_id",
     "task_id",
-    "semantic_seq",
-    "profiler_seq",
     "task_kind",
     "ffts_ctx_id",
     "graph_instance_id",
@@ -73,6 +71,8 @@ MERGED_FIELDS = (
     "subtask_id",
     "connection_id",
     "model_id",
+    "profiler_op_scope",
+    "profiler_op_scope_status",
     "correlation_parent_stream_id",
     "correlation_parent_task_id",
     "match_method",
@@ -95,8 +95,6 @@ class SemanticRecord:
     semantic: str = ""
     stream_id: int = -1
     task_id: int = -1
-    semantic_seq: int = -1
-    profiler_seq: int = -1
     task_kind: str = ""
     ffts_ctx_id: int = -1
     graph_instance_id: int = -1
@@ -149,6 +147,8 @@ class ProfilerTask:
     global_task_id: int = -1
     op_name: str = ""
     group_name: str = ""
+    profiler_op_id: int = -1
+    profiler_op_connection_id: int = -1
     profiler_notify_id: int = -1
     profiler_src_rank: int = -1
     profiler_dst_rank: int = -1

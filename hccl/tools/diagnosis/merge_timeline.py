@@ -14,6 +14,12 @@ from typing import Dict, Iterable, List, Tuple
 
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from diagnosis.dependency_model import (
+        OPERATION_SCOPE_AMBIGUOUS,
+        OPERATION_SCOPE_MISSING,
+        OPERATION_SCOPE_UNIQUE,
+        OperationScopeIdentity,
+    )
     from diagnosis.parse_msprof_db import MsprofDbError, parse_inputs as parse_msprof_db_inputs
     from diagnosis.parse_plog import (
         parse_file as parse_plog_file,
@@ -21,6 +27,12 @@ if __package__ in (None, ""):
     )
     from diagnosis.schema import GraphCorrelation, MERGED_FIELDS, ProfilerTask, SemanticRecord, write_csv
 else:
+    from .dependency_model import (
+        OPERATION_SCOPE_AMBIGUOUS,
+        OPERATION_SCOPE_MISSING,
+        OPERATION_SCOPE_UNIQUE,
+        OperationScopeIdentity,
+    )
     from .parse_msprof_db import MsprofDbError, parse_inputs as parse_msprof_db_inputs
     from .parse_plog import parse_file as parse_plog_file, parse_graph_correlations_file
     from .schema import GraphCorrelation, MERGED_FIELDS, ProfilerTask, SemanticRecord, write_csv
@@ -60,6 +72,10 @@ def merge_records(
     stats["ffts_semantic_total"] = sum(
         1 for record in semantic_list if record.ffts_ctx_id >= 0)
     stats["graph_correlation_total"] = len(correlation_list)
+    operation_scopes, operation_scope_stats = build_operation_scope_assignments(
+        profiler_list
+    )
+    stats.update(operation_scope_stats)
 
     semantic_counts = Counter(_semantic_dedupe_key(record) for record in semantic_list)
     semantic_task_key_counts = Counter(record.merge_key for record in semantic_list)
@@ -104,7 +120,8 @@ def merge_records(
                 rows.append(_merged_row(
                     "correlation_kind_mismatch", semantic, composite,
                     duplicate_semantic, duplicate_profiler,
-                    "ffts_parent_ctx", "invalid", matched_correlation))
+                    "ffts_parent_ctx", "invalid", matched_correlation,
+                    _operation_scope_for(operation_scopes, composite)))
                 continue
             matches = [composite]
             match_method = "ffts_parent_ctx"
@@ -133,14 +150,17 @@ def merge_records(
         if matched_profiler.execution_key in matched_profiler_keys:
             stats["ambiguous_semantic"] += 1
             rows.append(_merged_row("ambiguous_semantic", semantic, matched_profiler,
-                                    duplicate_semantic, True, match_method, match_confidence))
+                                    duplicate_semantic, True, match_method, match_confidence,
+                                    operation_scope=_operation_scope_for(
+                                        operation_scopes, matched_profiler)))
             continue
         stats["matched"] += 1
         if match_confidence == "exact":
             stats["exact_matched"] += 1
         matched_profiler_keys.add(matched_profiler.execution_key)
         rows.append(_merged_row("matched", semantic, matched_profiler, duplicate_semantic, duplicate_profiler,
-                                match_method, match_confidence, matched_correlation))
+                                match_method, match_confidence, matched_correlation,
+                                _operation_scope_for(operation_scopes, matched_profiler)))
 
     for task in profiler_list:
         if task.execution_key in matched_profiler_keys:
@@ -153,6 +173,7 @@ def merge_records(
             task,
             False,
             profiler_execution_counts[task.execution_key] > 1,
+            operation_scope=_operation_scope_for(operation_scopes, task),
         ))
 
     stats["duplicate_semantic_keys"] = sum(1 for count in semantic_counts.values() if count > 1)
@@ -166,6 +187,83 @@ def merge_records(
         stats.get("exact_matched", 0) * 100.0 / len(semantic_list), 2
     ) if semantic_list else 0
     return rows, stats
+
+
+def build_operation_scope_assignments(
+    profilers: Iterable[ProfilerTask],
+) -> Tuple[Dict[tuple, Tuple[str, str]], Counter]:
+    """Classify DB operation metadata without using local IDs as graph scope.
+
+    ``opId`` only proves that one device-local DB reference maps one-to-one to
+    ``(group_name, op_name)``.  The exported scope is derived from names and the
+    node boundary, so different devices may use different local IDs safely.
+    """
+    profiler_list = list(profilers)
+    ref_to_scopes = defaultdict(set)
+    scope_to_refs = defaultdict(set)
+    task_candidates = []
+
+    for task in profiler_list:
+        op_name = str(task.op_name or "").strip()
+        group_name = str(task.group_name or "").strip()
+        scope = (
+            OperationScopeIdentity(task.node_id, group_name, op_name)
+            if op_name and group_name
+            else None
+        )
+        task_candidates.append((task, scope))
+        if scope is None or task.profiler_op_id < 0:
+            continue
+        local_ref = (task.node_id, task.device_id, task.profiler_op_id)
+        local_scope = (task.node_id, task.device_id, group_name, op_name)
+        ref_to_scopes[local_ref].add(scope)
+        scope_to_refs[local_scope].add(task.profiler_op_id)
+
+    candidates_by_execution = defaultdict(set)
+    for task, scope in task_candidates:
+        op_name = str(task.op_name or "").strip()
+        group_name = str(task.group_name or "").strip()
+        if not op_name and not group_name:
+            candidate = ("", OPERATION_SCOPE_MISSING)
+        elif scope is None or task.profiler_op_id < 0:
+            candidate = ("", OPERATION_SCOPE_AMBIGUOUS)
+        else:
+            local_ref = (task.node_id, task.device_id, task.profiler_op_id)
+            local_scope = (task.node_id, task.device_id, group_name, op_name)
+            if (
+                ref_to_scopes[local_ref] != {scope}
+                or scope_to_refs[local_scope] != {task.profiler_op_id}
+            ):
+                candidate = ("", OPERATION_SCOPE_AMBIGUOUS)
+            else:
+                candidate = (scope.stable_id, OPERATION_SCOPE_UNIQUE)
+        candidates_by_execution[task.execution_key].add(candidate)
+
+    assignments = {}
+    stats = Counter()
+    unique_scopes = set()
+    for task in profiler_list:
+        candidates = candidates_by_execution[task.execution_key]
+        if len(candidates) != 1:
+            assignment = ("", OPERATION_SCOPE_AMBIGUOUS)
+        else:
+            assignment = next(iter(candidates))
+        assignments[task.execution_key] = assignment
+        stats["profiler_operation_scope_{}".format(assignment[1])] += 1
+        if assignment[1] == OPERATION_SCOPE_UNIQUE:
+            unique_scopes.add(assignment[0])
+    stats["profiler_operation_scope_distinct"] = len(unique_scopes)
+    return assignments, stats
+
+
+def _operation_scope_for(
+    assignments: Dict[tuple, Tuple[str, str]],
+    profiler: ProfilerTask,
+) -> Tuple[str, str]:
+    return assignments.get(
+        profiler.execution_key,
+        ("", OPERATION_SCOPE_MISSING),
+    )
 
 
 
@@ -288,13 +386,25 @@ def parse_graph_correlation_inputs(
 
 
 def _semantic_dedupe_key(record: SemanticRecord):
-    if record.semantic_seq >= 0 and record.device_id >= 0 and record.stream_id >= 0:
-        return (record.node_id, record.device_id, record.stream_id, "semantic_seq", record.semantic_seq)
+    if (
+        record.ffts_ctx_id >= 0
+        and record.graph_instance_id >= 0
+        and record.device_id >= 0
+    ):
+        return (
+            record.node_id,
+            record.device_id,
+            record.pid,
+            "ffts_graph_context",
+            record.graph_instance_id,
+            record.ffts_ctx_id,
+        )
     return record.merge_key
 
 def _merged_row(status: str, semantic: SemanticRecord, profiler: ProfilerTask, duplicate_semantic: bool,
                 duplicate_profiler: bool, match_method: str = "", match_confidence: str = "",
-                graph_correlation: GraphCorrelation = None):
+                graph_correlation: GraphCorrelation = None,
+                operation_scope: Tuple[str, str] = ("", "")):
     row = semantic.to_row()
     row.update({
         "node_id": profiler.node_id if profiler else semantic.node_id,
@@ -312,6 +422,8 @@ def _merged_row(status: str, semantic: SemanticRecord, profiler: ProfilerTask, d
         "subtask_id": profiler.subtask_id if profiler else "",
         "connection_id": profiler.connection_id if profiler else "",
         "model_id": profiler.model_id if profiler else "",
+        "profiler_op_scope": operation_scope[0] if profiler else "",
+        "profiler_op_scope_status": operation_scope[1] if profiler else "",
         "correlation_parent_stream_id": (
             graph_correlation.parent_stream_id if graph_correlation else ""),
         "correlation_parent_task_id": (

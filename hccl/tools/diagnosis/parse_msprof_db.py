@@ -174,6 +174,8 @@ def parse_file(path: str, default_node_id: str = "") -> List[ProfilerTask]:
                 communication.notifyId AS notify_id,
                 communication.srcRank AS src_rank,
                 communication.dstRank AS dst_rank,
+                operation.opId AS profiler_op_id,
+                operation.connectionId AS profiler_op_connection_id,
                 op_name.value AS op_name,
                 group_name.value AS group_name
             FROM TASK AS task
@@ -220,6 +222,10 @@ def parse_file(path: str, default_node_id: str = "") -> List[ProfilerTask]:
                 global_task_id=int(row["global_task_id"]),
                 op_name=str(row["op_name"] or ""),
                 group_name=str(row["group_name"] or ""),
+                profiler_op_id=_optional_int(row["profiler_op_id"]),
+                profiler_op_connection_id=_optional_int(
+                    row["profiler_op_connection_id"]
+                ),
                 profiler_notify_id=(
                     _notify_id(row["notify_id"])
                 ),

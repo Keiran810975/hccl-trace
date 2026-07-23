@@ -9,13 +9,15 @@
 plog semantic ─┐
                ├─ merge_timeline.py ── merged.csv
 msprof DB ─────┘                         ├─ validate_trace.py
-                                        ├─ visualize_dependency_graph.py → edge/node CSV
+                                        ├─ visualize_dependency_graph.py → node/edge/ambiguity CSV
                                         └─ visualize_html.py → interactive HTML
 ```
 
 DB 解析从 `TASK` 保留物理 stream/task/context、`connection_id` 和整数纳秒起止时间，
 并通过 `COMMUNICATION_TASK_INFO`、`COMMUNICATION_OP`、`COMPUTE_TASK_INFO` 补充通信
 operation 与具体计算事件名称。合并结果同时保留未标注的 `profiler_only` 执行单元。
+原始 operation 名称和本地 ID 不进入公共 schema；merge 仅输出紧凑
+`profiler_op_scope` 及其 `unique/missing/ambiguous` 状态。
 
 当前支持的 msprof DB schema 为 `1.2.0`。解析器以 SQLite `mode=ro` 打开数据库；未知
 schema、缺表、重复 device 或一对多 communication metadata 会明确失败。
@@ -45,10 +47,11 @@ python -m tools.diagnosis.merge_timeline \
 task/subtask correlation id。设备执行起止时间始终来自 DB `TASK.startNs/endNs`，内部先
 保留整数纳秒，到 CSV 边界才精确表示为十进制微秒。
 
-semantic schema v1、无版本日志和旧空格 token 格式已不再支持。当前生产端输出 v3；
-消费端接受 v2/v3，以便复查已经通过设备验证的 v2 golden 数据。v3 删除
+semantic schema v1、无版本日志和旧空格 token 格式已不再支持。当前生产端输出 v4；
+消费端接受 v2/v3/v4，以便复查已经通过设备验证的旧 golden 数据。v3 删除
 `execution_mode`、`notify_remote_rank`、`notify_ctx_id`；msprof 侧删除与 `event_name`
-重复的 `kernel_type`。
+重复的 `kernel_type`。v4 删除不参与 exact identity 或依赖构造的
+`semantic_seq/profiler_seq`；旧输入中的这两个字段会被忽略。
 
 ## 依赖图
 
@@ -61,14 +64,36 @@ python -m tools.diagnosis.visualize_html merged.csv \
   --output dependency.html
 ```
 
+execution node 使用
+`(node, device, physical stream, task, subtask, connection)` 的稳定摘要作为
+`graph_id`，CSV 重排和时间精度变化不会改变 ID；重复 physical identity 是硬错误。
+node/edge CSV 当前标记 `graph_schema_version=1`。execution graph 保留 Notify，
+resource graph 的控制收缩合同见 `spec.md`，尚由后续 DEP-012 实现。
+
 依赖边包含证据等级：
 
-- `stream_order_observed`：profiler 中同一物理 stream 的相邻执行顺序，`observed`。
-- `notify_sync_observed`：重新采集后 plog 中 record/wait 具有相同 `notify_id`，`observed`。
-- `notify_sync_inferred`：旧样本无 notify id，按同 device/connection、跨 stream、事件类型
-  和唯一时间候选推断，`inferred`。
+- `direct_stream_order_observed`：只对 `subtask_id < 0` 的 direct execution，在相同
+  node/device/physical stream 内按 DB 精确时间建立顺序，`observed`。同起始时间不互相排序。
+- `ffts_logical_stream_order`：只对 exact FFts context，按 operation、graph parent 和
+  semantic logical stream 分组，再按 context 声明序连接，`semantic`；不使用设备时间排序。
+- `ffts_notify_sync_observed`：完整 FFts relation identity 下恰好一个 producer 与一个
+  consumer，`observed`；边保存稳定 relation ID。单边、多端或缺字段写入
+  `dependency_notify_ambiguities.csv`，不生成因果边。
 - `peer_signal_semantic` / `peer_payload_semantic`：显式 peer rank、phase、step、slice 相同，
   再按 occurrence 顺序配对，`semantic`。
+
+Notify 资源身份是 `(node_id, notify_id)`，它会跨 step、graph 和 operation 复用，不能直接
+代表一次同步。规范 relation identity 还包含 operation scope、producer/consumer、signal、
+phase/step/slice 和 graph/protocol sequence；不包含时间或 `connection_id`。当前 FFts 已有
+graph sequence 可生成 relation candidate，direct 必须等待生产端共享 token。
+
+当前 DB golden replay 的 FFts Notify 结果为 4,676 条 observed edge、28 条 single
+ambiguity、0 条 multi-endpoint ambiguity、0 条 incomplete。direct 的共享 token 被
+ID-004 阻塞；本地 task/stream 计数不能替代跨 rank protocol sequence。
+
+DEP-008 已删除默认 connection/time Notify 推断。旧 JSON 的 3,016 条和 DB 的 5,094 条
+最近时间边均不再进入因果图；如果未来恢复研究模式，必须使用独立显式入口并标为
+`heuristic`，不能混入默认 artifact。
 
 旧实现中的“右邻居上一 payload”“上一 step”等算法规则不再作为默认边；它们不是 profiler
 观测事实。多节点精确边仍需要 collective instance id、统一时钟或单独的时钟校准 artifact。

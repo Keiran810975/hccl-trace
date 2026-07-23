@@ -10,20 +10,14 @@
 
 #include "task_semantic_trace.h"
 
-#include <array>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
-#include <new>
 
 namespace hccl {
 namespace {
-constexpr u32 TASK_SEMANTIC_SCHEMA_VERSION = 3;
+constexpr u32 TASK_SEMANTIC_SCHEMA_VERSION = 4;
 constexpr u32 TASK_GRAPH_CORRELATION_SCHEMA_VERSION = 1;
-constexpr u32 TASK_SEMANTIC_MAX_DEVICE_NUM = 64;
-constexpr u32 TASK_SEMANTIC_MAX_STREAM_NUM = 65536;
-using TaskSemanticStreamSeqArray = std::array<std::atomic<u64>, TASK_SEMANTIC_MAX_STREAM_NUM>;
-using TaskSemanticDeviceSeqArray = std::array<std::atomic<TaskSemanticStreamSeqArray *>, TASK_SEMANTIC_MAX_DEVICE_NUM>;
 thread_local bool g_taskSemanticValid = false;
 thread_local TaskSemanticTraceInfo g_taskSemanticInfo{};
 // DispatcherGraph adds contexts and launches the graph synchronously on the
@@ -98,47 +92,6 @@ u64 ObserveFftsGraphTask(u32 deviceId, u32 anchorTaskId)
     return g_pendingFftsGraph.graphInstanceId;
 }
 
-u64 NextTaskSeq(TaskSemanticDeviceSeqArray &seqByDevice, std::atomic<u64> &fallbackSeq, u32 deviceId,
-    u32 streamId)
-{
-    if (deviceId >= TASK_SEMANTIC_MAX_DEVICE_NUM || streamId >= TASK_SEMANTIC_MAX_STREAM_NUM) {
-        return fallbackSeq.fetch_add(1, std::memory_order_relaxed);
-    }
-
-    TaskSemanticStreamSeqArray *streamSeqs = seqByDevice[deviceId].load(std::memory_order_acquire);
-    if (streamSeqs == nullptr) {
-        TaskSemanticStreamSeqArray *created = new (std::nothrow) TaskSemanticStreamSeqArray();
-        if (created == nullptr) {
-            return fallbackSeq.fetch_add(1, std::memory_order_relaxed);
-        }
-        for (auto &seq : *created) {
-            seq.store(0, std::memory_order_relaxed);
-        }
-        TaskSemanticStreamSeqArray *expected = nullptr;
-        if (seqByDevice[deviceId].compare_exchange_strong(expected, created, std::memory_order_release,
-            std::memory_order_acquire)) {
-            streamSeqs = created;
-        } else {
-            delete created;
-            streamSeqs = expected;
-        }
-    }
-    return (*streamSeqs)[streamId].fetch_add(1, std::memory_order_relaxed);
-}
-
-u64 NextTaskProfilerSeq(u32 deviceId, u32 streamId)
-{
-    static TaskSemanticDeviceSeqArray seqByDevice{};
-    static std::atomic<u64> fallbackSeq{0};
-    return NextTaskSeq(seqByDevice, fallbackSeq, deviceId, streamId);
-}
-
-u64 NextTaskSemanticSeq(u32 deviceId, u32 streamId)
-{
-    static TaskSemanticDeviceSeqArray seqByDevice{};
-    static std::atomic<u64> fallbackSeq{0};
-    return NextTaskSeq(seqByDevice, fallbackSeq, deviceId, streamId);
-}
 } // namespace
 
 bool IsTaskSemanticTraceEnabled()
@@ -201,10 +154,9 @@ HcclResult ReportTaskSemanticTraceProbe(u32 deviceId, u32 streamId, u32 taskId, 
     if (!IsTaskSemanticTraceEnabled()) {
         return HCCL_SUCCESS;
     }
-    u64 profilerSeq = NextTaskProfilerSeq(deviceId, streamId);
     HCCL_DEBUG("[HcclTaskSemanticProbe] report without context device_id[%u] stream_id[%u] "
-        "profiler_seq[%llu] task_kind[%s]",
-        deviceId, streamId, profilerSeq, SafeStr(taskKind));
+        "hccl_task_id[%u] task_kind[%s]",
+        deviceId, streamId, taskId, SafeStr(taskKind));
     return HCCL_SUCCESS;
 }
 
@@ -223,22 +175,20 @@ HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskT
     }
     const bool isFfts = fftsCtxId != INVALID_UINT;
     const u64 graphInstanceId = isFfts ? ObserveFftsGraphTask(deviceId, taskId) : 0;
-    u64 profilerSeq = NextTaskProfilerSeq(deviceId, streamId);
     if (info == nullptr) {
         HCCL_DEBUG("[HcclTaskSemanticProbe] report without context device_id[%u] stream_id[%u] "
-            "profiler_seq[%llu] task_type[%u] task_kind[%s] "
+            "hccl_task_id[%u] task_type[%u] task_kind[%s] "
             "ffts_ctx_id[%u] graph_instance_id[%llu]",
-            deviceId, streamId, profilerSeq, static_cast<u32>(taskType), TaskTypeToName(taskType),
+            deviceId, streamId, taskId, static_cast<u32>(taskType), TaskTypeToName(taskType),
             fftsCtxId, graphInstanceId);
         return HCCL_SUCCESS;
     }
 
-    u64 semanticSeq = NextTaskSemanticSeq(deviceId, streamId);
     HCCL_RUN_INFO("[HcclTaskSemantic] schema_version[%u] algorithm[%s] "
         "event[%s] phase[%s] step[%u] slice[%u] "
         "user_rank[%u] comm_rank[%u] rank_size[%u] peer_rank[%u] semantic[%s] "
         "device_id[%u] stream_id[%u] hccl_task_id[%u] "
-        "semantic_seq[%llu] profiler_seq[%llu] task_type[%u] task_kind[%s] "
+        "task_type[%u] task_kind[%s] "
         "ffts_ctx_id[%u] graph_instance_id[%llu] "
         "submit_ts[%llu] notify_id[%llu] notify_stage[%d] source[%s]",
         TASK_SEMANTIC_SCHEMA_VERSION,
@@ -246,8 +196,7 @@ HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskT
         info->step, info->slice,
         info->userRank, info->commRank, info->rankSize,
         info->peerRank, SafeStr(info->semantic), deviceId,
-        streamId, taskId, semanticSeq, profilerSeq,
-        static_cast<u32>(taskType), TaskTypeToName(taskType),
+        streamId, taskId, static_cast<u32>(taskType), TaskTypeToName(taskType),
         fftsCtxId, graphInstanceId, info->submitTs, info->notifyId, info->notifyStage,
         SafeStr(info->source));
     return HCCL_SUCCESS;

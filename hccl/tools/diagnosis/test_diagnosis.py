@@ -3,15 +3,28 @@
 
 from __future__ import annotations
 
+import csv
 import os
 import sqlite3
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
+from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from diagnosis.merge_timeline import merge_records, parse_plog_inputs
+    from diagnosis.dependency_model import (
+        NOTIFY_SEQUENCE_FFTS_GRAPH,
+        NOTIFY_SEQUENCE_TOKEN,
+        NotifyRelationIdentity,
+        normalize_notify_endpoint,
+    )
+    from diagnosis.merge_timeline import (
+        build_operation_scope_assignments,
+        merge_records,
+        parse_plog_inputs,
+    )
     from diagnosis.parse_msprof_db import (
         MsprofDbError,
         parse_file as parse_msprof_db_file,
@@ -20,11 +33,24 @@ if __package__ in (None, ""):
     from diagnosis.parse_plog import parse_graph_correlation_lines, parse_plog_lines
     from diagnosis.schema import GraphCorrelation, ProfilerTask
     from diagnosis.validate_trace import validate_rows
-    from diagnosis.visualize_dependency_graph import build_execution_edges
+    from diagnosis.visualize_dependency_graph import (
+        build_execution_edges,
+        read_execution_rows,
+    )
     from diagnosis.visualize_html import build_execution_dependency_model
     from diagnosis.visualize_timeline import assign_time_slots
 else:
-    from .merge_timeline import merge_records, parse_plog_inputs
+    from .dependency_model import (
+        NOTIFY_SEQUENCE_FFTS_GRAPH,
+        NOTIFY_SEQUENCE_TOKEN,
+        NotifyRelationIdentity,
+        normalize_notify_endpoint,
+    )
+    from .merge_timeline import (
+        build_operation_scope_assignments,
+        merge_records,
+        parse_plog_inputs,
+    )
     from .parse_msprof_db import (
         MsprofDbError,
         parse_file as parse_msprof_db_file,
@@ -33,7 +59,10 @@ else:
     from .parse_plog import parse_graph_correlation_lines, parse_plog_lines
     from .schema import GraphCorrelation, ProfilerTask
     from .validate_trace import validate_rows
-    from .visualize_dependency_graph import build_execution_edges
+    from .visualize_dependency_graph import (
+        build_execution_edges,
+        read_execution_rows,
+    )
     from .visualize_html import build_execution_dependency_model
     from .visualize_timeline import assign_time_slots
 
@@ -149,7 +178,127 @@ def execution_row(index, stream, task, start, kind="sdma", connection=77, event=
     }
 
 
+def ffts_execution_row(index, context, logical_stream, start=100, graph_instance=7):
+    row = execution_row(index, 45, 9, start)
+    row.update({
+        "_subtask_id": context,
+        "match_status": "matched",
+        "ffts_ctx_id": str(context),
+        "graph_instance_id": str(graph_instance),
+        "stream_id": str(logical_stream),
+        "pid": "123",
+        "profiler_op_scope": "op_fixture",
+        "profiler_op_scope_status": "unique",
+        "correlation_parent_stream_id": "45",
+        "correlation_parent_task_id": "9",
+    })
+    return row
+
+
+def ffts_notify_row(
+    index,
+    context,
+    rank,
+    peer,
+    kind,
+    event,
+    graph_instance=7,
+    notify_id=99,
+):
+    row = ffts_execution_row(
+        index,
+        context,
+        logical_stream=13 + rank,
+        start=100 + index,
+        graph_instance=graph_instance,
+    )
+    row.update({
+        "_device_id": rank,
+        "_user_rank": rank,
+        "_rank": rank,
+        "_peer_rank": peer,
+        "_notify_id": notify_id,
+        "_step": 2,
+        "_slice": 5,
+        "task_kind": kind,
+        "profiler_task_kind": kind,
+        "event": event,
+        "phase": "reduce_scatter_direct",
+    })
+    return row
+
+
 class DiagnosisToolTest(unittest.TestCase):
+    def test_notify_endpoint_roles_normalize_tx_and_rx_to_same_relation(self):
+        producer = normalize_notify_endpoint(
+            "notify_record", "tx_ack_start", 3, 2
+        )
+        consumer = normalize_notify_endpoint(
+            "notify_wait", "rx_ack_start", 2, 3
+        )
+        self.assertEqual(producer, ("producer", 3, 2, "ack"))
+        self.assertEqual(consumer, ("consumer", 3, 2, "ack"))
+
+        direct_producer = normalize_notify_endpoint(
+            "notify_record", "tx_payload_start", 3, 4
+        )
+        direct_consumer = normalize_notify_endpoint(
+            "notify_wait", "rx_data_signal_start", 4, 3
+        )
+        self.assertEqual(direct_producer, ("producer", 3, 4, "data_signal"))
+        self.assertEqual(direct_consumer, ("consumer", 3, 4, "data_signal"))
+
+    def test_notify_relation_identity_separates_reused_resource_by_sequence(self):
+        common = {
+            "node_id": "node0",
+            "operation_scope": "op_fixture",
+            "rank_domain": "user",
+            "producer_rank": 3,
+            "consumer_rank": 4,
+            "signal_kind": "data_signal",
+            "phase": "reduce_scatter_direct",
+            "step": 2,
+            "slice_id": 5,
+            "notify_id": 99,
+            "sequence_kind": NOTIFY_SEQUENCE_FFTS_GRAPH,
+        }
+        first = NotifyRelationIdentity(sequence_value="7", **common)
+        second = NotifyRelationIdentity(sequence_value="8", **common)
+
+        self.assertTrue(first.complete)
+        self.assertTrue(second.complete)
+        self.assertEqual(first.resource.stable_id, second.resource.stable_id)
+        self.assertNotEqual(first.stable_id, second.stable_id)
+
+    def test_notify_relation_requires_sequence_and_never_uses_time(self):
+        relation = NotifyRelationIdentity(
+            node_id="node0",
+            operation_scope="op_fixture",
+            rank_domain="user",
+            producer_rank=0,
+            consumer_rank=1,
+            signal_kind="ack",
+            phase="reduce_scatter_direct",
+            step=0,
+            slice_id=7,
+            notify_id=99,
+            sequence_kind=NOTIFY_SEQUENCE_TOKEN,
+            sequence_value="",
+        )
+
+        self.assertFalse(relation.complete)
+        self.assertIn("sequence_value", relation.missing_fields)
+        self.assertNotIn("task_start", relation.__dataclass_fields__)
+        self.assertNotIn("task_stop", relation.__dataclass_fields__)
+
+        invalid_graph_sequence = replace(
+            relation,
+            sequence_kind=NOTIFY_SEQUENCE_FFTS_GRAPH,
+            sequence_value="-1",
+        )
+        self.assertFalse(invalid_graph_sequence.complete)
+        self.assertIn("sequence_value", invalid_graph_sequence.missing_fields)
+
     def test_dependency_html_model_keeps_fixed_track_metadata(self):
         zero = execution_row(2, 45, 3, 104)
         zero["_stop"] = zero["_start"]
@@ -162,8 +311,8 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertGreater(model["timeScale"], 0)
         self.assertFalse(model["nodes"][0]["zeroDuration"])
         self.assertTrue(model["nodes"][2]["zeroDuration"])
-        self.assertEqual(model["edges"][0]["kind"], "stream_order_observed")
-        self.assertIn("adjacent executions", model["edges"][0]["reason"])
+        self.assertEqual(model["edges"][0]["kind"], "direct_stream_order_observed")
+        self.assertIn("direct execution", model["edges"][0]["reason"])
 
     def test_composite_without_correlation_remains_unmatched(self):
         profilers = [
@@ -325,6 +474,8 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertEqual(tasks[2].subtask_id, 8)
         self.assertEqual(tasks[2].op_name, "hcom_allReduce__fixture_0")
         self.assertEqual(tasks[2].group_name, "group_fixture")
+        self.assertEqual(tasks[2].profiler_op_id, 7)
+        self.assertEqual(tasks[2].profiler_op_connection_id, 79)
         self.assertEqual(tasks[2].profiler_notify_id, 99)
         self.assertEqual(tasks[2].profiler_src_rank, 0)
         self.assertEqual(tasks[2].profiler_dst_rank, 1)
@@ -390,7 +541,7 @@ class DiagnosisToolTest(unittest.TestCase):
             records = parse_plog_inputs(plog_dir=temp_dir)
         self.assertEqual({record.device_id for record in records}, {0, 1})
 
-    def test_submit_ts_and_profiler_seq_are_parsed(self):
+    def test_submit_ts_is_parsed_and_legacy_sequences_are_discarded(self):
         semantics = list(parse_plog_lines([
             "[HcclTaskSemantic] schema_version[3] device_id[7] stream_id[45] hccl_task_id[0] "
             "semantic_seq[0] profiler_seq[3] submit_ts[1783015731413749] "
@@ -398,11 +549,20 @@ class DiagnosisToolTest(unittest.TestCase):
             "phase[reduce_scatter_direct] step[0]\n",
         ]))
         self.assertEqual(semantics[0].submit_ts, 1783015731413749)
-        self.assertEqual(semantics[0].profiler_seq, 3)
         self.assertEqual(semantics[0].notify_id, 99)
         self.assertEqual(semantics[0].notify_stage, 2)
+        self.assertNotIn("semantic_seq", semantics[0].__dataclass_fields__)
+        self.assertNotIn("profiler_seq", semantics[0].__dataclass_fields__)
 
-    def test_physical_dependency_stream_order_and_notify_sync(self):
+        current = list(parse_plog_lines([
+            "[HcclTaskSemantic] schema_version[4] device_id[7] stream_id[45] hccl_task_id[1] "
+            "submit_ts[1783015731413750] task_kind[sdma] event[copy_start] "
+            "phase[reduce_scatter_direct] step[0]\n",
+        ]))
+        self.assertEqual(current[0].schema_version, 4)
+        self.assertEqual(current[0].task_id, 1)
+
+    def test_default_dependency_graph_excludes_connection_time_notify(self):
         rows = [
             execution_row(0, 45, 1, 0),
             execution_row(1, 45, 2, 2, kind="notify_record"),
@@ -412,10 +572,8 @@ class DiagnosisToolTest(unittest.TestCase):
         rows[2]["_stop"] = 3.0
         edges = build_execution_edges(rows)
         kinds = {edge["kind"] for edge in edges}
-        self.assertIn("stream_order_observed", kinds)
-        self.assertIn("notify_sync_inferred", kinds)
-        notify = next(edge for edge in edges if edge["kind"] == "notify_sync_inferred")
-        self.assertEqual(notify["confidence"], "inferred")
+        self.assertIn("direct_stream_order_observed", kinds)
+        self.assertNotIn("notify_sync_inferred", kinds)
 
     def test_physical_dependency_peer_semantic_pair(self):
         tx = execution_row(0, 45, 1, 0, event="tx_ack_start", rank=0, peer=1, step=0, slice_id=6)
@@ -425,15 +583,345 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertEqual(len(peer), 1)
         self.assertEqual(peer[0]["confidence"], "semantic")
 
-    def test_notify_id_builds_observed_cross_stream_edge(self):
+    def test_direct_notify_id_without_shared_sequence_is_not_observed(self):
         record = execution_row(0, 45, 1, 0, kind="notify_record", notify_id=99)
         wait = execution_row(1, 13, 1, 1, kind="notify_wait", notify_id=99)
+        record["_connection_id"] = -1
+        wait["_connection_id"] = -1
         record["task_kind"] = "notify_record"
         wait["task_kind"] = "notify_wait"
         edges = build_execution_edges([record, wait])
-        observed = [edge for edge in edges if edge["kind"] == "notify_sync_observed"]
+        observed = [
+            edge for edge in edges
+            if edge["kind"] == "ffts_notify_sync_observed"
+        ]
+        self.assertEqual(observed, [])
+
+    def test_ffts_notify_unique_relation_builds_observed_edge(self):
+        producer = ffts_notify_row(
+            0, 8, 0, 1, "notify_record", "tx_ack_start"
+        )
+        consumer = ffts_notify_row(
+            1, 9, 1, 0, "notify_wait", "rx_ack_start"
+        )
+        ambiguities = []
+
+        edges = build_execution_edges(
+            [producer, consumer],
+            notify_ambiguities=ambiguities,
+        )
+        observed = [
+            edge for edge in edges
+            if edge["kind"] == "ffts_notify_sync_observed"
+        ]
+
         self.assertEqual(len(observed), 1)
+        self.assertEqual((observed[0]["src"], observed[0]["dst"]), ("p0", "p1"))
         self.assertEqual(observed[0]["confidence"], "observed")
+        self.assertTrue(observed[0]["relation_id"].startswith("nr_"))
+        self.assertEqual(ambiguities, [])
+
+    def test_ffts_notify_single_endpoint_is_explicit(self):
+        producer = ffts_notify_row(
+            0, 8, 0, 1, "notify_record", "tx_ack_start"
+        )
+        ambiguities = []
+
+        edges = build_execution_edges(
+            [producer],
+            notify_ambiguities=ambiguities,
+        )
+
+        self.assertFalse(any(
+            edge["kind"] == "ffts_notify_sync_observed"
+            for edge in edges
+        ))
+        self.assertEqual(len(ambiguities), 1)
+        self.assertEqual(ambiguities[0]["status"], "single")
+        self.assertEqual(ambiguities[0]["missing_role"], "consumer")
+        self.assertEqual(ambiguities[0]["endpoint_graph_ids"], "p0")
+
+    def test_ffts_notify_multiple_endpoints_are_not_sorted_or_zipped(self):
+        first = ffts_notify_row(
+            0, 8, 0, 1, "notify_record", "tx_ack_start"
+        )
+        second = ffts_notify_row(
+            1, 10, 0, 1, "notify_record", "tx_ack_start"
+        )
+        consumer = ffts_notify_row(
+            2, 9, 1, 0, "notify_wait", "rx_ack_start"
+        )
+        ambiguities = []
+
+        edges = build_execution_edges(
+            [first, second, consumer],
+            notify_ambiguities=ambiguities,
+        )
+
+        self.assertFalse(any(
+            edge["kind"] == "ffts_notify_sync_observed"
+            for edge in edges
+        ))
+        self.assertEqual(len(ambiguities), 1)
+        self.assertEqual(ambiguities[0]["status"], "ambiguous")
+        self.assertEqual(ambiguities[0]["producer_count"], 2)
+        self.assertEqual(ambiguities[0]["consumer_count"], 1)
+
+    def test_ffts_notify_reused_resource_is_separated_by_graph_instance(self):
+        rows = []
+        for graph_instance, offset in ((7, 0), (8, 2)):
+            rows.extend((
+                ffts_notify_row(
+                    offset,
+                    8,
+                    0,
+                    1,
+                    "notify_record",
+                    "tx_ack_start",
+                    graph_instance=graph_instance,
+                ),
+                ffts_notify_row(
+                    offset + 1,
+                    9,
+                    1,
+                    0,
+                    "notify_wait",
+                    "rx_ack_start",
+                    graph_instance=graph_instance,
+                ),
+            ))
+        ambiguities = []
+
+        edges = build_execution_edges(rows, notify_ambiguities=ambiguities)
+        observed = [
+            edge for edge in edges
+            if edge["kind"] == "ffts_notify_sync_observed"
+        ]
+
+        self.assertEqual(len(observed), 2)
+        self.assertEqual(len({edge["relation_id"] for edge in observed}), 2)
+        self.assertEqual(ambiguities, [])
+
+    def test_direct_stream_builder_excludes_ffts_execution(self):
+        first = execution_row(0, 45, 1, 0)
+        ffts = ffts_execution_row(1, 0, 13, start=1)
+        last = execution_row(2, 45, 2, 2)
+
+        edges = build_execution_edges([first, ffts, last])
+        stream_edges = [
+            edge for edge in edges
+            if edge["kind"] in (
+                "direct_stream_order_observed",
+                "ffts_logical_stream_order",
+            )
+        ]
+
+        self.assertEqual(len(stream_edges), 1)
+        self.assertEqual(stream_edges[0]["kind"], "direct_stream_order_observed")
+        self.assertEqual((stream_edges[0]["src"], stream_edges[0]["dst"]), ("p0", "p2"))
+
+    def test_direct_equal_start_is_an_unordered_bucket(self):
+        rows = [
+            execution_row(0, 45, 1, 0),
+            execution_row(1, 45, 2, 2),
+            execution_row(2, 45, 3, 2),
+            execution_row(3, 45, 4, 4),
+        ]
+
+        edges = build_execution_edges(list(reversed(rows)))
+        stream_pairs = {
+            (edge["src"], edge["dst"])
+            for edge in edges
+            if edge["kind"] == "direct_stream_order_observed"
+        }
+
+        self.assertEqual(
+            stream_pairs,
+            {("p0", "p1"), ("p0", "p2"), ("p1", "p3"), ("p2", "p3")},
+        )
+        self.assertNotIn(("p1", "p2"), stream_pairs)
+        self.assertNotIn(("p2", "p1"), stream_pairs)
+
+    def test_ffts_order_is_rebuilt_per_semantic_logical_stream(self):
+        rows = [
+            ffts_execution_row(0, 0, 13),
+            ffts_execution_row(1, 1, 45),
+            ffts_execution_row(2, 2, 13),
+            ffts_execution_row(3, 3, 45),
+        ]
+
+        edges = build_execution_edges(rows)
+        logical_edges = [
+            edge for edge in edges
+            if edge["kind"] == "ffts_logical_stream_order"
+        ]
+
+        self.assertEqual(
+            {(edge["src"], edge["dst"]) for edge in logical_edges},
+            {("p0", "p2"), ("p1", "p3")},
+        )
+        self.assertEqual(
+            {edge["confidence"] for edge in logical_edges},
+            {"semantic"},
+        )
+
+    def test_ffts_duplicate_context_in_one_logical_stream_is_hard_error(self):
+        first = ffts_execution_row(0, 3, 13)
+        second = ffts_execution_row(1, 3, 13)
+        with self.assertRaisesRegex(ValueError, "duplicate FFts context IDs"):
+            build_execution_edges([first, second])
+
+    def test_operation_scope_is_cross_device_and_local_ids_are_not_identity(self):
+        first = replace(
+            profiler_task("SDMA", 45, 1, 100),
+            op_name="hcom_allReduce__fixture_0",
+            group_name="group_fixture",
+            profiler_op_id=7,
+            profiler_op_connection_id=70,
+        )
+        second = replace(
+            profiler_task("SDMA", 45, 1, 100),
+            device_id=1,
+            op_name="hcom_allReduce__fixture_0",
+            group_name="group_fixture",
+            profiler_op_id=41,
+            profiler_op_connection_id=99,
+        )
+        rows, stats = merge_records([], [first, second])
+
+        self.assertEqual(stats["profiler_operation_scope_unique"], 2)
+        self.assertEqual(stats["profiler_operation_scope_distinct"], 1)
+        self.assertEqual(
+            {row["profiler_op_scope_status"] for row in rows},
+            {"unique"},
+        )
+        self.assertEqual(len({row["profiler_op_scope"] for row in rows}), 1)
+
+    def test_operation_scope_rejects_two_local_op_ids_for_one_scope(self):
+        first = replace(
+            profiler_task("SDMA", 45, 1, 100),
+            op_name="reused_name",
+            group_name="group_fixture",
+            profiler_op_id=7,
+        )
+        second = replace(
+            profiler_task("SDMA", 45, 2, 102),
+            op_name="reused_name",
+            group_name="group_fixture",
+            profiler_op_id=8,
+        )
+        assignments, stats = build_operation_scope_assignments([first, second])
+
+        self.assertEqual(stats["profiler_operation_scope_ambiguous"], 2)
+        self.assertEqual(stats["profiler_operation_scope_distinct"], 0)
+        self.assertEqual(
+            {value for value in assignments.values()},
+            {("", "ambiguous")},
+        )
+
+    def test_execution_graph_id_survives_csv_reorder(self):
+        source_rows = [
+            {
+                "match_status": "profiler_only",
+                "node_id": "node0",
+                "device_id": "0",
+                "profiler_stream_id": "45",
+                "profiler_task_id": "1",
+                "subtask_id": "8",
+                "connection_id": "77",
+                "task_start": "100.001",
+                "task_stop": "101.001",
+            },
+            {
+                "match_status": "profiler_only",
+                "node_id": "node0",
+                "device_id": "0",
+                "profiler_stream_id": "13",
+                "profiler_task_id": "2",
+                "subtask_id": "-1",
+                "connection_id": "78",
+                "task_start": "102.001",
+                "task_stop": "103.001",
+            },
+        ]
+        fieldnames = list(source_rows[0])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = [Path(temp_dir) / "forward.csv", Path(temp_dir) / "reverse.csv"]
+            for path, values in zip(paths, (source_rows, list(reversed(source_rows)))):
+                with path.open("w", encoding="utf-8", newline="") as output:
+                    writer = csv.DictWriter(output, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(values)
+            forward = read_execution_rows(paths[0])
+            reverse = read_execution_rows(paths[1])
+
+        forward_ids = {
+            (row["_stream_id"], row["_task_id"]): row["_graph_id"]
+            for row in forward
+        }
+        reverse_ids = {
+            (row["_stream_id"], row["_task_id"]): row["_graph_id"]
+            for row in reverse
+        }
+        self.assertEqual(forward_ids, reverse_ids)
+        self.assertTrue(all(value.startswith("x_") for value in forward_ids.values()))
+
+    def test_direct_order_preserves_db_nanoseconds_at_large_absolute_time(self):
+        source_rows = [
+            {
+                "match_status": "profiler_only",
+                "node_id": "node0",
+                "device_id": "0",
+                "profiler_stream_id": "45",
+                "profiler_task_id": str(task_id),
+                "subtask_id": "-1",
+                "connection_id": "77",
+                "task_start": timestamp,
+                "task_stop": stop,
+                "duration": "0.001",
+            }
+            for task_id, timestamp, stop in (
+                (1, "1783015731413.001", "1783015731413.002"),
+                (2, "1783015731413.003", "1783015731413.004"),
+            )
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "nanosecond.csv"
+            with path.open("w", encoding="utf-8", newline="") as output:
+                writer = csv.DictWriter(output, fieldnames=list(source_rows[0]))
+                writer.writeheader()
+                writer.writerows(source_rows)
+            rows = read_execution_rows(path)
+
+        edges = build_execution_edges(rows)
+        stream_edges = [
+            edge for edge in edges
+            if edge["kind"] == "direct_stream_order_observed"
+        ]
+        self.assertEqual(len(stream_edges), 1)
+        self.assertNotEqual(rows[0]["_start_order"], rows[1]["_start_order"])
+        self.assertEqual(rows[0]["_duration"], 0.001)
+
+    def test_duplicate_execution_identity_is_hard_error(self):
+        duplicate = {
+            "match_status": "profiler_only",
+            "node_id": "node0",
+            "device_id": "0",
+            "profiler_stream_id": "45",
+            "profiler_task_id": "1",
+            "subtask_id": "8",
+            "connection_id": "77",
+            "task_start": "100",
+            "task_stop": "101",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "duplicate.csv"
+            with path.open("w", encoding="utf-8", newline="") as output:
+                writer = csv.DictWriter(output, fieldnames=list(duplicate))
+                writer.writeheader()
+                writer.writerows((duplicate, dict(duplicate)))
+            with self.assertRaisesRegex(ValueError, "duplicate physical execution identity"):
+                read_execution_rows(path)
 
     def test_timeline_stacks_overlapping_tasks(self):
         def row(index, start, stop):
