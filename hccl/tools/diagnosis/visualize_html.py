@@ -126,7 +126,7 @@ def node_record(row: dict, x: float, y: float, w: float, h: float, fill: str, st
 
 def build_execution_dependency_model(rows: List[dict], edges: List[dict]) -> dict:
     if not rows:
-        raise ValueError("no timed JSON executions to render")
+        raise ValueError("no timed profiler executions to render")
     left = 190
     top = 92
     node_h = 16

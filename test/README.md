@@ -7,7 +7,7 @@
 功能测试要证明：
 
 - `HCCL_STEP_TRACE=1` 时，运行 single-ring AllReduce 能在 plog 中产生 `[HcclTaskSemantic]` 记录。
-- 仅与 msprof Chrome-trace JSON 聚合，保留 AI_CORE 内的 SDMA、Write Value、Notify Wait 和 `Subtask Id`。
+- 仅与 msprof consolidated DB 聚合，保留 FFts 展开的 SDMA、Write Value、Notify Wait 和 context id。
 - `validate_trace` 的匹配率达到阈值，建议先用 `--min-match-rate 95`。
 - 输出中覆盖 `allreduce_executor`、`reduce_scatter_direct`、`allgather_direct`，以及 `tx_payload_start`、`rx_payload_copy_start`、`rx_payload_reduce_start`、`copy_start` 等事件。
 
@@ -24,7 +24,7 @@
 - CANN Toolkit/driver 环境可用，`set_env.sh` 已 source。
 - 当前 `hcomm` 改动已构建并被运行时加载。HCOMM 变更需要在 `hcomm` 仓库自身验证，不要只构建 `hccl`。
 - 有一条稳定的单机 AllReduce 命令，最好是 8 卡 single-ring 路径。
-- 能采集 HCCL plog 和 msprof `msprof_*.json`。
+- 能采集 HCCL plog 和 consolidated `msprof_*.db`。
 
 建议先完成构建：
 
@@ -64,7 +64,7 @@ msprof --application="./some_all_reduce_test --rank-size 8 --count 268435456" --
 1. 清理旧输出目录和旧 profiler 输出。
 2. 开启 `HCCL_STEP_TRACE=1` 运行 AllReduce。
 3. 从 HCCL plog 中找到包含 `[HcclTaskSemantic]` 的文件。
-4. 从 msprof 输出目录找到 `mindstudio_profiler_output/msprof_*.json`。
+4. 从每个 `PROF_*` 根目录找到 consolidated `msprof_*.db`。
 5. 执行 merge 和 validate。
 
 示例：
@@ -75,7 +75,7 @@ cd /path/to/hccl-trace
 bash test/run_step_trace_function_test.sh \
   --out-dir test/out/function \
   --plog /path/to/hccl/plog.log \
-  --msprof-json-dir /path/to/msprof \
+  --msprof-db-dir /path/to/msprof \
   --node-id node0 \
   --min-match-rate 95 \
   -- \
@@ -87,7 +87,7 @@ bash test/run_step_trace_function_test.sh \
 ```bash
 bash test/run_step_trace_function_test.sh \
   --plog /path/to/hccl/plog.log \
-  --msprof-json-dir /path/to/msprof
+  --msprof-db-dir /path/to/msprof
 ```
 
 功能通过的最低标准：
@@ -103,9 +103,9 @@ bash test/run_step_trace_function_test.sh \
 
 - plog 是否来自新 HCOMM/HCCL 产物。
 - workload 是否真的走到 single-ring AllReduce 910/93 路径。
-- `msprof_*.json` 是否和 plog 来自同一次运行。
-- JSON 的 `Physic Stream Id`、`Task Id`、`Subtask Id`、`connection_id` 是否完整，且每个 PROF 目录能唯一对应一个 `device_N`。
-- JSON 是否包含带物理 stream/task id 的 device execution 事件。
+- `msprof_*.db` 是否和 plog 来自同一次运行。
+- DB `META_DATA.SCHEMA_VERSION` 是否受支持，`TASK` 是否包含 stream/task/context/connection。
+- 每个 consolidated DB 是否只包含一个 device，输入目录是否存在重复 device profile。
 
 ## 5. 开销测试流程
 
@@ -149,7 +149,7 @@ python3 test/measure_step_trace_overhead.py \
 - 被测 commit：`git -C hcomm rev-parse HEAD` 和 `git -C hccl rev-parse HEAD`。
 - 构建日志和运行命令。
 - plog 原始文件。
-- msprof 原始 `msprof_*.json`。
+- msprof 原始 consolidated `msprof_*.db`。
 - `merged.csv`、`summary.csv`、`validate.log`、`dependency.html`、`timeline_time.html`。
 - `overhead.csv`、`summary.txt`。
 

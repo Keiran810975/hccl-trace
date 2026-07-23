@@ -74,7 +74,7 @@ RS/AG 算法模板建立 phase/step/slice/rank context
   -> TaskData 构造时捕获 TLS 语义快照
   -> TaskProfiling 获得 device/stream/task/type/submit timestamp
   -> plog 输出 versioned [HcclTaskSemantic]
-  -> HCCL Python 工具与 msprof JSON 物理任务合并
+  -> HCCL Python 工具与 msprof DB 物理 TASK 合并
 ```
 
 主要功能包括：
@@ -203,7 +203,7 @@ DMA、Reduce、Notify、AIV 四种构造函数都会调用 `CaptureSemanticTrace
 
 - 原 profiler 路径继续使用 `TaskData.streamID`；
 - `[HcclTaskSemantic]` 使用 `semanticStreamID`；
-- 语义侧希望与 msprof JSON 中的物理 stream 对齐。
+- 语义侧希望与 msprof DB 中的物理 stream 对齐。
 
 这是一个有意的身份拆分，不能再假设两个字段始终相等。
 
@@ -307,7 +307,7 @@ AIV 的专用 `Save()` 当前只调用 probe，不输出完整语义记录；传
 5. 再继续原有 msprof 数据上报。
 
 `submit_ts` 是 Host-cycle 提交时刻，不是设备执行起止时间。它只能用于顺序校验或缩小候选窗口，
-task duration 必须来自 msprof JSON。
+task duration 必须来自 msprof DB `TASK.startNs/endNs`。
 
 本次数据同时表明 `notify_id` 还不能作为 record/wait 的跨执行精确配对键：
 18,779 条 Notify semantic 按 `(node_id, device_id, notify_id)` 分组后，没有任何一组同时
@@ -417,10 +417,10 @@ phase 固定为 `allgather_direct`，algorithm 固定为 `single_ring_direct`。
 - `task_id` 解析自 `hccl_task_id`；
 - `node_id` 由离线 CLI 在输入边界补齐。
 
-普通非 composite task 可以按上述键和 task kind 与 msprof JSON 精确匹配。
+普通非 composite task 可以按上述键和 task kind 与 msprof DB 精确匹配。
 FFts graph 使用 `graph_instance_id` 将构图期语义与 graph launch 关联，再使用 launch
 记录中的 `(parent_stream_id, parent_task_id)` 和语义记录中的 `ffts_ctx_id` 精确匹配
-JSON `Subtask Id`。精确键为：
+DB `TASK.contextId`。精确键为：
 
 ```text
 (node_id, device_id, pid, graph_instance_id)
@@ -431,7 +431,8 @@ JSON `Subtask Id`。精确键为：
 `profiler_seq` 只保留为提交顺序和旧数据调查字段，不再作为默认 composite 匹配键。
 
 `semantic_seq` 用于语义记录去重；它不表示物理设备 subtask 顺序。
-Notify record/wait 可以利用相同 `notify_id` 建立同 device 的观测同步边。
+Notify record/wait 的物理资源可由相同 `notify_id` 识别，但 record/wait 通常位于不同
+device；精确 relation 还必须包含 operation、graph/protocol sequence 和规范化 rank 角色。
 
 ### 8.1 FFts 是什么
 
@@ -459,12 +460,12 @@ Host primitive C --/
 |---|---|---|
 | 构图调用 | logical/semantic stream、anchor task | Host 添加 context 时可见的流和当时最后一个 task；不是最终物理子任务身份。 |
 | graph 实例 | `graph_instance_id` | 将一批构图调用和随后一次 launch 绑定起来的进程内唯一编号。 |
-| 设备执行 | parent stream/task + `Subtask Id` | msprof JSON 中真正执行的 FFts 父任务和其内部 context。 |
+| 设备执行 | parent stream/task + `contextId` | msprof DB 中真正执行的 FFts 父任务和其内部 context。 |
 
 同一个 graph 内的多条语义可能具有相同 `hccl_task_id`，不同 graph 的 `ctxId` 又会从头复用。
 所以 `task_id` 或 `ctxId` 单独都不唯一，必须先锁定 graph parent，再使用 context id。
 
-### 8.2 为什么 `ctxId` 对应 `Subtask Id`
+### 8.2 为什么 `ctxId` 对应 DB `TASK.contextId`
 
 FFts graph 添加接口返回 `ctxIdx`。HCOMM 创建 `TaskParaDMA/Reduce/Notify` 时保存
 `ctxIdx - 1`：
@@ -475,16 +476,16 @@ TaskPara*.ctxId = ctxIdx - 1
 ```
 
 `ctxIdx` 是 graph constructor 为 context 分配的编号；减一后的值是零基 context id。
-msprof 展开同一 FFts parent 时，将这个零基 context id 输出为 JSON `Subtask Id`。
+msprof 展开同一 FFts parent 时，将这个零基 context id 写入 DB `TASK.contextId`。
 两者描述的是同一个 graph context 在“构图侧”和“执行侧”的编号，因此在同一个 parent
 范围内满足：
 
 ```text
-TaskPara.ctxId == msprof JSON Subtask Id
+TaskPara.ctxId == msprof DB TASK.contextId
 ```
 
 `test/out` 的新采集提供了端到端证据：14,405 条 FFts semantic 全部通过
-parent correlation + `ffts_ctx_id` 精确映射到同 `Subtask Id`，kind mismatch 为 0。
+parent correlation + `ffts_ctx_id` 精确映射到同 `contextId`，kind mismatch 为 0。
 
 这个等式有两个边界：
 
@@ -517,7 +518,7 @@ parent_task_id[T]
 ```
 
 离线端先按 `(node_id, device_id, pid, graph_instance_id)` 连接 correlation，再按
-`(node_id, device_id, parent_stream_id, parent_task_id, ffts_ctx_id)` 查找 JSON execution。
+`(node_id, device_id, parent_stream_id, parent_task_id, ffts_ctx_id)` 查找 DB execution。
 匹配还会验证 FFts lowering 后的物理 kind：
 
 - `notify_record -> Write Value`
@@ -526,7 +527,7 @@ parent_task_id[T]
 - `reduce_inline -> SDMA`
 
 只有 parent、ctx 和兼容 kind 全部满足时才输出
-`match_method=json_ffts_parent_ctx, match_confidence=exact`。
+`match_method=ffts_parent_ctx, match_confidence=exact`。
 
 当前 pending graph 使用 thread-local 生命周期，符合 `DispatcherGraph` 同线程同步构图并
 launch 的现有调用链。如果未来允许跨线程构图、嵌套未 launch graph 或同线程交错构建多个
@@ -538,13 +539,47 @@ thread-local 单 pending slot。
 - semantic v1、无 `schema_version` 和旧空格 token 记录直接拒绝；
 - semantic v2 仅作为已验证数据的迁移输入，新增生产端统一输出 v3；
 - `task_id + 1`、固定 ordinal 和 `profiler_seq` composite heuristic 已从代码及 CLI 删除；
-- direct task 只允许 `json_task_id/exact`；
-- FFts task 只允许 `json_ffts_parent_ctx/exact`；
+- direct task 只允许 `task_id/exact`；
+- FFts task 只允许 `ffts_parent_ctx/exact`；
 - kind mismatch 输出 `correlation_kind_mismatch` 并使质量门禁失败。
 
 对 `test/out` 从原始 plog/msprof 复算结果为：28,502/28,502 semantic exact，
 其中 14,405/14,405 FFts semantic 使用 parent+ctx exact；335 条 graph correlation，
 duplicate 和 invalid 均为 0。精简字段后复算结果保持不变，merged 列数由 47 降至 43。
+DB 主输入不再需要 Chrome HostToDevice `flow_id`，因此当前 merged 列数进一步降至 42。
+
+### 8.5 msprof DB 主输入合同
+
+环境固定输出每个 `PROF_*` 根目录下的 consolidated `msprof_*.db`，因此消费端直接读取
+SQLite，不再经过 Chrome-trace JSON 展示层。当前支持 DB schema `1.2.0`，必需关系为：
+
+```text
+TASK.taskType -> STRING_IDS.id
+TASK.globalTaskId -> COMMUNICATION_TASK_INFO.globalTaskId
+COMMUNICATION_TASK_INFO.opId -> COMMUNICATION_OP.opId
+TASK.globalTaskId -> COMPUTE_TASK_INFO.globalTaskId
+```
+
+其中：
+
+- `TASK` 提供 device、physical stream/task、FFts context、connection 和 `startNs/endNs`；
+- `COMMUNICATION_TASK_INFO` 提供 profiler notify、src/dst rank 和 operation join；
+- `COMMUNICATION_OP + STRING_IDS` 提供 `op_name/group_name`；
+- `COMPUTE_TASK_INFO + STRING_IDS` 将 `STARS_COMMON` 补充为真实 compute name。
+
+consolidated `TASK` 中额外存在 FFts `AI_CORE` 父级展示行；它不携带可与当前 semantic
+一一对应的内部 primitive 身份，因此 DB parser 与旧细粒度输入口径一致，不把该父行作为
+目标 physical execution，实际 SDMA/Notify context 仍按独立 TASK 行保留。
+
+DB 使用 SQLite URI `mode=ro` 打开。未知 schema、缺表/列、重复 device 和一对多
+communication metadata 都是硬错误。时间在解析和运算阶段保持整数纳秒，到现有 CSV
+边界才无损表示为十进制微秒，避免大绝对 JSON 时间戳经 `float/.15g` 产生舍入。
+
+当前 8 卡 `test/out` 对 DB 路径的复算结果为 44,008 个目标 physical task，
+28,502/28,502 semantic exact，其中 FFts 14,405/14,405 parent+ctx exact。
+task-level identity 与旧输入完全一致；但旧 connection/time Notify heuristic 会因纳秒时间
+消除 JSON 舍入并列而从 3,016 条变化为 5,094 条。这一差异进一步证明时间最近关系不是
+稳定因果证据，依赖图迁移必须按 DEP-008 删除该默认推断，不能为保持旧边数而重新舍入时间。
 
 ## 9. 兼容性与非目标
 
@@ -558,7 +593,7 @@ MarkAlgCustomTracePoint
 PROFILER_TRACE_EX
 ```
 
-它通过 HCCL plog 输出语义，通过 msprof JSON 获取物理执行时间，两者在离线阶段合并。
+它通过 HCCL plog 输出语义，通过 msprof DB 获取物理执行时间，两者在离线阶段合并。
 
 当前改动也没有：
 
@@ -612,11 +647,11 @@ P0 消费端止错和 P1 correlation 代码已经实现，但新 schema 尚未�
 2. `HCCL_STEP_TRACE=0` 时无语义日志且功能结果与 8.5.0 一致；
 3. `HCCL_STEP_TRACE=1` 时 `semantic_total > 0`，且 Ring FFts 路径应满足
    `ffts_semantic_total > 0`、`graph_correlation_total > 0`；
-4. `device_id/stream_id/hccl_task_id` 能与 JSON 物理身份对齐；
+4. `device_id/stream_id/hccl_task_id` 能与 DB 物理身份对齐；
 5. duplicate semantic/profiler execution/graph correlation key 均为 0；
 6. `ffts_semantic_missing_correlation == 0`、
-   `json_ffts_ctx_kind_mismatches == 0`，并且
-   `json_ffts_parent_ctx_matches > 0`；
+   `ffts_ctx_kind_mismatches == 0`，并且
+   `ffts_parent_ctx_matches > 0`；
 7. 普通 task 和新采集 composite task 均必须 exact；工具不再提供 ordinal heuristic；
 8. 测试算法强制逻辑不进入生产默认选择；
 9. 开销测试覆盖开关关闭与开启两种状态。

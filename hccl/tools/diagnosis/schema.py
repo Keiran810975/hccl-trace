@@ -55,7 +55,6 @@ PROFILER_FIELDS = (
     "subtask_id",
     "connection_id",
     "model_id",
-    "flow_id",
 )
 
 
@@ -74,7 +73,6 @@ MERGED_FIELDS = (
     "subtask_id",
     "connection_id",
     "model_id",
-    "flow_id",
     "correlation_parent_stream_id",
     "correlation_parent_task_id",
     "match_method",
@@ -148,7 +146,12 @@ class ProfilerTask:
     subtask_id: int = -1
     connection_id: int = -1
     model_id: int = -1
-    flow_id: str = ""
+    global_task_id: int = -1
+    op_name: str = ""
+    group_name: str = ""
+    profiler_notify_id: int = -1
+    profiler_src_rank: int = -1
+    profiler_dst_rank: int = -1
 
     @property
     def merge_key(self):

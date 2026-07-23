@@ -5,8 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${ROOT_DIR}/test/out/function"
 PLOG=""
 PLOG_DIR=""
-MSPROF_JSON=""
-MSPROF_JSON_DIR=""
+MSPROF_DB=""
+MSPROF_DB_DIR=""
 NODE_ID="node0"
 MIN_MATCH_RATE="95"
 VISUALIZE="1"
@@ -21,8 +21,8 @@ Options:
   --out-dir DIR              Output directory. Default: test/out/function
   --plog FILE                HCCL plog containing [HcclTaskSemantic] rows.
   --plog-dir DIR            Directory containing plog*.log files.
-  --msprof-json FILE         Fine-grained msprof_*.json.
-  --msprof-json-dir DIR      Directory containing msprof_*.json files.
+  --msprof-db FILE           Consolidated msprof_*.db.
+  --msprof-db-dir DIR        Directory containing PROF_*/msprof_*.db files.
   --node-id ID               Node id assigned to this capture. Default: node0
   --min-match-rate PERCENT   validate_trace threshold. Default: 95
   --python BIN               Python executable. Default: $PYTHON_BIN or python3
@@ -31,7 +31,7 @@ Options:
 
 If command is provided after --, it is run once with HCCL_STEP_TRACE=1 before
 merge/validate. If no command is provided, the script only validates the
-provided plog and msprof JSON files.
+provided plog and msprof DB files.
 USAGE
 }
 
@@ -49,12 +49,12 @@ while [[ $# -gt 0 ]]; do
             PLOG_DIR="$2"
             shift 2
             ;;
-        --msprof-json)
-            MSPROF_JSON="$2"
+        --msprof-db)
+            MSPROF_DB="$2"
             shift 2
             ;;
-        --msprof-json-dir)
-            MSPROF_JSON_DIR="$2"
+        --msprof-db-dir)
+            MSPROF_DB_DIR="$2"
             shift 2
             ;;
         --node-id)
@@ -101,8 +101,8 @@ if [[ $# -gt 0 ]]; then
 fi
 
 if [[ ( -z "${PLOG}" && -z "${PLOG_DIR}" ) || \
-      ( -z "${MSPROF_JSON}" && -z "${MSPROF_JSON_DIR}" ) ]]; then
-    echo "plog input and msprof JSON input are required for merge/validate." >&2
+      ( -z "${MSPROF_DB}" && -z "${MSPROF_DB_DIR}" ) ]]; then
+    echo "plog input and msprof DB input are required for merge/validate." >&2
     exit 2
 fi
 
@@ -116,12 +116,12 @@ if [[ -n "${PLOG_DIR}" && ! -d "${PLOG_DIR}" ]]; then
     exit 2
 fi
 
-if [[ -n "${MSPROF_JSON}" && ! -f "${MSPROF_JSON}" ]]; then
-    echo "msprof JSON not found: ${MSPROF_JSON}" >&2
+if [[ -n "${MSPROF_DB}" && ! -f "${MSPROF_DB}" ]]; then
+    echo "msprof DB not found: ${MSPROF_DB}" >&2
     exit 2
 fi
-if [[ -n "${MSPROF_JSON_DIR}" && ! -d "${MSPROF_JSON_DIR}" ]]; then
-    echo "msprof JSON dir not found: ${MSPROF_JSON_DIR}" >&2
+if [[ -n "${MSPROF_DB_DIR}" && ! -d "${MSPROF_DB_DIR}" ]]; then
+    echo "msprof DB dir not found: ${MSPROF_DB_DIR}" >&2
     exit 2
 fi
 
@@ -145,11 +145,11 @@ fi
 if [[ -n "${PLOG_DIR}" ]]; then
     MERGE_ARGS+=(--plog-dir "${PLOG_DIR}")
 fi
-if [[ -n "${MSPROF_JSON}" ]]; then
-    MERGE_ARGS+=(--msprof-json "${MSPROF_JSON}")
+if [[ -n "${MSPROF_DB}" ]]; then
+    MERGE_ARGS+=(--msprof-db "${MSPROF_DB}")
 fi
-if [[ -n "${MSPROF_JSON_DIR}" ]]; then
-    MERGE_ARGS+=(--msprof-json-dir "${MSPROF_JSON_DIR}")
+if [[ -n "${MSPROF_DB_DIR}" ]]; then
+    MERGE_ARGS+=(--msprof-db-dir "${MSPROF_DB_DIR}")
 fi
 PYTHONPATH="${ROOT_DIR}/hccl" "${PYTHON_BIN}" -m tools.diagnosis.merge_timeline \
     "${MERGE_ARGS[@]}" \
@@ -165,11 +165,9 @@ if [[ "${VISUALIZE}" == "1" ]]; then
     PYTHONPATH="${ROOT_DIR}/hccl" "${PYTHON_BIN}" -m tools.diagnosis.visualize_html \
         "${MERGED_CSV}" --view dependency --output "${OUT_DIR}/dependency.html"
 
-    if [[ -n "${MSPROF_JSON}" || -n "${MSPROF_JSON_DIR}" ]]; then
-        echo "[step-trace] Rendering fine-grained interactive time view"
-        PYTHONPATH="${ROOT_DIR}/hccl" "${PYTHON_BIN}" -m tools.diagnosis.visualize_html \
-            "${MERGED_CSV}" --view timeline --layout time --output "${TIMELINE_HTML}"
-    fi
+    echo "[step-trace] Rendering fine-grained interactive time view"
+    PYTHONPATH="${ROOT_DIR}/hccl" "${PYTHON_BIN}" -m tools.diagnosis.visualize_html \
+        "${MERGED_CSV}" --view timeline --layout time --output "${TIMELINE_HTML}"
 fi
 
 echo "[step-trace] Validating merged trace"
@@ -185,7 +183,5 @@ echo "  validate: ${VALIDATE_LOG}"
 if [[ "${VISUALIZE}" == "1" ]]; then
     echo "  timeline:   ${TIMELINE_SVG}"
     echo "  dependency: ${DEPENDENCY_HTML}"
-    if [[ -n "${MSPROF_JSON}" || -n "${MSPROF_JSON_DIR}" ]]; then
-        echo "  time HTML:  ${TIMELINE_HTML}"
-    fi
+    echo "  time HTML:  ${TIMELINE_HTML}"
 fi

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Merge HCCL semantic plog records with fine-grained msprof JSON rows."""
+"""Merge HCCL semantic plog records with fine-grained msprof DB executions."""
 
 from __future__ import annotations
 
@@ -14,14 +14,14 @@ from typing import Dict, Iterable, List, Tuple
 
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from diagnosis.parse_msprof_json import parse_file as parse_msprof_json_file
+    from diagnosis.parse_msprof_db import MsprofDbError, parse_inputs as parse_msprof_db_inputs
     from diagnosis.parse_plog import (
         parse_file as parse_plog_file,
         parse_graph_correlations_file,
     )
     from diagnosis.schema import GraphCorrelation, MERGED_FIELDS, ProfilerTask, SemanticRecord, write_csv
 else:
-    from .parse_msprof_json import parse_file as parse_msprof_json_file
+    from .parse_msprof_db import MsprofDbError, parse_inputs as parse_msprof_db_inputs
     from .parse_plog import parse_file as parse_plog_file, parse_graph_correlations_file
     from .schema import GraphCorrelation, MERGED_FIELDS, ProfilerTask, SemanticRecord, write_csv
 
@@ -64,15 +64,15 @@ def merge_records(
     semantic_counts = Counter(_semantic_dedupe_key(record) for record in semantic_list)
     semantic_task_key_counts = Counter(record.merge_key for record in semantic_list)
     profiler_execution_counts = Counter(record.execution_key for record in profiler_list)
-    json_exact_by_key = defaultdict(list)
-    json_composite_by_execution = defaultdict(list)
+    profiler_exact_by_key = defaultdict(list)
+    profiler_composite_by_execution = defaultdict(list)
     for task in profiler_list:
         if task.subtask_id >= 0:
-            json_composite_by_execution[
+            profiler_composite_by_execution[
                 task.merge_key + (task.subtask_id,)
             ].append(task)
         else:
-            json_exact_by_key[task.merge_key].append(task)
+            profiler_exact_by_key[task.merge_key].append(task)
     correlation_counts = Counter(correlation.merge_key for correlation in correlation_list)
     graph_correlations = {
         correlation.merge_key: correlation
@@ -93,30 +93,31 @@ def merge_records(
         match_method = ""
         match_confidence = ""
         matched_correlation = None
-        correlated = _json_ffts_ctx_match(
-            json_composite_by_execution, graph_correlations, semantic)
+        correlated = _ffts_ctx_match(
+            profiler_composite_by_execution, graph_correlations, semantic)
         if correlated is not None:
             composite, matched_correlation = correlated
             if not _is_compatible_task_kind(semantic, composite, ffts=True):
-                stats["json_ffts_ctx_kind_mismatches"] += 1
+                stats["ffts_ctx_kind_mismatches"] += 1
                 duplicate_profiler = (
                     profiler_execution_counts[composite.execution_key] > 1)
                 rows.append(_merged_row(
                     "correlation_kind_mismatch", semantic, composite,
                     duplicate_semantic, duplicate_profiler,
-                    "json_ffts_parent_ctx", "invalid", matched_correlation))
+                    "ffts_parent_ctx", "invalid", matched_correlation))
                 continue
             matches = [composite]
-            match_method = "json_ffts_parent_ctx"
+            match_method = "ffts_parent_ctx"
             match_confidence = "exact"
-            stats["json_ffts_parent_ctx_matches"] += 1
+            stats["ffts_parent_ctx_matches"] += 1
         else:
-            exact_matches = _json_exact_matches(json_exact_by_key, semantic, semantic_task_key_counts)
+            exact_matches = _exact_matches(
+                profiler_exact_by_key, semantic, semantic_task_key_counts)
             if exact_matches:
                 matches = exact_matches
-                match_method = "json_task_id"
+                match_method = "task_id"
                 match_confidence = "exact"
-                stats["json_task_id_matches"] += 1
+                stats["task_id_matches"] += 1
             elif semantic.ffts_ctx_id >= 0:
                 stats["ffts_semantic_missing_correlation"] += 1
 
@@ -157,7 +158,7 @@ def merge_records(
     stats["duplicate_semantic_keys"] = sum(1 for count in semantic_counts.values() if count > 1)
     stats["duplicate_profiler_execution_keys"] = sum(
         1 for count in profiler_execution_counts.values() if count > 1)
-    stats["invalid_matches"] = stats.get("json_ffts_ctx_kind_mismatches", 0)
+    stats["invalid_matches"] = stats.get("ffts_ctx_kind_mismatches", 0)
     stats["match_rate_percent"] = round(
         stats.get("matched", 0) * 100.0 / len(semantic_list), 2
     ) if semantic_list else 0
@@ -180,16 +181,20 @@ def _is_compatible_task_kind(
     return str(profiler.event_name or "").strip().upper() in expected
 
 
-def _json_exact_matches(json_exact_by_key, semantic: SemanticRecord, semantic_task_key_counts) -> List[ProfilerTask]:
+def _exact_matches(
+    profiler_exact_by_key,
+    semantic: SemanticRecord,
+    semantic_task_key_counts,
+) -> List[ProfilerTask]:
     if semantic.ffts_ctx_id >= 0:
         return []
     if semantic.phase.startswith("reduce_scatter") and semantic_task_key_counts[semantic.merge_key] > 1:
         return []
-    tasks = _json_group_lookup(json_exact_by_key, semantic, semantic.task_id)
+    tasks = _group_lookup(profiler_exact_by_key, semantic, semantic.task_id)
     return [task for task in tasks if _is_compatible_task_kind(semantic, task)]
 
 
-def _json_group_lookup(groups, semantic: SemanticRecord, task_id: int) -> List[ProfilerTask]:
+def _group_lookup(groups, semantic: SemanticRecord, task_id: int) -> List[ProfilerTask]:
     key = (semantic.node_id, semantic.device_id, semantic.stream_id, task_id)
     tasks = groups.get(key, [])
     if tasks or semantic.node_id:
@@ -213,7 +218,7 @@ def _graph_correlation_lookup(graph_correlations, semantic: SemanticRecord):
     return candidates[0] if len(candidates) == 1 else None
 
 
-def _json_ffts_ctx_match(json_composite_by_execution, graph_correlations, semantic: SemanticRecord):
+def _ffts_ctx_match(profiler_composite_by_execution, graph_correlations, semantic: SemanticRecord):
     if semantic.ffts_ctx_id < 0 or semantic.graph_instance_id < 0:
         return None
     correlation = _graph_correlation_lookup(graph_correlations, semantic)
@@ -226,10 +231,10 @@ def _json_ffts_ctx_match(json_composite_by_execution, graph_correlations, semant
         correlation.parent_task_id,
         semantic.ffts_ctx_id,
     )
-    tasks = json_composite_by_execution.get(key, [])
+    tasks = profiler_composite_by_execution.get(key, [])
     if not tasks and not key[0]:
         candidates = [
-            value for candidate_key, value in json_composite_by_execution.items()
+            value for candidate_key, value in profiler_composite_by_execution.items()
             if candidate_key[1:] == key[1:]
         ]
         tasks = candidates[0] if len(candidates) == 1 else []
@@ -242,15 +247,12 @@ def to_float_for_sort(value: object) -> float:
     except (TypeError, ValueError):
         return 0.0
 
-def parse_msprof_json_inputs(msprof_json: str = "", msprof_json_dir: str = "", node_id: str = "",
-                             device_id: int = None) -> List[ProfilerTask]:
-    tasks: List[ProfilerTask] = []
-    if msprof_json:
-        tasks.extend(parse_msprof_json_file(msprof_json, node_id, device_id))
-    if msprof_json_dir:
-        for path in sorted(Path(msprof_json_dir).rglob("msprof_*.json")):
-            tasks.extend(parse_msprof_json_file(str(path), node_id, device_id))
-    return tasks
+def parse_msprof_inputs(
+    msprof_db: str = "",
+    msprof_db_dir: str = "",
+    node_id: str = "",
+) -> List[ProfilerTask]:
+    return parse_msprof_db_inputs(msprof_db, msprof_db_dir, node_id)
 
 
 def parse_plog_inputs(plog: str = "", plog_dir: str = "", node_id: str = "") -> List[SemanticRecord]:
@@ -310,7 +312,6 @@ def _merged_row(status: str, semantic: SemanticRecord, profiler: ProfilerTask, d
         "subtask_id": profiler.subtask_id if profiler else "",
         "connection_id": profiler.connection_id if profiler else "",
         "model_id": profiler.model_id if profiler else "",
-        "flow_id": profiler.flow_id if profiler else "",
         "correlation_parent_stream_id": (
             graph_correlation.parent_stream_id if graph_correlation else ""),
         "correlation_parent_task_id": (
@@ -322,25 +323,30 @@ def _merged_row(status: str, semantic: SemanticRecord, profiler: ProfilerTask, d
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Merge HCCL semantic plog and fine-grained msprof JSON.")
+    parser = argparse.ArgumentParser(
+        description="Merge HCCL semantic plog and fine-grained msprof DB executions."
+    )
     parser.add_argument("--plog", default="")
     parser.add_argument("--plog-dir", default="", help="Directory containing one or more plog*.log files.")
-    parser.add_argument("--msprof-json", default="", help="Fine-grained msprof Chrome-trace JSON.")
-    parser.add_argument("--msprof-json-dir", default="", help="Directory containing one or more msprof_*.json files.")
-    parser.add_argument("--device-id", type=int, help="Override device id for a single JSON input.")
+    profiler_source = parser.add_mutually_exclusive_group(required=True)
+    profiler_source.add_argument(
+        "--msprof-db", default="", help="One consolidated msprof_*.db file.")
+    profiler_source.add_argument(
+        "--msprof-db-dir",
+        default="",
+        help="Directory containing one or more PROF_*/msprof_*.db files.",
+    )
     parser.add_argument("-o", "--output", required=True)
     parser.add_argument("--node-id", default="")
     parser.add_argument("--summary", default="")
     args = parser.parse_args()
     if not args.plog and not args.plog_dir:
         parser.error("one of --plog or --plog-dir is required")
-    if not args.msprof_json and not args.msprof_json_dir:
-        parser.error("one of --msprof-json or --msprof-json-dir is required")
-    if args.device_id is not None and args.msprof_json_dir:
-        parser.error("--device-id is only valid with one --msprof-json file")
-
-    profilers = parse_msprof_json_inputs(
-        args.msprof_json, args.msprof_json_dir, args.node_id, args.device_id)
+    try:
+        profilers = parse_msprof_inputs(
+            args.msprof_db, args.msprof_db_dir, args.node_id)
+    except MsprofDbError as error:
+        parser.error(str(error))
 
     rows, stats = merge_records(
         parse_plog_inputs(args.plog, args.plog_dir, args.node_id),

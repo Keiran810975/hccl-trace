@@ -1,27 +1,31 @@
 # HCCL fine-grained trace diagnosis
 
-诊断链只接受两个事实源：HCOMM `[HcclTaskSemantic]` plog 与 msprof
-`msprof_*.json`。`task_time.csv` 会把 FFts 图压缩为一个 `AI_CORE` 父任务，已不再支持。
+诊断链只接受两个事实源：HCOMM `[HcclTaskSemantic]` plog 与 msprof consolidated
+`msprof_*.db`。Chrome-trace `msprof_*.json` 和 `task_time.csv` 已不再作为生产输入。
 
 ## 数据流
 
 ```text
 plog semantic ─┐
                ├─ merge_timeline.py ── merged.csv
-msprof JSON ───┘                         ├─ validate_trace.py
+msprof DB ─────┘                         ├─ validate_trace.py
                                         ├─ visualize_dependency_graph.py → edge/node CSV
                                         └─ visualize_html.py → interactive HTML
 ```
 
-JSON 解析保留物理 stream/task/subtask、`connection_id`、HostToDevice flow id、硬件事件名
-和执行起止时间。合并结果同时保留未标注的 `profiler_only` 执行单元。
+DB 解析从 `TASK` 保留物理 stream/task/context、`connection_id` 和整数纳秒起止时间，
+并通过 `COMMUNICATION_TASK_INFO`、`COMMUNICATION_OP`、`COMPUTE_TASK_INFO` 补充通信
+operation 与具体计算事件名称。合并结果同时保留未标注的 `profiler_only` 执行单元。
+
+当前支持的 msprof DB schema 为 `1.2.0`。解析器以 SQLite `mode=ro` 打开数据库；未知
+schema、缺表、重复 device 或一对多 communication metadata 会明确失败。
 
 ## 聚合
 
 ```bash
 python -m tools.diagnosis.merge_timeline \
   --plog-dir /path/to/plog \
-  --msprof-json-dir /path/to/msprof \
+  --msprof-db-dir /path/to/msprof \
   --node-id node0 \
   -o merged.csv \
   --summary summary.csv
@@ -29,16 +33,17 @@ python -m tools.diagnosis.merge_timeline \
 
 匹配分为：
 
-- `json_task_id / exact`：普通任务的 device/physical-stream/task id 与 task kind 唯一一致。
-- `json_ffts_parent_ctx / exact`：schema v2/v3 plog 先用 graph correlation 定位 FFts parent，
-  再用 `ffts_ctx_id == Subtask Id` 定位物理子任务。
+- `task_id / exact`：普通任务的 device/physical-stream/task id 与 task kind 唯一一致。
+- `ffts_parent_ctx / exact`：schema v2/v3 plog 先用 graph correlation 定位 FFts parent，
+  再用 `ffts_ctx_id == TASK.contextId` 定位物理子任务。
 - `correlation_kind_mismatch`：身份候选与物理 kind 冲突，属于硬错误，
   不得按 matched 使用。
 - `unmatched_semantic`：无法唯一认领物理执行单元；不得用时间最近原则强行匹配。
-- `profiler_only`：JSON 中存在但没有语义声明的执行单元。
+- `profiler_only`：DB 中存在但没有语义声明的执行单元。
 
 `submit_ts` 是 msprof host-cycle 提交时间，只能缩小候选窗口和做一致性检查，不能替代
-task/subtask correlation id。设备执行起止时间始终来自 JSON。
+task/subtask correlation id。设备执行起止时间始终来自 DB `TASK.startNs/endNs`，内部先
+保留整数纳秒，到 CSV 边界才精确表示为十进制微秒。
 
 semantic schema v1、无版本日志和旧空格 token 格式已不再支持。当前生产端输出 v3；
 消费端接受 v2/v3，以便复查已经通过设备验证的 v2 golden 数据。v3 删除
@@ -58,14 +63,14 @@ python -m tools.diagnosis.visualize_html merged.csv \
 
 依赖边包含证据等级：
 
-- `stream_order_observed`：JSON 中同一物理 stream 的相邻执行顺序，`observed`。
+- `stream_order_observed`：profiler 中同一物理 stream 的相邻执行顺序，`observed`。
 - `notify_sync_observed`：重新采集后 plog 中 record/wait 具有相同 `notify_id`，`observed`。
 - `notify_sync_inferred`：旧样本无 notify id，按同 device/connection、跨 stream、事件类型
   和唯一时间候选推断，`inferred`。
 - `peer_signal_semantic` / `peer_payload_semantic`：显式 peer rank、phase、step、slice 相同，
   再按 occurrence 顺序配对，`semantic`。
 
-旧实现中的“右邻居上一 payload”“上一 step”等算法规则不再作为默认边；它们不是 JSON
+旧实现中的“右邻居上一 payload”“上一 step”等算法规则不再作为默认边；它们不是 profiler
 观测事实。多节点精确边仍需要 collective instance id、统一时钟或单独的时钟校准 artifact。
 
 ## 交互可视化
@@ -93,6 +98,10 @@ task/subtask、语义、硬件事件、匹配方式与置信度。
 python -m py_compile hccl/tools/diagnosis/*.py
 python -m unittest hccl.tools.diagnosis.test_diagnosis -v
 python -m tools.diagnosis.validate_trace merged.csv --min-match-rate 95
+
+python test/measure_msprof_db_parse.py \
+  --msprof-db-dir /path/to/msprof \
+  --output db_parse_overhead.csv
 ```
 
 质量门禁只接受 exact。质量结论必须同时报告 exact rate、kind mismatch、

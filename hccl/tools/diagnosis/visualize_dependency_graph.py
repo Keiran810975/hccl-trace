@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build evidence-labelled physical dependencies from merged msprof JSON tasks."""
+"""Build evidence-labelled physical dependencies from merged msprof executions."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def phase_group(phase: str) -> str:
 
 
 def read_execution_rows(path: Path) -> List[dict]:
-    """Read every timed JSON execution exactly once, including profiler-only rows."""
+    """Read every timed profiler execution exactly once, including profiler-only rows."""
     rows: List[dict] = []
     with path.open("r", encoding="utf-8-sig", newline="") as source:
         for index, row in enumerate(csv.DictReader(source)):
@@ -135,7 +135,7 @@ def build_execution_edges(rows: List[dict]) -> List[dict]:
             add(
                 "stream_order_observed", prev, cur,
                 "adjacent executions on the same physical stream",
-                "msprof_json_stream_order", "observed",
+                "msprof_stream_order", "observed",
             )
 
     _add_notify_sync_edges(rows, add)
