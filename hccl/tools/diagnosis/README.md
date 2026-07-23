@@ -30,17 +30,20 @@ python -m tools.diagnosis.merge_timeline \
 匹配分为：
 
 - `json_task_id / exact`：普通任务的 device/physical-stream/task id 与 task kind 唯一一致。
-- `json_ffts_parent_ctx / exact`：schema v2 plog 先用 graph correlation 定位 FFts parent，
+- `json_ffts_parent_ctx / exact`：schema v2/v3 plog 先用 graph correlation 定位 FFts parent，
   再用 `ffts_ctx_id == Subtask Id` 定位物理子任务。
-- `json_composite_profiler_seq / heuristic`：仅用于显式启用
-  `--allow-legacy-composite-heuristic` 的旧数据调查，不计入质量门禁或语义物理图。
-- `invalid_heuristic` / `correlation_kind_mismatch`：身份候选与物理 kind 冲突，属于硬错误，
+- `correlation_kind_mismatch`：身份候选与物理 kind 冲突，属于硬错误，
   不得按 matched 使用。
 - `unmatched_semantic`：无法唯一认领物理执行单元；不得用时间最近原则强行匹配。
 - `profiler_only`：JSON 中存在但没有语义声明的执行单元。
 
 `submit_ts` 是 msprof host-cycle 提交时间，只能缩小候选窗口和做一致性检查，不能替代
 task/subtask correlation id。设备执行起止时间始终来自 JSON。
+
+semantic schema v1、无版本日志和旧空格 token 格式已不再支持。当前生产端输出 v3；
+消费端接受 v2/v3，以便复查已经通过设备验证的 v2 golden 数据。v3 删除
+`execution_mode`、`notify_remote_rank`、`notify_ctx_id`；msprof 侧删除与 `event_name`
+重复的 `kernel_type`。
 
 ## 依赖图
 
@@ -92,5 +95,5 @@ python -m unittest hccl.tools.diagnosis.test_diagnosis -v
 python -m tools.diagnosis.validate_trace merged.csv --min-match-rate 95
 ```
 
-质量门禁使用 exact rate；heuristic 即使命中也不进入 95% 分子。质量结论必须同时报告
-exact rate、heuristic count、kind mismatch、unmatched semantic 和 duplicate execution key。
+质量门禁只接受 exact。质量结论必须同时报告 exact rate、kind mismatch、
+unmatched semantic 和 duplicate execution key。

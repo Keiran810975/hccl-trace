@@ -139,8 +139,6 @@ RS/AG 算法模板建立 phase/step/slice/rank context
 | `submitTs` | `0` | `hrtMsprofSysCycleTime()` 的 Host 提交周期时间。 |
 | `notifyId` | `0` | Notify task 从 `TaskParaNotify.notifyID` 补齐。 |
 | `notifyStage` | `-1` | Notify stage。 |
-| `notifyRemoteRank` | `INVALID_VALUE_RANKID` | Notify 对端 user rank。 |
-| `notifyCtxId` | `INVALID_VALUE_RANKID` | Notify context id。 |
 | `step` | `0` | 算法 step。 |
 | `slice` | `0` | 算法分片编号。 |
 | `userRank` | `0` | 用户通信域 rank。 |
@@ -264,19 +262,27 @@ semantic_seq
 profiler_seq
 task_type
 task_kind
-execution_mode
 ffts_ctx_id
 graph_instance_id
 submit_ts
 notify_id
 notify_stage
-notify_remote_rank
-notify_ctx_id
 source
 ```
 
-格式为 HCCL 现有的 `field[value]` 风格。加入 FFts 精确关联字段后，当前 semantic
-schema version 为 2；解析器继续兼容没有这些字段的 version 1 日志。
+格式为 HCCL 现有的 `field[value]` 风格。字段精简后当前 semantic schema version 为 3。
+消费端接受已经完成设备验证的 version 2 和当前 version 3，明确拒绝 version 1、无版本记录
+以及旧空格 token 格式。version 2 中多出的 `execution_mode/notify_remote_rank/notify_ctx_id`
+会被忽略。`[HcclTaskGraphCorrelation]` 使用独立的 version 1 schema，不属于 semantic v1。
+
+字段删除由 `test/out` 的 28,502 条 matched semantic 和 44,008 条物理 execution 验证：
+
+- `execution_mode` 与 `ffts_ctx_id >= 0` 的判断 28,502/28,502 一致；
+- 18,779 条 Notify semantic 的 `notify_remote_rank` 与通用 `peer_rank` 全部一致；
+- 9,380 条有效 `notify_ctx_id` 与通用 `ffts_ctx_id` 全部一致；
+- 44,008 条 profiler row 的 `kernel_type` 与 `event_name` 全部一致。
+
+因此删除这四列不会减少当前匹配或语义信息，merged CSV 从 47 列降为 43 列。
 
 没有写入日志的已预留字段是 `opType` 和 `opId`。`node_id` 不由 HCOMM 生成，
 由离线工具在输入边界补齐；`pid` 由 plog 行前缀解析。
@@ -294,14 +300,19 @@ AIV 的专用 `Save()` 当前只调用 probe，不输出完整语义记录；传
 `TaskProfiling::Run()` 在已有 profiler 数据准备完成后：
 
 1. 将 `hcclReportData.ts` 复制到 `submitTs`；
-2. 对 `TASK_NOTIFY_RECORD/WAIT` 复制 `notifyID/stage/remoteUserRank/ctxId`；
+2. 对 `TASK_NOTIFY_RECORD/WAIT` 复制 `notifyID/stage`；
 3. 对 DMA、Reduce 和 Notify 统一提取 TaskPara 中的 `ctxId`，有效时输出
-   `execution_mode=ffts`、`ffts_ctx_id` 和 `graph_instance_id`；
+   `ffts_ctx_id` 和 `graph_instance_id`；
 4. 使用 `deviceLogicId_`、`semanticStreamID` 和 HCCL task id 输出语义；
 5. 再继续原有 msprof 数据上报。
 
 `submit_ts` 是 Host-cycle 提交时刻，不是设备执行起止时间。它只能用于顺序校验或缩小候选窗口，
 task duration 必须来自 msprof JSON。
+
+本次数据同时表明 `notify_id` 还不能作为 record/wait 的跨执行精确配对键：
+18,779 条 Notify semantic 按 `(node_id, device_id, notify_id)` 分组后，没有任何一组同时
+包含 record 和 wait，依赖图的 3,016 条本地 Notify 边仍是 connection/time inferred。
+这不影响 task-level 100% exact，但意味着同步依赖仍需独立 identity 设计。
 
 ## 7. 算法插桩
 
@@ -472,9 +483,8 @@ msprof 展开同一 FFts parent 时，将这个零基 context id 输出为 JSON 
 TaskPara.ctxId == msprof JSON Subtask Id
 ```
 
-`test/new_out` 提供了直接证据：旧 version 1 日志只对 Notify 输出了
-`notify_ctx_id`，对全部 ReduceScatter Notify 使用观测到的 parent 映射检查后，
-9408/9408 条都能找到同 `Subtask Id` 且 record/wait kind 完全一致。
+`test/out` 的新采集提供了端到端证据：14,405 条 FFts semantic 全部通过
+parent correlation + `ffts_ctx_id` 精确映射到同 `Subtask Id`，kind mismatch 为 0。
 
 这个等式有两个边界：
 
@@ -484,13 +494,12 @@ TaskPara.ctxId == msprof JSON Subtask Id
 
 这正是必须同时输出 graph parent correlation 的原因。
 
-### 8.3 schema v2 的关联机制
+### 8.3 schema v3 的关联机制
 
 生产端在首个有效 FFts context 上创建 thread-local pending graph，分配
 `graph_instance_id`。同一构图批次的每条语义输出：
 
 ```text
-execution_mode[ffts]
 ffts_ctx_id[ctxId]
 graph_instance_id[N]
 ```
@@ -524,20 +533,18 @@ launch 的现有调用链。如果未来允许跨线程构图、嵌套未 launch
 graph，必须把 pending 状态下沉到 `DispatcherGraph` 实例或显式 graph handle，不能继续依赖
 thread-local 单 pending slot。
 
-### 8.4 P0 消费端安全规则
+### 8.4 版本与精确匹配规则
 
-旧 version 1 数据没有 `graph_instance_id/ffts_ctx_id`，固定
-`semantic.task_id + 1` 和 ordinal=3 的匹配默认关闭。只有显式传入
-`--allow-legacy-composite-heuristic` 才会运行旧逻辑，且：
+- semantic v1、无 `schema_version` 和旧空格 token 记录直接拒绝；
+- semantic v2 仅作为已验证数据的迁移输入，新增生产端统一输出 v3；
+- `task_id + 1`、固定 ordinal 和 `profiler_seq` composite heuristic 已从代码及 CLI 删除；
+- direct task 只允许 `json_task_id/exact`；
+- FFts task 只允许 `json_ffts_parent_ctx/exact`；
+- kind mismatch 输出 `correlation_kind_mismatch` 并使质量门禁失败。
 
-- kind mismatch 输出 `invalid_heuristic`，不能成为 `matched`；
-- compatible heuristic 仍标为 `match_confidence=heuristic`；
-- heuristic 不计入 `validate_trace.py` 的 exact rate 和 95% 门禁；
-- timeline/依赖图不把 heuristic 语义绑定到物理 execution。
-
-对 `test/new_out` 重跑新默认逻辑后，14112 条 AllGather 保持 exact，
-14448 条 ReduceScatter 诚实回退为 unmatched，exact rate 为 49.41%，95% 门禁失败。
-这比用错误物理时间生成看似完整的诊断图更安全。
+对 `test/out` 从原始 plog/msprof 复算结果为：28,502/28,502 semantic exact，
+其中 14,405/14,405 FFts semantic 使用 parent+ctx exact；335 条 graph correlation，
+duplicate 和 invalid 均为 0。精简字段后复算结果保持不变，merged 列数由 47 降至 43。
 
 ## 9. 兼容性与非目标
 
@@ -575,9 +582,9 @@ PROFILER_TRACE_EX
 
 1. **缺少 op instance。** `opId/opType` 虽存在于结构体，但当前不赋值、不序列化，
    多轮 AllReduce 的语义配对可能串轮。
-2. **FFts correlation 已实现，仍需设备侧验收。** schema v2 已输出
-   `graph_instance_id/ffts_ctx_id` 和 graph parent correlation，消费端也已支持精确键；
-   但本机没有 HCCL 设备环境，需要重新采集验证字段与 msprof JSON 一致。
+2. **FFts correlation 已通过 v2 设备数据验收，v3 仍需构建确认。** `test/out` 已证明
+   `graph_instance_id/ffts_ctx_id` 和 graph parent correlation 能 100% exact；
+   v3 只删除冗余日志字段，但仍需 HCOMM 构建和一轮短采集确认格式。
 3. **vector 只标首任务。** `traceXxx` 布尔量牺牲了完整 slice/subtask 语义覆盖。
 4. **AIV 只有 probe。** 专用 AIV Save 路径不会产生完整 `[HcclTaskSemantic]`。
 5. **空 task 未计序。** 返回成功但不执行 report/probe 的 Save 重载不会推进
@@ -610,7 +617,6 @@ P0 消费端止错和 P1 correlation 代码已经实现，但新 schema 尚未�
 6. `ffts_semantic_missing_correlation == 0`、
    `json_ffts_ctx_kind_mismatches == 0`，并且
    `json_ffts_parent_ctx_matches > 0`；
-7. 普通 task 和新采集 composite task 均必须 exact；旧 ordinal heuristic 默认关闭，
-   显式启用时也不能计入 95% 质量门禁；
+7. 普通 task 和新采集 composite task 均必须 exact；工具不再提供 ordinal heuristic；
 8. 测试算法强制逻辑不进入生产默认选择；
 9. 开销测试覆盖开关关闭与开启两种状态。

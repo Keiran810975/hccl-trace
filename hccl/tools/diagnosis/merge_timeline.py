@@ -46,17 +46,10 @@ FFTS_TASK_KIND_KERNEL_TYPES = {
 }
 
 
-# The observed direct-ring FFts graph has three unannotated tasks before the
-# first semantic row in each reduce-scatter AI_CORE group. Matches using this
-# offset are explicitly marked heuristic in the merged output.
-DIRECT_RING_COMPOSITE_FIRST_SEMANTIC_ORDINAL = 3
-
-
 def merge_records(
     semantics: Iterable[SemanticRecord],
     profilers: Iterable[ProfilerTask],
     correlations: Iterable[GraphCorrelation] = (),
-    allow_legacy_composite_heuristic: bool = False,
 ) -> Tuple[List[Dict[str, object]], Counter]:
     semantic_list = list(semantics)
     profiler_list = list(profilers)
@@ -72,17 +65,14 @@ def merge_records(
     semantic_task_key_counts = Counter(record.merge_key for record in semantic_list)
     profiler_execution_counts = Counter(record.execution_key for record in profiler_list)
     json_exact_by_key = defaultdict(list)
-    json_composite_by_key = defaultdict(list)
     json_composite_by_execution = defaultdict(list)
     for task in profiler_list:
-        target = json_composite_by_key if task.subtask_id >= 0 else json_exact_by_key
-        target[task.merge_key].append(task)
         if task.subtask_id >= 0:
             json_composite_by_execution[
                 task.merge_key + (task.subtask_id,)
             ].append(task)
-    for tasks in json_composite_by_key.values():
-        tasks.sort(key=lambda task: (task.subtask_id, to_float_for_sort(task.task_start)))
+        else:
+            json_exact_by_key[task.merge_key].append(task)
     correlation_counts = Counter(correlation.merge_key for correlation in correlation_list)
     graph_correlations = {
         correlation.merge_key: correlation
@@ -91,11 +81,6 @@ def merge_records(
     }
     stats["duplicate_graph_correlation_keys"] = sum(
         1 for count in correlation_counts.values() if count > 1)
-    composite_group_starts = (
-        _composite_group_starts(semantic_list, json_composite_by_key)
-        if allow_legacy_composite_heuristic else {}
-    )
-
     rows = []
     matched_profiler_keys = set()
 
@@ -135,24 +120,6 @@ def merge_records(
             elif semantic.ffts_ctx_id >= 0:
                 stats["ffts_semantic_missing_correlation"] += 1
 
-        if not matches and allow_legacy_composite_heuristic:
-            composite = _json_composite_match(json_composite_by_key, composite_group_starts, semantic)
-            if composite is not None:
-                stats["legacy_composite_candidates"] += 1
-                if not _is_compatible_task_kind(semantic, composite, ffts=True):
-                    stats["legacy_composite_kind_mismatches"] += 1
-                    duplicate_profiler = (
-                        profiler_execution_counts[composite.execution_key] > 1)
-                    rows.append(_merged_row(
-                        "invalid_heuristic", semantic, composite,
-                        duplicate_semantic, duplicate_profiler,
-                        "json_composite_profiler_seq", "invalid"))
-                    continue
-                matches = [composite]
-                match_method = "json_composite_profiler_seq"
-                match_confidence = "heuristic"
-                stats["legacy_composite_profiler_seq_matches"] += 1
-
         matched_profiler = matches[0] if matches else None
         duplicate_profiler = (
             profiler_execution_counts[matched_profiler.execution_key] > 1
@@ -170,8 +137,6 @@ def merge_records(
         stats["matched"] += 1
         if match_confidence == "exact":
             stats["exact_matched"] += 1
-        elif match_confidence == "heuristic":
-            stats["heuristic_matched"] += 1
         matched_profiler_keys.add(matched_profiler.execution_key)
         rows.append(_merged_row("matched", semantic, matched_profiler, duplicate_semantic, duplicate_profiler,
                                 match_method, match_confidence, matched_correlation))
@@ -192,10 +157,7 @@ def merge_records(
     stats["duplicate_semantic_keys"] = sum(1 for count in semantic_counts.values() if count > 1)
     stats["duplicate_profiler_execution_keys"] = sum(
         1 for count in profiler_execution_counts.values() if count > 1)
-    stats["invalid_matches"] = (
-        stats.get("legacy_composite_kind_mismatches", 0)
-        + stats.get("json_ffts_ctx_kind_mismatches", 0)
-    )
+    stats["invalid_matches"] = stats.get("json_ffts_ctx_kind_mismatches", 0)
     stats["match_rate_percent"] = round(
         stats.get("matched", 0) * 100.0 / len(semantic_list), 2
     ) if semantic_list else 0
@@ -215,7 +177,7 @@ def _is_compatible_task_kind(
     expected = compatibility.get(str(semantic.task_kind or "").strip().lower())
     if not expected:
         return True
-    return str(profiler.kernel_type or "").strip().upper() in expected
+    return str(profiler.event_name or "").strip().upper() in expected
 
 
 def _json_exact_matches(json_exact_by_key, semantic: SemanticRecord, semantic_task_key_counts) -> List[ProfilerTask]:
@@ -272,32 +234,6 @@ def _json_ffts_ctx_match(json_composite_by_execution, graph_correlations, semant
         ]
         tasks = candidates[0] if len(candidates) == 1 else []
     return (tasks[0], correlation) if len(tasks) == 1 else None
-
-
-def _composite_group_starts(semantics, json_composite_by_key):
-    starts = {}
-    grouped = defaultdict(list)
-    for semantic in semantics:
-        if semantic.profiler_seq < 0 or not semantic.phase.startswith("reduce_scatter"):
-            continue
-        tasks = _json_group_lookup(json_composite_by_key, semantic, semantic.task_id + 1)
-        if tasks:
-            actual_key = tasks[0].merge_key
-            grouped[actual_key].append(semantic)
-    for key, records in grouped.items():
-        first_seq = min(record.profiler_seq for record in records)
-        starts[key] = first_seq - DIRECT_RING_COMPOSITE_FIRST_SEMANTIC_ORDINAL
-    return starts
-
-
-def _json_composite_match(json_composite_by_key, group_starts, semantic: SemanticRecord):
-    tasks = _json_group_lookup(json_composite_by_key, semantic, semantic.task_id + 1)
-    key = tasks[0].merge_key if tasks else None
-    start = group_starts.get(key)
-    if not tasks or start is None or semantic.profiler_seq < start:
-        return None
-    ordinal = semantic.profiler_seq - start
-    return tasks[ordinal] if ordinal < len(tasks) else None
 
 
 def to_float_for_sort(value: object) -> float:
@@ -370,7 +306,6 @@ def _merged_row(status: str, semantic: SemanticRecord, profiler: ProfilerTask, d
         "task_start": profiler.task_start if profiler else "",
         "task_stop": profiler.task_stop if profiler else "",
         "duration": profiler.duration if profiler else "",
-        "kernel_type": profiler.kernel_type if profiler else "",
         "event_name": profiler.event_name if profiler else "",
         "subtask_id": profiler.subtask_id if profiler else "",
         "connection_id": profiler.connection_id if profiler else "",
@@ -396,12 +331,6 @@ def main() -> int:
     parser.add_argument("-o", "--output", required=True)
     parser.add_argument("--node-id", default="")
     parser.add_argument("--summary", default="")
-    parser.add_argument(
-        "--allow-legacy-composite-heuristic",
-        action="store_true",
-        help="Opt in to the legacy profiler_seq/ordinal FFts heuristic. "
-             "It never passes exact-match quality gates.",
-    )
     args = parser.parse_args()
     if not args.plog and not args.plog_dir:
         parser.error("one of --plog or --plog-dir is required")
@@ -417,7 +346,6 @@ def main() -> int:
         parse_plog_inputs(args.plog, args.plog_dir, args.node_id),
         profilers,
         parse_graph_correlation_inputs(args.plog, args.plog_dir, args.node_id),
-        allow_legacy_composite_heuristic=args.allow_legacy_composite_heuristic,
     )
     write_csv(args.output, list(MERGED_FIELDS), rows)
     for key in sorted(stats):

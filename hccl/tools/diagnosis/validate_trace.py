@@ -19,11 +19,9 @@ def validate_rows(rows, min_match_rate):
             continue
         stats["total"] += 1
         stats[status] += 1
-        if status == "matched" and row.get("match_confidence") == "heuristic":
-            stats["heuristic_matched"] += 1
-        elif status == "matched":
+        if status == "matched":
             stats["exact_matched"] += 1
-        elif status in ("invalid_heuristic", "correlation_kind_mismatch"):
+        elif status == "correlation_kind_mismatch":
             stats["invalid_matches"] += 1
         if row.get("duplicate_semantic") == "1":
             stats["duplicate_semantic_rows"] += 1
@@ -35,8 +33,6 @@ def validate_rows(rows, min_match_rate):
     stats["exact_match_rate_percent"] = round(
         stats.get("exact_matched", 0) * 100.0 / stats["total"], 2
     ) if stats["total"] else 0
-    # A heuristic match is useful for investigation, but is not strong enough
-    # to satisfy a correctness gate or feed a physical execution timeline.
     ok = stats["total"] > 0 and stats["exact_match_rate_percent"] >= min_match_rate
     if stats.get("duplicate_semantic_rows", 0) or stats.get("duplicate_profiler_rows", 0):
         ok = False

@@ -275,8 +275,6 @@ HcclResult TaskProfiling::Run(const TaskData &taskData, bool isCapture)
         if (taskData.taskType == TaskType::TASK_NOTIFY_RECORD || taskData.taskType == TaskType::TASK_NOTIFY_WAIT) {
             enrichedInfo.notifyId = taskData.Notify.notifyID;
             enrichedInfo.notifyStage = taskData.Notify.stage;
-            enrichedInfo.notifyRemoteRank = taskData.Notify.remoteUserRank;
-            enrichedInfo.notifyCtxId = taskData.Notify.ctxId;
         }
         semanticInfo = &enrichedInfo;
     }

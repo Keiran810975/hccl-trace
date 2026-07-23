@@ -14,8 +14,8 @@ if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from diagnosis.schema import (
         GRAPH_CORRELATION_TAG,
-        SCHEMA_VERSION,
         SEMANTIC_FIELDS,
+        SUPPORTED_SEMANTIC_SCHEMA_VERSIONS,
         TRACE_TAG,
         GraphCorrelation,
         SemanticRecord,
@@ -25,8 +25,8 @@ if __package__ in (None, ""):
 else:
     from .schema import (
         GRAPH_CORRELATION_TAG,
-        SCHEMA_VERSION,
         SEMANTIC_FIELDS,
+        SUPPORTED_SEMANTIC_SCHEMA_VERSIONS,
         TRACE_TAG,
         GraphCorrelation,
         SemanticRecord,
@@ -46,7 +46,6 @@ UINT64_MAX = 0xFFFFFFFFFFFFFFFF
 
 
 def parse_plog_lines(lines: Iterable[str]) -> Iterator[SemanticRecord]:
-    pending_header = None
     for line in lines:
         if TRACE_TAG not in line:
             continue
@@ -54,72 +53,42 @@ def parse_plog_lines(lines: Iterable[str]) -> Iterator[SemanticRecord]:
         bracket_fields = _parse_bracket_values(after_tag)
         if bracket_fields:
             yield semantic_from_mapping(_with_line_metadata(bracket_fields, line))
-            pending_header = None
-            continue
-        if "=" in after_tag:
-            yield semantic_from_mapping(_with_line_metadata(_parse_key_values(after_tag), line))
-            pending_header = None
-            continue
-        pending_header = after_tag.split()
-        if len(pending_header) >= 4:
-            continue
-
-        # Legacy records can be split across the tag line plus one value line.
-        pending_header = pending_header or []
-
-    if pending_header:
-        yield semantic_from_legacy_tokens(pending_header)
-
-
-def parse_legacy_block(lines: Iterable[str]) -> Iterator[SemanticRecord]:
-    iterator = iter(lines)
-    for line in iterator:
-        if TRACE_TAG not in line:
-            continue
-        after_tag = line.split(TRACE_TAG, 1)[1].strip()
-        bracket_fields = _parse_bracket_values(after_tag)
-        if bracket_fields:
-            yield semantic_from_mapping(_with_line_metadata(bracket_fields, line))
             continue
         if "=" in after_tag:
             yield semantic_from_mapping(_with_line_metadata(_parse_key_values(after_tag), line))
             continue
-        header = after_tag.split()
-        try:
-            values = next(iterator).strip().split()
-        except StopIteration:
-            values = []
-        yield semantic_from_legacy_tokens(header + values)
 
 
 def semantic_from_mapping(data: Dict[str, str]) -> SemanticRecord:
+    schema_version = parse_int(data.get("schema_version"))
+    if schema_version not in SUPPORTED_SEMANTIC_SCHEMA_VERSIONS:
+        raise ValueError(
+            "unsupported [HcclTaskSemantic] schema_version {}; supported versions are {}".format(
+                schema_version, sorted(SUPPORTED_SEMANTIC_SCHEMA_VERSIONS)))
     return SemanticRecord(
-        schema_version=parse_int(data.get("schema_version"), 1),
+        schema_version=schema_version,
         algorithm=data.get("algorithm", ""),
         phase=data.get("phase", ""),
         step=parse_int(data.get("step")),
         slice=parse_int(data.get("slice")),
-        user_rank=parse_int(data.get("user_rank", data.get("rank"))),
-        comm_rank=parse_int(data.get("comm_rank", data.get("rank"))),
-        rank_size=parse_int(data.get("rank_size", data.get("ranksize"))),
-        peer_rank=parse_int(data.get("peer_rank", data.get("peer"))),
+        user_rank=parse_int(data.get("user_rank")),
+        comm_rank=parse_int(data.get("comm_rank")),
+        rank_size=parse_int(data.get("rank_size")),
+        peer_rank=parse_int(data.get("peer_rank")),
         event=data.get("event", ""),
         semantic=data.get("semantic", ""),
         stream_id=parse_int(data.get("stream_id")),
-        task_id=parse_int(data.get("hccl_task_id", data.get("task_id"))),
-        semantic_seq=parse_int(data.get("semantic_seq", data.get("task_seq"))),
-        profiler_seq=parse_int(data.get("profiler_seq", data.get("submit_seq"))),
-        task_kind=data.get("task_kind", data.get("task_type", "")),
-        execution_mode=data.get("execution_mode", ""),
+        task_id=parse_int(data.get("hccl_task_id")),
+        semantic_seq=parse_int(data.get("semantic_seq")),
+        profiler_seq=parse_int(data.get("profiler_seq")),
+        task_kind=data.get("task_kind", ""),
         ffts_ctx_id=_parse_unsigned_identity(data.get("ffts_ctx_id"), UINT32_MAX),
         graph_instance_id=_parse_unsigned_identity(data.get("graph_instance_id"), UINT64_MAX),
         source=data.get("source", ""),
-        device_id=parse_int(data.get("device_id", data.get("device"))),
+        device_id=parse_int(data.get("device_id")),
         submit_ts=parse_int(data.get("submit_ts")),
         notify_id=parse_int(data.get("notify_id")),
         notify_stage=parse_int(data.get("notify_stage")),
-        notify_remote_rank=parse_int(data.get("notify_remote_rank")),
-        notify_ctx_id=parse_int(data.get("notify_ctx_id")),
         node_id=data.get("node_id", ""),
         pid=parse_int(data.get("pid")),
     )
@@ -155,27 +124,6 @@ def _parse_unsigned_identity(value: str, invalid_value: int) -> int:
     return -1 if parsed == invalid_value else parsed
 
 
-def semantic_from_legacy_tokens(tokens: List[str]) -> SemanticRecord:
-    values = list(tokens)
-    if len(values) < 11:
-        values.extend([""] * (11 - len(values)))
-    stream_id, task_id, task_kind, event, phase, step, rank, rank_size, slice_id, semantic, peer = values[:11]
-    return SemanticRecord(
-        stream_id=parse_int(stream_id),
-        task_id=parse_int(task_id),
-        task_kind=task_kind,
-        event=event,
-        phase=phase,
-        step=parse_int(step),
-        user_rank=parse_int(rank),
-        comm_rank=parse_int(rank),
-        rank_size=parse_int(rank_size),
-        slice=parse_int(slice_id),
-        semantic=semantic,
-        peer_rank=parse_int(peer),
-    )
-
-
 def _parse_key_values(text: str) -> Dict[str, str]:
     result = {}
     for match in KEY_VALUE_RE.finditer(text):
@@ -207,7 +155,7 @@ def _with_line_metadata(data: Dict[str, str], line: str) -> Dict[str, str]:
 
 def parse_file(path: str) -> List[SemanticRecord]:
     with open(path, "r", encoding="utf-8", errors="replace") as source:
-        return list(parse_legacy_block(source))
+        return list(parse_plog_lines(source))
 
 
 def parse_graph_correlations_file(path: str) -> List[GraphCorrelation]:

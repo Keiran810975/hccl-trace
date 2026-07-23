@@ -93,16 +93,6 @@ def read_rows(path: Path, include_profiler_only: bool = False) -> List[dict]:
     with path.open("r", encoding="utf-8-sig", newline="") as source:
         for index, row in enumerate(csv.DictReader(source)):
             status = row.get("match_status")
-            if status == "matched" and row.get("match_confidence") == "heuristic":
-                if not include_profiler_only:
-                    continue
-                row = dict(row)
-                row["match_status"] = "profiler_only"
-                row["phase"] = ""
-                row["event"] = ""
-                row["semantic"] = ""
-                row["task_kind"] = ""
-                status = "profiler_only"
             if status == "profiler_only" and not include_profiler_only:
                 continue
             if status not in ("matched", "profiler_only"):
@@ -169,7 +159,7 @@ def short_label(row: dict) -> str:
         "rx_payload_reduce_start": "rx_reduce",
         "rx_payload_copy_start": "rx_copy",
     }
-    return labels.get(event, event or semantic or row.get("event_name", "") or row.get("profiler_task_kind", "") or row.get("kernel_type", ""))
+    return labels.get(event, event or semantic or row.get("event_name", "") or row.get("profiler_task_kind", ""))
 
 
 def row_color(row: dict):

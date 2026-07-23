@@ -60,15 +60,6 @@ def read_execution_rows(path: Path) -> List[dict]:
         for index, row in enumerate(csv.DictReader(source)):
             if row.get("match_status") not in ("matched", "profiler_only"):
                 continue
-            if row.get("match_confidence") == "heuristic":
-                row = dict(row)
-                row["match_status"] = "profiler_only"
-                for field in (
-                    "algorithm", "phase", "event", "semantic", "task_kind",
-                    "user_rank", "comm_rank", "rank_size", "peer_rank",
-                    "notify_id", "notify_stage", "notify_remote_rank", "notify_ctx_id",
-                ):
-                    row[field] = ""
             start = to_float(row.get("task_start"))
             stop = to_float(row.get("task_stop"))
             if math.isnan(start) or math.isnan(stop):

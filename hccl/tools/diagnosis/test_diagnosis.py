@@ -12,7 +12,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from diagnosis.merge_timeline import merge_records, parse_plog_inputs
     from diagnosis.parse_msprof_json import parse_events
-    from diagnosis.parse_plog import parse_graph_correlation_lines, parse_legacy_block
+    from diagnosis.parse_plog import parse_graph_correlation_lines, parse_plog_lines
     from diagnosis.schema import GraphCorrelation
     from diagnosis.validate_trace import validate_rows
     from diagnosis.visualize_dependency_graph import build_execution_edges
@@ -21,7 +21,7 @@ if __package__ in (None, ""):
 else:
     from .merge_timeline import merge_records, parse_plog_inputs
     from .parse_msprof_json import parse_events
-    from .parse_plog import parse_graph_correlation_lines, parse_legacy_block
+    from .parse_plog import parse_graph_correlation_lines, parse_plog_lines
     from .schema import GraphCorrelation
     from .validate_trace import validate_rows
     from .visualize_dependency_graph import build_execution_edges
@@ -89,18 +89,20 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertEqual(model["edges"][0]["kind"], "stream_order_observed")
         self.assertIn("adjacent executions", model["edges"][0]["reason"])
 
-    def test_legacy_composite_heuristic_is_disabled_by_default(self):
+    def test_composite_without_correlation_remains_unmatched(self):
         events = [
             json_event(name, 45, 1, 100 + subtask, subtask=subtask)
             for subtask, name in enumerate(("SDMA", "SDMA", "SDMA", "Write Value", "Notify Wait"))
         ]
         events.append(json_event("MEMCPY_ASYNC", 45, 2, 200, duration=2))
         profilers = list(parse_events(events, device_id=0, default_node_id="node0"))
-        semantics = list(parse_legacy_block([
-            "[HcclTaskSemantic] device_id[0] stream_id[45] task_id[0] semantic_seq[0] profiler_seq[3] "
+        semantics = list(parse_plog_lines([
+            "[HcclTaskSemantic] schema_version[2] device_id[0] stream_id[45] hccl_task_id[0] "
+            "semantic_seq[0] profiler_seq[3] "
             "task_kind[sdma] event[copy_start] phase[reduce_scatter_direct] step[0] "
             "user_rank[0] comm_rank[0] rank_size[2]\n",
-            "[HcclTaskSemantic] device_id[0] stream_id[45] task_id[2] semantic_seq[1] profiler_seq[5] "
+            "[HcclTaskSemantic] schema_version[2] device_id[0] stream_id[45] hccl_task_id[2] "
+            "semantic_seq[1] profiler_seq[5] "
             "task_kind[sdma] event[rx_payload_copy_start] phase[allgather_direct] step[0] "
             "user_rank[0] comm_rank[0] rank_size[2]\n",
         ]))
@@ -113,29 +115,20 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertEqual(matched[0]["profiler_task_id"], 2)
         self.assertEqual(matched[0]["match_confidence"], "exact")
 
-        legacy_rows, legacy_stats = merge_records(
-            semantics, profilers, allow_legacy_composite_heuristic=True)
-        self.assertEqual(legacy_stats["legacy_composite_kind_mismatches"], 1)
-        self.assertEqual(
-            [row for row in legacy_rows if row["match_status"] == "invalid_heuristic"][0]
-            ["subtask_id"],
-            3,
-        )
-
     def test_ffts_parent_ctx_correlation_matches_exact_subtask(self):
         events = [
             json_event("Write Value", 45, 1, 100, subtask=8),
             json_event("SDMA", 45, 1, 101, subtask=13),
         ]
         profilers = list(parse_events(events, device_id=0, default_node_id="node0"))
-        semantics = list(parse_legacy_block([
-            "[HcclTaskSemantic] schema_version[2] device_id[0] stream_id[45] task_id[0] "
+        semantics = list(parse_plog_lines([
+            "[HcclTaskSemantic] schema_version[2] device_id[0] stream_id[45] hccl_task_id[0] "
             "semantic_seq[0] profiler_seq[6] task_kind[notify_record] event[tx_ack_start] "
-            "phase[reduce_scatter_direct] execution_mode[ffts] ffts_ctx_id[8] "
+            "phase[reduce_scatter_direct] ffts_ctx_id[8] "
             "graph_instance_id[7]\n",
-            "[HcclTaskSemantic] schema_version[2] device_id[0] stream_id[13] task_id[0] "
+            "[HcclTaskSemantic] schema_version[2] device_id[0] stream_id[13] hccl_task_id[0] "
             "semantic_seq[0] profiler_seq[3] task_kind[reduce_inline] "
-            "event[rx_payload_reduce_start] phase[reduce_scatter_direct] execution_mode[ffts] "
+            "event[rx_payload_reduce_start] phase[reduce_scatter_direct] "
             "ffts_ctx_id[13] graph_instance_id[7]\n",
         ]))
         correlations = [
@@ -171,27 +164,31 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertEqual(records[0].parent_task_id, 41)
         self.assertEqual(records[0].pid, 123)
 
-    def test_v1_and_invalid_ffts_fields_are_backward_compatible(self):
-        semantics = list(parse_legacy_block([
-            "[HcclTaskSemantic] schema_version[1] device_id[0] stream_id[45] task_id[2] "
+    def test_v1_is_rejected_and_v2_invalid_ffts_sentinels_are_normalized(self):
+        unsupported = (
+            "[HcclTaskSemantic] schema_version[1] device_id[0] stream_id[45] "
+            "hccl_task_id[2] task_kind[sdma] event[copy_start] phase[allgather_direct]\n",
+            "[HcclTaskSemantic] device_id[0] stream_id[45] hccl_task_id[2] "
             "task_kind[sdma] event[copy_start] phase[allgather_direct]\n",
-            "[HcclTaskSemantic] schema_version[2] device_id[0] stream_id[45] task_id[3] "
+        )
+        for line in unsupported:
+            with self.subTest(line=line), self.assertRaises(ValueError):
+                list(parse_plog_lines([line]))
+        semantics = list(parse_plog_lines([
+            "[HcclTaskSemantic] schema_version[2] device_id[0] stream_id[45] hccl_task_id[3] "
             "task_kind[sdma] event[copy_start] phase[allgather_direct] "
             "ffts_ctx_id[4294967295] graph_instance_id[18446744073709551615]\n",
         ]))
-        self.assertEqual(semantics[0].schema_version, 1)
         self.assertEqual(semantics[0].ffts_ctx_id, -1)
         self.assertEqual(semantics[0].graph_instance_id, -1)
-        self.assertEqual(semantics[1].ffts_ctx_id, -1)
-        self.assertEqual(semantics[1].graph_instance_id, -1)
 
     def test_duplicate_graph_correlation_is_not_used(self):
         profilers = list(parse_events(
             [json_event("Write Value", 45, 1, 100, subtask=8)], 0, "node0"))
-        semantics = list(parse_legacy_block([
-            "[HcclTaskSemantic] schema_version[2] device_id[0] stream_id[45] task_id[0] "
+        semantics = list(parse_plog_lines([
+            "[HcclTaskSemantic] schema_version[2] device_id[0] stream_id[45] hccl_task_id[0] "
             "semantic_seq[0] task_kind[notify_record] event[tx_ack_start] "
-            "phase[reduce_scatter_direct] execution_mode[ffts] ffts_ctx_id[8] "
+            "phase[reduce_scatter_direct] ffts_ctx_id[8] "
             "graph_instance_id[7]\n",
         ]))
         correlations = [
@@ -209,27 +206,30 @@ class DiagnosisToolTest(unittest.TestCase):
             8,
         )
 
-    def test_validation_gate_counts_only_exact_matches(self):
+    def test_validation_gate_rejects_invalid_matches(self):
         rows = [
             {"match_status": "matched", "match_confidence": "exact",
              "duplicate_semantic": "0", "duplicate_profiler": "0"},
-            {"match_status": "matched", "match_confidence": "heuristic",
+            {"match_status": "correlation_kind_mismatch", "match_confidence": "invalid",
              "duplicate_semantic": "0", "duplicate_profiler": "0"},
         ]
-        ok, stats = validate_rows(rows, 75.0)
+        ok, stats = validate_rows(rows, 50.0)
         self.assertFalse(ok)
-        self.assertEqual(stats["match_rate_percent"], 100.0)
+        self.assertEqual(stats["invalid_matches"], 1)
         self.assertEqual(stats["exact_match_rate_percent"], 50.0)
 
     def test_exact_allgather_wins_reused_reduce_scatter_task_id(self):
         profilers = list(parse_events(
             [json_event("MEMCPY_ASYNC", 13, 3, 200, duration=2)], 0, "node0"))
-        semantics = list(parse_legacy_block([
-            "[HcclTaskSemantic] device_id[0] stream_id[13] task_id[3] semantic_seq[0] profiler_seq[1] "
+        semantics = list(parse_plog_lines([
+            "[HcclTaskSemantic] schema_version[2] device_id[0] stream_id[13] hccl_task_id[3] "
+            "semantic_seq[0] profiler_seq[1] "
             "task_kind[sdma] event[copy_start] phase[reduce_scatter_direct] step[0]\n",
-            "[HcclTaskSemantic] device_id[0] stream_id[13] task_id[3] semantic_seq[1] profiler_seq[2] "
+            "[HcclTaskSemantic] schema_version[2] device_id[0] stream_id[13] hccl_task_id[3] "
+            "semantic_seq[1] profiler_seq[2] "
             "task_kind[sdma] event[copy_start] phase[reduce_scatter_direct] step[1]\n",
-            "[HcclTaskSemantic] device_id[0] stream_id[13] task_id[3] semantic_seq[2] profiler_seq[3] "
+            "[HcclTaskSemantic] schema_version[2] device_id[0] stream_id[13] hccl_task_id[3] "
+            "semantic_seq[2] profiler_seq[3] "
             "task_kind[sdma] event[copy_start] phase[allgather_direct] step[0]\n",
         ]))
 
@@ -255,7 +255,8 @@ class DiagnosisToolTest(unittest.TestCase):
                 path = os.path.join(temp_dir, f"plog-{rank}.log")
                 with open(path, "w", encoding="utf-8") as output:
                     output.write(
-                        f"[HcclTaskSemantic] device_id[{rank}] stream_id[12] task_id[34] "
+                        f"[HcclTaskSemantic] schema_version[2] device_id[{rank}] stream_id[12] "
+                        "hccl_task_id[34] "
                         f"user_rank[{rank}] comm_rank[{rank}] rank_size[2] event[rx_ack_start] "
                         "phase[reduce_scatter_direct] step[0] task_kind[notify_wait]\n"
                     )
@@ -263,10 +264,10 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertEqual({record.device_id for record in records}, {0, 1})
 
     def test_submit_ts_and_profiler_seq_are_parsed(self):
-        semantics = list(parse_legacy_block([
-            "[HcclTaskSemantic] device_id[7] stream_id[45] task_id[0] semantic_seq[0] profiler_seq[3] "
-            "submit_ts[1783015731413749] notify_id[99] notify_stage[2] notify_remote_rank[6] "
-            "notify_ctx_id[3] task_kind[sdma] event[copy_start] "
+        semantics = list(parse_plog_lines([
+            "[HcclTaskSemantic] schema_version[3] device_id[7] stream_id[45] hccl_task_id[0] "
+            "semantic_seq[0] profiler_seq[3] submit_ts[1783015731413749] "
+            "notify_id[99] notify_stage[2] task_kind[sdma] event[copy_start] "
             "phase[reduce_scatter_direct] step[0]\n",
         ]))
         self.assertEqual(semantics[0].submit_ts, 1783015731413749)

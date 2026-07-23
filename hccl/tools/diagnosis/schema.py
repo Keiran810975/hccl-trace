@@ -7,7 +7,8 @@ from dataclasses import dataclass, fields
 from typing import Dict, Iterable, List, Optional
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+SUPPORTED_SEMANTIC_SCHEMA_VERSIONS = frozenset((2, 3))
 TRACE_TAG = "[HcclTaskSemantic]"
 GRAPH_CORRELATION_TAG = "[HcclTaskGraphCorrelation]"
 
@@ -29,7 +30,6 @@ SEMANTIC_FIELDS = (
     "semantic_seq",
     "profiler_seq",
     "task_kind",
-    "execution_mode",
     "ffts_ctx_id",
     "graph_instance_id",
     "source",
@@ -37,8 +37,6 @@ SEMANTIC_FIELDS = (
     "submit_ts",
     "notify_id",
     "notify_stage",
-    "notify_remote_rank",
-    "notify_ctx_id",
     "node_id",
     "pid",
 )
@@ -53,7 +51,6 @@ PROFILER_FIELDS = (
     "task_start",
     "task_stop",
     "duration",
-    "kernel_type",
     "event_name",
     "subtask_id",
     "connection_id",
@@ -73,7 +70,6 @@ MERGED_FIELDS = (
     "task_start",
     "task_stop",
     "duration",
-    "kernel_type",
     "event_name",
     "subtask_id",
     "connection_id",
@@ -104,7 +100,6 @@ class SemanticRecord:
     semantic_seq: int = -1
     profiler_seq: int = -1
     task_kind: str = ""
-    execution_mode: str = ""
     ffts_ctx_id: int = -1
     graph_instance_id: int = -1
     source: str = ""
@@ -112,8 +107,6 @@ class SemanticRecord:
     submit_ts: int = 0
     notify_id: int = -1
     notify_stage: int = -1
-    notify_remote_rank: int = -1
-    notify_ctx_id: int = -1
     node_id: str = ""
     pid: int = -1
 
@@ -151,7 +144,6 @@ class ProfilerTask:
     task_start: str = ""
     task_stop: str = ""
     duration: str = ""
-    kernel_type: str = ""
     event_name: str = ""
     subtask_id: int = -1
     connection_id: int = -1

@@ -32,15 +32,16 @@
 
 ### HYG-001 撤回默认拓扑强制
 
-- [!] **仓库**：HCOMM
+- [ ] **仓库**：HCOMM（已解阻）
 - **文件**：`src/algorithm/impl/alg_configurator.cc`
 - **依赖**：HYG-003 或目标 Ring 功能验证完成
-- **阻塞原因**：当前 910B module 的 `SetAlgoLevel0Module()` 会明确忽略显式
+- **历史阻塞原因**：当前 910B module 的 `SetAlgoLevel0Module()` 会明确忽略显式
   `HCCL_ALGO level0:ring`。若现在恢复默认 `ALG_LEVEL0_NP_MESH`，实际设备 workload
   将无法稳定进入待验证的 single-ring 插桩路径。
 - **临时决定**：保留 `[TEST PATCH]`，继续把全 HCCS 910B 默认拓扑强制为
   `ALG_LEVEL0_NP_SINGLE_RING`，仅用于完成当前 Ring 功能验证。
-- **解阻条件**：Ring 功能验证完成，或出现无需修改 HCOMM 源码即可选择同一路径的受支持控制面。
+- **解阻结论**：`test/out` 已完成目标 Ring 功能验证：28,502/28,502 exact，
+  FFts 14,405/14,405 parent+ctx exact。完成一次 schema v3 短采集后即可撤回强制。
 - **产物**：单文件功能提交。
 - **验收**：
   - 与 `../hcomm` 的该函数行为一致；
@@ -49,14 +50,14 @@
 
 ### HYG-002 撤回 operator 的 ring executor 强制
 
-- [!] **仓库**：HCOMM
+- [ ] **仓库**：HCOMM（已解阻）
 - **文件**：`src/algorithm/impl/operator/all_reduce_operator.cc`
 - **依赖**：HYG-003 或目标 Ring 功能验证完成
-- **阻塞原因**：8.5.0 的 910B 多卡选择树在 ring topology 下仍会落入
+- **历史阻塞原因**：8.5.0 的 910B 多卡选择树在 ring topology 下仍会落入
   `AllReduceComm`；只保留 topology 强制不足以进入
   `AllReduceRingFor91093Executor` 和 concurrent-direct RS/AG 模板。
 - **临时决定**：保留多卡 `isRingTopo` 的 `[TEST PATCH]` executor 选择分支。
-- **解阻条件**：与 HYG-001 相同；移除时必须同时恢复 topology 和 operator 两处默认行为。
+- **解阻结论**：与 HYG-001 相同；移除时必须同时恢复 topology 和 operator 两处默认行为。
 - **产物**：单文件功能提交。
 - **验收**：
   - 生产选择树恢复 8.5.0 规则；
@@ -64,7 +65,7 @@
 
 ### HYG-003 提供测试侧 ring 路径选择
 
-- [!] **仓库**：测试目录；如确需 HCOMM 测试接口，单独评审
+- [x] **仓库**：测试目录；如确需 HCOMM 测试接口，单独评审
 - **依赖**：无；若本任务找到可行选择方案，再解阻 HYG-001、HYG-002
 - **调查结论**：
   - `HCCL_ALGO` 能解析 `level0:ring`；
@@ -73,12 +74,12 @@
   - 即使构造出 ring topology，8.5.0 多卡 operator 也不会选择目标 executor；
   - 现有 910_93 ST fixture 或标卡 topology 不能证明真实 910B module workload
     会走同一路径。
-- **阻塞原因**：目前没有发现“不修改 HCOMM 源码”且能在目标 910B module 上稳定选择
+- **结论**：没有发现“不修改 HCOMM 源码”且能在目标 910B module 上稳定选择
   `AllReduceRingFor91093Executor` 的方式。新增环境变量或扩展 `HCCL_ALGO` 支持本身都属于
   HCOMM 产品源码变更，不满足当前约束。
 - **临时决定**：不向测试脚本加入会被生产端忽略的 `--force-ring`，继续使用
   HYG-001/HYG-002 的临时源码强制完成 Ring 功能验证。
-- **解阻条件**：满足以下任一项：
+- **关闭依据**：以下第 1 项已经满足：
   1. Ring 功能验证完成，可以直接撤回两处强制；
   2. HCOMM 正式支持 910B module 的显式 level-0 ring 配置；
   3. 设备测试框架提供可证明等价的 topology/executor 注入接口。
@@ -87,14 +88,6 @@
   - 测试能稳定进入 RS/AG concurrent-direct；
   - 不设置测试参数时完全保持默认算法行为；
   - 测试日志能证明实际 executor/template。
-
-### HYG-004 分离无功能格式改动
-
-- [x] **仓库**：HCOMM
-- **文件**：`src/common/debug/profiling/profiler_manager_impl.cc`
-- **依赖**：无
-- **工作**：已将该文件中的纯格式化改动恢复至 HCOMM 当前 HEAD，不纳入 trace 功能提交。
-- **验收**：`git diff HEAD -- src/common/debug/profiling/profiler_manager_impl.cc` 无输出，trace 功能 diff 不再包含该无功能文件。
 
 ## 4. M1：Context、上报与序号可靠性
 
@@ -191,10 +184,11 @@
 
 ### LOG-002 为 schema version 建立演进规则
 
-- [ ] **仓库**：HCOMM
+- [x] **仓库**：HCOMM/HCCL
 - **依赖**：无
-- **工作**：定义字段新增、重命名、默认值和兼容期规则；明确 schema v1 的冻结字段。
-- **验收**：生产端和 `parse_plog.py` 共享一份字段兼容矩阵。
+- **工作**：semantic 当前生产版本升级为 v3；消费端接受 v2/v3，拒绝 v1、无版本和旧
+  token 格式。Graph correlation version 1 是独立 schema。
+- **验收**：生产端和 `parse_plog.py` 版本一致，v1 rejection 与 v2/v3 parsing 有单元测试。
 
 ## 5. M1：基础设施测试
 
@@ -230,8 +224,9 @@
 
 - [ ] **仓库**：HCOMM
 - **依赖**：CTX-002
-- **工作**：对 record/wait 分别验证 notify id、stage、remote rank、ctx id。
-- **验收**：非 notify task 不被误当作同步事件；record/wait 字段与 TaskParaNotify 一致。
+- **工作**：对 record/wait 分别验证保留的 notify id、stage；remote rank 使用通用
+  `peer_rank`，context 使用通用 `ffts_ctx_id`。
+- **验收**：非 notify task 不被误当作同步事件；不再输出重复 notify 专用字段。
 
 ### TST-006 并发序号测试
 
@@ -276,7 +271,8 @@
 - **依赖**：ID-004
 - **工作**：扩展 `schema.py`、`parse_plog.py` 和相关 CSV 字段。
 - **验收**：
-  - v1 fixture 仍可解析；
+  - v1 fixture 明确拒绝；
+  - v2 golden 与 v3 fixture 均可解析；
   - 新 fixture 保留实例 ID；
   - 单元测试覆盖缺失/非法值。
 
@@ -304,7 +300,7 @@
 
 - [x] **仓库**：HCOMM
 - **依赖**：COR-002、ID-004
-- **工作**：已输出 semantic schema v2 字段和 version 1
+- **工作**：已输出 semantic schema v3 字段和 version 1
   `[HcclTaskGraphCorrelation]` 日志；设备侧验收归入 E2E-003。
 - **验收**：
   - 一个 semantic 最多映射一个物理 execution；
@@ -330,9 +326,8 @@
 
 - [x] **仓库**：HCCL `tools/diagnosis`
 - **依赖**：COR-005
-- **工作**：固定偏移分支默认关闭，仅在显式
-  `--allow-legacy-composite-heuristic` 时用于旧数据调查。
-- **验收**：新采集无需固定偏移；旧数据若继续支持，必须显式 opt-in 并标记 heuristic。
+- **工作**：固定偏移、ordinal、`profiler_seq` composite heuristic 及对应 CLI 已全部删除。
+- **验收**：direct 只允许 task-id exact，FFts 只允许 parent+ctx exact。
 
 ## 8. M2：现有语义质量
 
@@ -386,9 +381,11 @@
 
 - [ ] **仓库**：HCCL `tools/diagnosis`
 - **依赖**：TST-005
-- **工作**：用含真实 notify id 的新 plog/JSON fixture 验证 record -> wait。
+- **工作**：`test/out` 显示相同 `(node, device, notify_id)` 下没有 record/wait 共存，
+  `notify_sync_observed=0`，现有 3,016 条边仍为 connection/time inferred。先调查 Notify ID
+  的本端/远端命名空间及 record/wait 对应关系，再定义可观测 pair identity。
 - **验收**：相同 device/id、跨 stream 的唯一 record/wait 生成 observed 边；
-  数量不等或候选不唯一时拒绝强配。
+  若 runtime ID 本来不共享，则改用显式 pair/protocol identity；禁止按数值巧合强配。
 
 ## 9. M3：覆盖矩阵与独立扩展
 
@@ -518,9 +515,11 @@
 
 ### E2E-003 single-ring direct golden trace
 
-- [ ] **仓库**：跨仓测试
+- [x] **仓库**：跨仓测试
 - **依赖**：HYG-003、E2E-001
 - **工作**：固定 rank size、数据量、transport，保存 plog、msprof JSON、summary。
+- **结果**：`test/out` 共 28,502 条 semantic，100% exact；其中 14,405 条 FFts
+  全部 parent+ctx exact；335 条 graph correlation；duplicate/invalid 为 0。
 - **验收**：
   - `semantic_total > 0`；
   - `ffts_semantic_total > 0`、`graph_correlation_total > 0`；
@@ -528,7 +527,7 @@
   - `ffts_semantic_missing_correlation == 0`、
     `json_ffts_ctx_kind_mismatches == 0`；
   - `json_ffts_parent_ctx_matches > 0`，exact match 达到约定值；
-  - heuristic 与 exact 分开报告，heuristic 不计入质量门禁。
+  - 不存在 heuristic 匹配入口。
 
 ### E2E-004 默认 mesh golden trace
 
@@ -555,33 +554,30 @@
 
 - [ ] **仓库**：HCCL `tools/diagnosis`
 - **依赖**：E2E-003；完成 M2 后重跑
-- **工作**：固定输出 exact rate、heuristic count、kind mismatch、unmatched semantic、
+- **工作**：固定输出 exact rate、kind mismatch、unmatched semantic、
   profiler-only 和 duplicate execution key。
-- **验收**：总 match rate 不能掩盖 heuristic；95% 门禁的分子分母有明确定义。
+- **验收**：95% 门禁只接受 exact，分子分母有明确定义。
 
 ## 12. 推荐执行顺序
 
 第一批先关闭发布阻断和基础语义丢失：
 
 ```text
-HYG-001 + HYG-002
-  -> HYG-003
+schema v3 Ring 短采集
+  -> HYG-001 + HYG-002
+  -> E2E-004 默认 mesh 回归
 CTX-001 + SEQ-001
   -> CTX-002
   -> TST-001..TST-005
-  -> E2E-001..E2E-003
+  -> E2E-001/E2E-002
 ```
 
-第二批建立精确身份，替换启发式：
+第二批补 collective/protocol identity；FFts COR-001..COR-006 已完成：
 
 ```text
-LOG-002
-  -> ID-001..ID-005
-COR-001
-  -> COR-002
-  -> COR-003 + COR-004
-  -> COR-005
-  -> COR-006
+ID-001..ID-005
+SEM-007 notify identity 调查
+  -> MNT-001 + MNT-002
 ```
 
 第三批修复语义质量并扩覆盖：

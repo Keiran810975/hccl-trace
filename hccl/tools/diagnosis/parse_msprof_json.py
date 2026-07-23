@@ -103,7 +103,6 @@ def parse_events(
             task_start=_format_number(start),
             task_stop=_format_number(start + duration),
             duration=_format_number(duration),
-            kernel_type=event_name,
             event_name=event_name,
             subtask_id=subtask_id,
             connection_id=parse_int(args.get("connection_id")),

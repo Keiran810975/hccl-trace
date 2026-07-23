@@ -18,7 +18,7 @@
 
 namespace hccl {
 namespace {
-constexpr u32 TASK_SEMANTIC_SCHEMA_VERSION = 2;
+constexpr u32 TASK_SEMANTIC_SCHEMA_VERSION = 3;
 constexpr u32 TASK_GRAPH_CORRELATION_SCHEMA_VERSION = 1;
 constexpr u32 TASK_SEMANTIC_MAX_DEVICE_NUM = 64;
 constexpr u32 TASK_SEMANTIC_MAX_STREAM_NUM = 65536;
@@ -226,10 +226,10 @@ HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskT
     u64 profilerSeq = NextTaskProfilerSeq(deviceId, streamId);
     if (info == nullptr) {
         HCCL_DEBUG("[HcclTaskSemanticProbe] report without context device_id[%u] stream_id[%u] "
-            "profiler_seq[%llu] task_type[%u] task_kind[%s] execution_mode[%s] "
+            "profiler_seq[%llu] task_type[%u] task_kind[%s] "
             "ffts_ctx_id[%u] graph_instance_id[%llu]",
             deviceId, streamId, profilerSeq, static_cast<u32>(taskType), TaskTypeToName(taskType),
-            isFfts ? "ffts" : "direct", fftsCtxId, graphInstanceId);
+            fftsCtxId, graphInstanceId);
         return HCCL_SUCCESS;
     }
 
@@ -239,8 +239,8 @@ HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskT
         "user_rank[%u] comm_rank[%u] rank_size[%u] peer_rank[%u] semantic[%s] "
         "device_id[%u] stream_id[%u] hccl_task_id[%u] "
         "semantic_seq[%llu] profiler_seq[%llu] task_type[%u] task_kind[%s] "
-        "execution_mode[%s] ffts_ctx_id[%u] graph_instance_id[%llu] "
-        "submit_ts[%llu] notify_id[%llu] notify_stage[%d] notify_remote_rank[%u] notify_ctx_id[%u] source[%s]",
+        "ffts_ctx_id[%u] graph_instance_id[%llu] "
+        "submit_ts[%llu] notify_id[%llu] notify_stage[%d] source[%s]",
         TASK_SEMANTIC_SCHEMA_VERSION,
         SafeStr(info->algorithm), SafeStr(info->event), SafeStr(info->phase),
         info->step, info->slice,
@@ -248,8 +248,7 @@ HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskT
         info->peerRank, SafeStr(info->semantic), deviceId,
         streamId, taskId, semanticSeq, profilerSeq,
         static_cast<u32>(taskType), TaskTypeToName(taskType),
-        isFfts ? "ffts" : "direct", fftsCtxId, graphInstanceId,
-        info->submitTs, info->notifyId, info->notifyStage, info->notifyRemoteRank, info->notifyCtxId,
+        fftsCtxId, graphInstanceId, info->submitTs, info->notifyId, info->notifyStage,
         SafeStr(info->source));
     return HCCL_SUCCESS;
 }
