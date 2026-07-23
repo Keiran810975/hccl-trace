@@ -184,8 +184,8 @@ HcclResult ReportTaskSemanticTrace(u32 deviceId, u32 streamId, u32 taskId, TaskT
         return HCCL_SUCCESS;
     }
 
-    HCCL_RUN_INFO("[HcclTaskSemantic] schema_version[%u] algorithm[%s] "
-        "event[%s] phase[%s] step[%u] slice[%u] "
+    HCCL_RUN_INFO("[HcclTaskSemantic] schema_version[%u] "
+        "algorithm[%s] event[%s] phase[%s] step[%u] slice[%u] "
         "user_rank[%u] comm_rank[%u] rank_size[%u] peer_rank[%u] semantic[%s] "
         "device_id[%u] stream_id[%u] hccl_task_id[%u] "
         "task_type[%u] task_kind[%s] "

@@ -553,6 +553,8 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertEqual(semantics[0].notify_stage, 2)
         self.assertNotIn("semantic_seq", semantics[0].__dataclass_fields__)
         self.assertNotIn("profiler_seq", semantics[0].__dataclass_fields__)
+        self.assertNotIn("op_instance_id", semantics[0].__dataclass_fields__)
+        self.assertNotIn("retry_generation", semantics[0].__dataclass_fields__)
 
         current = list(parse_plog_lines([
             "[HcclTaskSemantic] schema_version[4] device_id[7] stream_id[45] hccl_task_id[1] "
@@ -796,6 +798,44 @@ class DiagnosisToolTest(unittest.TestCase):
             {"unique"},
         )
         self.assertEqual(len({row["profiler_op_scope"] for row in rows}), 1)
+
+    def test_operation_scope_is_cross_node_for_one_profile_run(self):
+        first = replace(
+            profiler_task("SDMA", 45, 1, 100),
+            node_id="node0",
+            op_name="hcom_allReduce__612_0_1",
+            group_name="group_name_0",
+            profiler_op_id=7,
+        )
+        second = replace(
+            profiler_task("SDMA", 45, 1, 100),
+            node_id="node1",
+            op_name="hcom_allReduce__612_0_1",
+            group_name="group_name_0",
+            profiler_op_id=41,
+        )
+        rows, stats = merge_records([], [first, second])
+
+        self.assertEqual(stats["profiler_operation_scope_distinct"], 1)
+        self.assertEqual(len({row["profiler_op_scope"] for row in rows}), 1)
+
+    def test_operation_scope_uses_full_group_name_with_op_name(self):
+        first = replace(
+            profiler_task("SDMA", 45, 1, 100),
+            op_name="hcom_allReduce__612_0_1",
+            group_name="group_name_0",
+            profiler_op_id=7,
+        )
+        second = replace(
+            profiler_task("SDMA", 45, 2, 102),
+            op_name="hcom_allReduce__612_0_1",
+            group_name="group_name_1",
+            profiler_op_id=8,
+        )
+        rows, stats = merge_records([], [first, second])
+
+        self.assertEqual(stats["profiler_operation_scope_distinct"], 2)
+        self.assertEqual(len({row["profiler_op_scope"] for row in rows}), 2)
 
     def test_operation_scope_rejects_two_local_op_ids_for_one_scope(self):
         first = replace(

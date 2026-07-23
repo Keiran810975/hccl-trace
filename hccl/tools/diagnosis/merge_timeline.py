@@ -195,8 +195,9 @@ def build_operation_scope_assignments(
     """Classify DB operation metadata without using local IDs as graph scope.
 
     ``opId`` only proves that one device-local DB reference maps one-to-one to
-    ``(group_name, op_name)``.  The exported scope is derived from names and the
-    node boundary, so different devices may use different local IDs safely.
+    ``(group_name, op_name)``.  The exported scope is derived only from those
+    names, so different devices/nodes may use different local IDs safely within
+    one profile run.
     """
     profiler_list = list(profilers)
     ref_to_scopes = defaultdict(set)
@@ -207,7 +208,7 @@ def build_operation_scope_assignments(
         op_name = str(task.op_name or "").strip()
         group_name = str(task.group_name or "").strip()
         scope = (
-            OperationScopeIdentity(task.node_id, group_name, op_name)
+            OperationScopeIdentity(group_name, op_name)
             if op_name and group_name
             else None
         )

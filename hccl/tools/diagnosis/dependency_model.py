@@ -98,9 +98,8 @@ class ExecutionIdentity:
 
 @dataclass(frozen=True)
 class OperationScopeIdentity:
-    """Node-local collective operation scope from msprof operation metadata."""
+    """Collective invocation identity from msprof operation metadata."""
 
-    node_id: str
     group_name: str
     op_name: str
 
@@ -108,7 +107,7 @@ class OperationScopeIdentity:
     def stable_id(self) -> str:
         return stable_id(
             "op",
-            (self.node_id, self.group_name, self.op_name),
+            (self.group_name, self.op_name),
         )
 
 

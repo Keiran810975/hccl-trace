@@ -36,7 +36,7 @@ python -m tools.diagnosis.merge_timeline \
 匹配分为：
 
 - `task_id / exact`：普通任务的 device/physical-stream/task id 与 task kind 唯一一致。
-- `ffts_parent_ctx / exact`：schema v2/v3 plog 先用 graph correlation 定位 FFts parent，
+- `ffts_parent_ctx / exact`：schema v2～v4 plog 先用 graph correlation 定位 FFts parent，
   再用 `ffts_ctx_id == TASK.contextId` 定位物理子任务。
 - `correlation_kind_mismatch`：身份候选与物理 kind 冲突，属于硬错误，
   不得按 matched 使用。
@@ -51,7 +51,10 @@ semantic schema v1、无版本日志和旧空格 token 格式已不再支持。�
 消费端接受 v2/v3/v4，以便复查已经通过设备验证的旧 golden 数据。v3 删除
 `execution_mode`、`notify_remote_rank`、`notify_ctx_id`；msprof 侧删除与 `event_name`
 重复的 `kernel_type`。v4 删除不参与 exact identity 或依赖构造的
-`semantic_seq/profiler_seq`；旧输入中的这两个字段会被忽略。
+`semantic_seq/profiler_seq`；旧输入中的这两个字段会被忽略。collective invocation
+身份不由生产端重复生成，而是在 semantic 与物理 TASK exact 合并后，使用 msprof DB 的
+`(group_name, op_name)` 建立；名称不完整或本地映射不唯一时标记为 missing/ambiguous，
+不得参与 exact operation 分区。
 
 ## 依赖图
 
@@ -89,14 +92,15 @@ graph sequence 可生成 relation candidate，direct 必须等待生产端共享
 
 当前 DB golden replay 的 FFts Notify 结果为 4,676 条 observed edge、28 条 single
 ambiguity、0 条 multi-endpoint ambiguity、0 条 incomplete。direct 的共享 token 被
-ID-004 阻塞；本地 task/stream 计数不能替代跨 rank protocol sequence。
+transport 侧缺失的 channel/protocol occurrence sequence 阻塞；实例 ID 已完成，但本地
+task/stream 计数仍不能替代跨 rank protocol sequence。
 
 DEP-008 已删除默认 connection/time Notify 推断。旧 JSON 的 3,016 条和 DB 的 5,094 条
 最近时间边均不再进入因果图；如果未来恢复研究模式，必须使用独立显式入口并标为
 `heuristic`，不能混入默认 artifact。
 
 旧实现中的“右邻居上一 payload”“上一 step”等算法规则不再作为默认边；它们不是 profiler
-观测事实。多节点精确边仍需要 collective instance id、统一时钟或单独的时钟校准 artifact。
+观测事实。多节点精确边仍需要共享 protocol token、统一时钟或单独的时钟校准 artifact。
 
 ## 交互可视化
 

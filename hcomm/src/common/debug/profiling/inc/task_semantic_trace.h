@@ -16,13 +16,11 @@
 
 namespace hccl {
 struct TaskSemanticTraceInfo {
-    const char *opType{nullptr};
     const char *algorithm{nullptr};
     const char *event{nullptr};
     const char *phase{nullptr};
     const char *semantic{nullptr};
     const char *source{"host"};
-    u64 opId{0};
     u64 submitTs{0};        // msprof host-cycle submit timestamp; candidate window/validation only
     u64 notifyId{0};
     s32 notifyStage{-1};

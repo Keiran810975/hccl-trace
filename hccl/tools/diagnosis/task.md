@@ -141,37 +141,22 @@
 
 ## 5. M2：算子实例身份
 
-### ID-001 定义 `op_instance_id`
+### ID-001～ID-005 撤销生产端实例 ID，采用 msprof operation identity
 
-- [ ] **仓库**：跨仓设计文档
-- **工作**：定义唯一性、生命周期、重试、wrap 和跨 rank 关联。
-- **验收**：给出正常、并发、重试三个 AllReduce 序列。
-
-### ID-002 在 AllReduce 入口生成实例 ID
-
-- [ ] **仓库**：HCOMM
-- **依赖**：ID-001
-- **工作/验收**：在稳定 invocation 边界生成；同轮 RS/AG 共用，不同轮不重复。
-
-### ID-003 将实例 ID 贯穿语义 scope
-
-- [ ] **仓库**：HCOMM
-- **依赖**：ID-002
-- **工作/验收**：主/从 stream 与嵌套 scope 不丢失，同轮 task 输出同一 ID。
-
-### ID-004 序列化 `op_instance_id`
-
-- [ ] **仓库**：HCOMM
-- **依赖**：ID-003
-- **工作**：升级日志 schema 并输出实例 ID；清理或定义现有 `opId/opType`。
-- **验收**：生产格式和消费策略一致。
-
-### ID-005 消费端解析实例 ID
-
-- [ ] **仓库**：HCCL `tools/diagnosis`
-- **依赖**：ID-004
-- **工作**：扩展 schema、plog parser 和 fixture。
-- **验收**：缺失、非法、重试和正常值均有测试。
+- [x] **仓库**：HCOMM、HCCL `tools/diagnosis`
+- **决策**：不再生成、传播或序列化 `op_instance_id/retry_generation`。DB 主输入已经提供
+  operation metadata，规范 collective invocation identity 为 `(group_name, op_name)`；
+  `op_name` 作为 opaque 值使用，不解析后缀作为私有合同。
+- **HCOMM 完成**：删除 communicator 计数器/锁/FNV/碰撞集合、`OpParam` 字段、
+  operation TLS/RAII、worker 快照及 plog 字段；生产 schema 回到 v4。
+- **HCCL 完成**：删除 semantic/merged schema 字段及 v5 parser/validator；operation scope
+  摘要只由 `(group_name, op_name)` 生成，本地 `opId` 仅验证映射唯一性。
+- **边界**：当前样例 `group_name=group_name_0`，并非完整 hash；同一次分析输入必须代表
+  同一 profile run。多 profile run 汇总需要外层 `profile_run_id`，同名 graph replay/retry
+  若被 msprof 复用仍需要独立 execution epoch 证据。
+- **验证**：38 项 Python 单测通过；`test/out` 回放保持 28,502/28,502 exact、
+  44,008 个 physical task、7 个 operation scope、42 列；依赖边仍为 53,777，
+  Notify 为 4,676 observed、28 single、0 ambiguous/incomplete。
 
 ## 6. M2：现有语义质量
 
@@ -231,7 +216,8 @@
   identity 为硬错误；本地 `opId` 只做 scope 映射验证，operation connection 仅作本地诊断，
   两者都不用于跨 device/rank 关联。
 - **验证**：44,008 个 execution 全量反序后 ID 全部不变；operation scope
-  unique 43,680、missing 328、ambiguous 0；诊断单元测试当前 32 个并全部通过。
+  unique 43,680、missing 328、ambiguous 0；诊断单元测试覆盖 operation scope 的跨
+  device、跨 node、group 隔离和本地映射歧义。
 
 ### DEP-003 隔离 direct stream 顺序
 
@@ -272,23 +258,23 @@
   单边、多端和缺字段分别输出 `single/ambiguous/incomplete` 到
   `*_notify_ambiguities.csv`，不读取时间做消歧。
 - **验证**：当前 DB replay 生成 4,676 条唯一 observed relation、28 条 single
-  （14 缺 producer、14 缺 consumer）、0 ambiguous、0 incomplete；36 项单测覆盖
+  （14 缺 producer、14 缺 consumer）、0 ambiguous、0 incomplete；单测覆盖
   唯一配对、单边、多端禁止排序 zip、graph instance 隔离资源复用。
 
 ### DEP-007 为 direct Notify 输出同步 token
 
 - [!] **仓库**：HCOMM
-- **依赖**：DEP-005、ID-004
-- **阻塞**：ID-001～ID-004 尚未完成，生产端没有跨 rank 共享的
-  `op_instance_id`，也没有由 Notify/transport 暴露的共享 occurrence sequence。
-  已废弃的 `semantic_seq/profiler_seq` 和现有 `task_id` 均为本 rank/stream 本地身份，
-  `notify_id` 是复用资源，`connection_id` 是 msprof 本地执行关联；任何一项都不能充当
-  共享 token。
+- **依赖**：DEP-002、DEP-005
+- **阻塞**：DB `(group_name, op_name)` 已隔离 collective invocation，但
+  Notify/transport 仍未暴露跨 rank 共享的 `channel_id + protocol occurrence sequence`。
+  `notify_id` 是复用资源，`task_id/connection_id` 是本地执行关联；operation scope
+  单独仍不能区分同一 collective 内的多次 record/wait。
 - **调查证据**：当前 direct 9,399 个 endpoint 去掉 sequence 后只形成 784 个候选组，
   每组聚合 11～12 个端点。给 Tx/Rx 各自增加本地计数器只能在理想调用顺序下对齐；
   非对称 retry 会使后续整体错位，多 channel 会从相同初值碰撞，回绕会复用旧 token。
-- **解除条件**：先完成 ID-001～ID-004，明确 invocation/retry generation；随后由
-  transport 协议层输出 `(op_instance_id, channel_id, signal_kind, protocol_seq)`，
+- **解除条件**：由 transport 协议层输出
+  `(channel_id, signal_kind, protocol_seq_or_epoch_seq)`，离线侧与
+  `(group_name, op_name)` operation scope 组合，
   使用饱和/epoch 机制禁止静默 wrap。完成后必须重新构建 HCOMM，并采集含正常、并发、
   retry 和多 channel 的设备数据，验收每个 token 恰好一个 producer/consumer。
 
@@ -362,37 +348,37 @@
 ### COV-002 覆盖非 concurrent-direct ring
 
 - [ ] **仓库**：HCOMM
-- **依赖**：COV-001、ID-003
+- **依赖**：COV-001
 - **工作/验收**：只覆盖标准 ring RS/AG；golden phase/step/peer 完整且无算法强制。
 
 ### COV-003 覆盖 mesh
 
 - [ ] **仓库**：HCOMM
-- **依赖**：COV-001、ID-003
+- **依赖**：COV-001
 - **工作/验收**：覆盖 910B 默认 mesh，撤回 Ring 强制后仍输出可用语义。
 
 ### COV-004 覆盖 hierarchical
 
 - [ ] **仓库**：HCOMM
-- **依赖**：COV-001、ID-003
+- **依赖**：COV-001
 - **工作/验收**：区分 intra/inter-node phase 和 rank 域；本任务不做时钟校准。
 
 ### COV-005 覆盖 NHR
 
 - [ ] **仓库**：HCOMM
-- **依赖**：COV-001、ID-003
+- **依赖**：COV-001
 - **工作/验收**：输出每 hop 的 src/dst/protocol sequence；本任务不构图。
 
 ### COV-006 覆盖 RDMA/RoCE
 
 - [ ] **仓库**：HCOMM
-- **依赖**：COV-001、ID-003
+- **依赖**：COV-001
 - **工作/验收**：验证 Reduce、RoCE 和 ACK 的 DB task 映射，无 SDMA 误标。
 
 ### COV-007 覆盖 AIV
 
 - [ ] **仓库**：HCOMM
-- **依赖**：CTX-004、COV-001、ID-003
+- **依赖**：CTX-004、COV-001
 - **工作/验收**：只标注可关联 AIV kernel；父 AI_CORE 不伪装为内部 context。
 
 ## 9. M6：多节点与高级诊断
@@ -400,13 +386,13 @@
 ### MNT-001 定义跨节点 protocol sequence
 
 - [ ] **仓库**：跨仓设计文档
-- **依赖**：ID-001、DEP-005
+- **依赖**：DEP-002、DEP-005
 - **工作/验收**：定义 op/src/dst/kind/sequence；重传、并发和多 channel 不歧义。
 
 ### MNT-002 HCOMM 输出 protocol identity
 
 - [ ] **仓库**：HCOMM
-- **依赖**：MNT-001、ID-004
+- **依赖**：MNT-001
 - **工作/验收**：tx/rx signal/payload 只凭 identity 配对，不依赖时间或 Ring 公式。
 
 ### MNT-003 生成 wait-relation artifact
@@ -478,7 +464,7 @@
 ### E2E-007 诊断质量报告
 
 - [ ] **仓库**：HCCL
-- **依赖**：ID-005、DEP-015
+- **依赖**：DEP-002、DEP-015
 - **工作/验收**：固定 exact、kind mismatch、unmatched、profiler-only、duplicate 定义和门禁。
 
 ### E2E-008 DB 输入与依赖图 golden replay
@@ -497,18 +483,17 @@ HYG-001 + HYG-002 -> E2E-001 -> E2E-002
 SEQ-001 -> SEQ-002 + SEQ-003（已完成：删除本地 task sequence）
 CTX-001 -> CTX-002..CTX-005 -> TST-001..TST-005
 
-ID-001..ID-005
 SEM-001 -> SEM-002
 SEM-003 -> SEM-004 + SEM-005
 
 DEP-001 -> DEP-002 -> DEP-003 + DEP-004
 DEP-001 -> DEP-005 -> DEP-006 + DEP-008（已完成）
-DEP-005 + ID-004 -> DEP-007 -> DEP-009
+DEP-002 + DEP-005 -> DEP-007 -> DEP-009
 DEP-006 + DEP-009 -> DEP-010
 DEP-003..DEP-010 -> DEP-011 -> DEP-012 -> DEP-013 -> DEP-014 -> DEP-015
 
 COV-001 -> COV-002..COV-007
-DEP-005 + ID-001 -> MNT-001 -> MNT-002
+DEP-002 + DEP-005 -> MNT-001 -> MNT-002
 MNT-004 -> MNT-005
 MNT-002 + MNT-005 -> MNT-006
 ```

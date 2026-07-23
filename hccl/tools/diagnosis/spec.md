@@ -21,7 +21,7 @@
 | 当前源码 | `C:\Users\Admin\Desktop\ATC\hccl-trace\hcomm` |
 | 当前分支 | `dev-innerDia` |
 | 当前 HEAD | `7db54477d156efaa45e3caf7f8cd5d0caa195d64` |
-| 当前工作树 | 在 HEAD 之上还有 11 个已跟踪文件的未提交修改 |
+| 当前工作树 | 在 HEAD 之上还有 18 个已跟踪文件的未提交修改 |
 
 相邻基线仓的 HEAD 与当前仓内 `8.5.0` ref 指向同一个提交。因此，以下两种比较在源码内容上等价：
 
@@ -52,13 +52,13 @@ git -C hcomm diff HEAD
 
 当前工作树相对 `../hcomm` 的净差异为：
 
-- 14 个文件；
+- 20 个文件；
 - 新增 4 个文件；
-- 修改 10 个文件；
-- 新增 875 行，删除 78 行。
+- 修改 16 个文件；
+- 新增 1,023 行，删除 79 行。
 
-当前 HEAD 相对 8.5.0 是 12 个文件、`+512/-51`；未提交层又做了
-11 个文件的调整。两层存在同文件反复修改，所以不能把两组行数直接相加。
+统计使用 `git diff 8.5.0 --numstat` 对当前工作树取净值；HEAD 已提交层与未提交层存在
+同文件反复修改，不能把两层行数直接相加。
 
 特别说明：当前 Git 状态将
 `coll_all_reduce_ring_for_910_93_executor.cc` 标记为相对 HEAD 已修改，是因为工作树撤回了
@@ -83,7 +83,8 @@ RS/AG 算法模板建立 phase/step/slice/rank context
 2. 新增支持嵌套恢复和一次性消费的 RAII scope；
 3. 在 task 被创建时保存语义快照，避免延迟上报时读到已经变化的 TLS；
 4. 输出物理 `device_id`、真实语义 stream、HCCL task id、提交时间和 notify 元数据；
-5. 为每个 device/stream 维护 profiler 序号与 semantic 序号；
+5. 在离线 exact 合并后使用 msprof DB 的 `(group_name, op_name)` 标识 collective
+   invocation，不在 HCOMM 重复生成实例身份；
 6. 覆盖 single-ring concurrent-direct AllReduce 的 ReduceScatter/AllGather 核心事件；
 7. 为触发上述路径加入两处明确标记为 `[TEST PATCH]` 的算法选择改动。
 
@@ -94,8 +95,8 @@ RS/AG 算法模板建立 phase/step/slice/rank context
 | 文件 | 行数 | 改动性质 | 功能解释 |
 |---|---:|---|---|
 | `src/algorithm/base/alg_template/component/CMakeLists.txt` | `+2/-1` | 构建接入 | 将 `task_semantic_scope.cc` 编入 `hccl_alg`。 |
-| `src/algorithm/base/alg_template/component/task_semantic_scope.h` | `+50/-0` | 新文件 | 声明语义信息工厂、完整 context scope 和事件覆盖 scope。 |
-| `src/algorithm/base/alg_template/component/task_semantic_scope.cc` | `+73/-0` | 新文件 | 实现 TLS context 的保存、覆盖、恢复及 one-shot 事件。 |
+| `src/algorithm/base/alg_template/component/task_semantic_scope.h` | 新文件 | semantic scope | 声明完整 semantic 与事件覆盖两层 scope。 |
+| `src/algorithm/base/alg_template/component/task_semantic_scope.cc` | 新文件 | semantic TLS | 实现 semantic TLS 的保存恢复及 one-shot 事件。 |
 | `src/algorithm/base/alg_template/component/sender.cc` | `+9/-0` | 发送叶子插桩 | 为 Tx payload、Tx data signal 提供事件语义。 |
 | `src/algorithm/base/alg_template/component/reducer.cc` | `+138/-39` | 接收/归约叶子插桩 | 为 Rx payload copy/reduce、Rx data signal 提供事件语义，并限制 vector 路径只标注首个提交。 |
 | `src/algorithm/base/alg_template/temp_reduce_scatter/reduce_scatter_ring_concurrent_direct.cc` | `+126/-23` | RS 模板插桩 | 注入 phase/step/slice/rank/peer、ACK、payload、signal 和 local copy 语义。 |
@@ -103,11 +104,10 @@ RS/AG 算法模板建立 phase/step/slice/rank context
 | `src/algorithm/impl/alg_configurator.cc` | `+3/-2` | 测试路径改写 | 在特定 910B 全 HCCS 条件下把默认 NP mesh 强制改为 NP single ring。 |
 | `src/algorithm/impl/operator/all_reduce_operator.cc` | `+3/-0` | 测试路径改写 | 多卡 ring topology 时显式选择 `AllReduceRingFor91093Executor`。 |
 | `src/common/debug/profiling/CMakeLists.txt` | `+2/-1` | 构建接入 | 将 `task_semantic_trace.cc` 编入 `hccl_alg`。 |
-| `src/common/debug/profiling/inc/task_semantic_trace.h` | `+51/-0` | 新文件 | 定义语义结构、开关、TLS、捕获、probe 和上报 API。 |
-| `src/common/debug/profiling/task_semantic_trace.cc` | `+218/-0` | 新文件 | 实现开关、序号、task kind 映射、one-shot 捕获和 plog 输出。 |
-| `src/common/debug/profiling/inc/task_profiling_pub.h` | `+24/-1` | TaskData 扩展 | 保存语义 stream 和语义快照；构造 DMA/Reduce/Notify/AIV TaskData 时捕获 context。 |
-| `src/common/debug/profiling/task_profiling.cc` | `+22/-0` | 上报链集成 | 注入 device id、submit timestamp、notify 元数据，并处理 capture stream 与物理 stream 的区别。 |
-| `src/common/debug/profiling/profiler_manager_impl.cc` | `+4/-3` | 格式整理 | 仅调整空白、括号和长行换行，没有语义变化。 |
+| `src/common/debug/profiling/inc/task_semantic_trace.h` | 新文件 | 语义接口 | 定义语义结构、开关、TLS、捕获、probe 和上报 API。 |
+| `src/common/debug/profiling/task_semantic_trace.cc` | 新文件 | 语义实现 | 实现开关、task kind、one-shot、FFts correlation 和 schema v4 plog 输出。 |
+| `src/common/debug/profiling/inc/task_profiling_pub.h` | `+41/-1` | TaskData 扩展 | 保存语义 stream 和语义快照；构造 DMA/Reduce/Notify/AIV TaskData 时捕获 context。 |
+| `src/common/debug/profiling/task_profiling.cc` | `+22/-2` | 上报链集成 | 注入 device id、submit timestamp、notify 元数据，并处理 capture stream 与物理 stream 的区别。 |
 
 ## 5. 步骤语义基础设施
 
@@ -129,13 +129,11 @@ RS/AG 算法模板建立 phase/step/slice/rank context
 
 | 字段 | 默认值 | 当前来源/用途 |
 |---|---|---|
-| `opType` | `nullptr` | 已预留，但当前工厂不赋值、日志不序列化。 |
 | `algorithm` | `nullptr` | 当前为 `single_ring_direct`。 |
 | `event` | `nullptr` | 叶子 task 的动作名；必须非空才可捕获。 |
 | `phase` | `nullptr` | 当前为 `reduce_scatter_direct` 或 `allgather_direct`。 |
 | `semantic` | `nullptr` | 对 event 的稳定语义分类；必须非空才可捕获。 |
 | `source` | `"host"` | 表示语义由 Host 侧插桩产生。 |
-| `opId` | `0` | 已预留，但当前没有生成 invocation id，也不写日志。 |
 | `submitTs` | `0` | `hrtMsprofSysCycleTime()` 的 Host 提交周期时间。 |
 | `notifyId` | `0` | Notify task 从 `TaskParaNotify.notifyID` 补齐。 |
 | `notifyStage` | `-1` | Notify stage。 |
@@ -153,7 +151,7 @@ comm rank 与 user rank 混为一谈。
 
 ### 5.3 TLS 与 RAII scope
 
-当前 context 由两个 thread-local 变量保存：
+semantic context 由两个 thread-local 变量保存：
 
 ```text
 g_taskSemanticValid
@@ -175,6 +173,10 @@ g_taskSemanticInfo
 4. 析构时恢复父 context。
 
 这种嵌套模型让模板负责 phase/step/slice/rank，Sender/Reducer 只负责动作类型。
+
+collective invocation identity 不进入该 TLS。语义 task 与 msprof physical TASK exact
+合并后，从 DB operation metadata 获取 `(group_name, op_name)`，避免在 communicator、
+`OpParam` 和持久 worker 中维护第二套实例计数与跨线程状态。
 
 ### 5.4 TaskData 构造时捕获
 
@@ -270,9 +272,9 @@ notify_stage
 source
 ```
 
-格式为 HCCL 现有的 `field[value]` 风格。字段精简后当前 semantic schema version 为 4。
-消费端接受已完成设备验证的 version 2/3 和当前 version 4，明确拒绝 version 1、无版本记录
-以及旧空格 token 格式。version 2/3 中多出的
+格式为 HCCL 现有的 `field[value]` 风格。当前 semantic schema version 为 4。
+消费端接受已完成设备验证的 version 2/3/4，明确拒绝 version 1、
+无版本记录以及旧空格 token 格式。version 2/3 中多出的
 `execution_mode/notify_remote_rank/notify_ctx_id/semantic_seq/profiler_seq` 会被忽略。
 `[HcclTaskGraphCorrelation]` 使用独立的 version 1 schema，不属于 semantic v1。
 
@@ -283,11 +285,9 @@ source
 - 9,380 条有效 `notify_ctx_id` 与通用 `ffts_ctx_id` 全部一致；
 - 44,008 条 profiler row 的 `kernel_type` 与 `event_name` 全部一致。
 
-因此删除这些重复列不会减少当前匹配或语义信息。operation scope 加入后曾为 44 列；
-schema v4 再删除两个本地序号，当前 merged CSV 为 42 列。
-
-没有写入日志的已预留字段是 `opType` 和 `opId`。`node_id` 不由 HCOMM 生成，
-由离线工具在输入边界补齐；`pid` 由 plog 行前缀解析。
+因此删除这些重复列不会减少当前匹配或语义信息。schema v4 的 merged CSV 为 42 列。
+旧 `opType/opId/op_instance_id/retry_generation` 均不进入生产日志；`node_id` 不由
+HCOMM 生成，由离线工具在输入边界补齐；`pid` 由 plog 行前缀解析。
 
 ### 6.4 Probe
 
@@ -497,7 +497,7 @@ parent correlation + `ffts_ctx_id` 精确映射到同 `contextId`，kind mismatc
 
 这正是必须同时输出 graph parent correlation 的原因。
 
-### 8.3 schema v3/v4 的关联机制
+### 8.3 schema v3～v4 的关联机制
 
 生产端在首个有效 FFts context 上创建 thread-local pending graph，分配
 `graph_instance_id`。同一构图批次的每条语义输出：
@@ -539,7 +539,7 @@ thread-local 单 pending slot。
 ### 8.4 版本与精确匹配规则
 
 - semantic v1、无 `schema_version` 和旧空格 token 记录直接拒绝；
-- semantic v2/v3 仅作为已验证数据的迁移输入，新增生产端统一输出 v4；
+- semantic v2/v3 作为已验证数据的迁移输入，生产端统一输出 v4；
 - `task_id + 1`、固定 ordinal 和本地序号 composite heuristic 已从代码及 CLI 删除；
 - direct task 只允许 `task_id/exact`；
 - FFts task 只允许 `ffts_parent_ctx/exact`；
@@ -547,10 +547,10 @@ thread-local 单 pending slot。
 
 对 `test/out` 从原始 plog/msprof 复算结果为：28,502/28,502 semantic exact，
 其中 14,405/14,405 FFts semantic 使用 parent+ctx exact；335 条 graph correlation，
-duplicate 和 invalid 均为 0。精简字段后复算结果保持不变，merged 列数由 47 降至 43。
-DB 主输入不再需要 Chrome HostToDevice `flow_id`，因此当前 merged 列数进一步降至 42。
-DEP-002 增加两个紧凑 operation scope 字段后 merged 合同曾为 44 列；schema v4 删除
-`semantic_seq/profiler_seq` 后为 42 列，未重新引入原始 `op_name/group_name/opId`。
+duplicate 和 invalid 均为 0。精简字段后复算结果保持不变。DB 主输入不再需要 Chrome
+HostToDevice `flow_id`，schema v4 的 merged 合同为 42 列。原始
+`op_name/group_name/opId` 不写入 merged CSV；`(group_name, op_name)` 只生成稳定的
+`profiler_op_scope` 摘要。
 
 ### 8.5 msprof DB 主输入合同
 
@@ -616,8 +616,10 @@ execution graph 是规范事实层；resource graph 是它的确定性派生视�
   不得用于跨 device/rank 连接；
 - 同一输入中重复 execution identity 是硬错误，不能用行号静默拆成两个节点。
 
-operation scope 来源于 DB 的 `(node_id, group_name, op_name)`，输出为不暴露原始名称的
-`profiler_op_scope` 稳定摘要。`opId` 仅在同一 `(node_id, device_id)` 内验证
+operation scope 来源于 DB 的 `(group_name, op_name)`，输出为不暴露原始名称的
+`profiler_op_scope` 稳定摘要。`group_name` 防止仅凭 `op_name` 中通信域 hash 后三位
+发生短 ID 碰撞；`op_name` 按 opaque 值使用，不解析后缀作为私有格式合同。`opId` 仅在
+同一 `(node_id, device_id)` 内验证
 `opId <-> (group_name, op_name)` 是否一一映射。每个 physical execution 同时输出：
 
 - `unique`：本地引用与 scope 一一对应，可作为后续 operation 分区证据；
@@ -626,6 +628,8 @@ operation scope 来源于 DB 的 `(node_id, group_name, op_name)`，输出为不
 
 operation scope 状态与 semantic-profiler 的 `match_status/match_confidence` 正交：一个
 semantic 可以 exact 匹配 physical task，但 operation scope 仍可能 missing/ambiguous。
+同一次分析输入必须只包含同一个 profile run；跨多次采集汇总时，需要由输入 manifest
+额外提供统一的 `profile_run_id` 作为外层边界，不能让每个节点独立生成。
 
 #### 8.6.2 边、证据与歧义
 
@@ -902,14 +906,15 @@ FFts exact Notify 4,676、single 28 均不变。
 - 无显式 epoch 的整数 wrap 会复用历史 identity；
 - collective 并发或调用序差异无法由本地计数检测。
 
-因此 DEP-007 被 ID-001～ID-004 阻塞，当前不向 schema 写入伪
-`dependency_token/protocol_seq`。正确生产合同应由 invocation 与 transport 两层共同提供：
+msprof DB 的 `(group_name, op_name)` 已提供 collective invocation 分区，但 transport
+occurrence 层仍缺失，因此当前仍不向 schema 写入伪 `dependency_token/protocol_seq`。
+完整合同应由 DB operation scope 与 transport token 共同提供：
 
 ```text
 dependency token =
 (
-  op_instance_id,
-  retry_generation,
+  group_name,
+  op_name,
   channel_id,
   producer_rank,
   consumer_rank,
@@ -918,11 +923,55 @@ dependency token =
 )
 ```
 
-`op_instance_id/retry_generation` 隔离 collective invocation 与重试，channel 隔离并行
-transport，协议序号隔离同一资源的连续 occurrence；序号耗尽时必须转入 invalid/新 epoch，
-不能静默回绕。该合同需要先完成并序列化 ID-004，再在 transport 协议层赋值，并由新设备
-采集验证正常、并发、retry、channel 与 wrap/饱和边界。仅增加未赋值字段或本地计数器不视为
-DEP-007 完成。
+尚需 channel 隔离并行 transport、协议序号隔离同一 resource 的连续 occurrence。下一步
+应在 transport 协议层赋值，并由新设备采集验证正常、并发、retry、channel 与
+wrap/饱和边界。operation scope 单独仍不能区分同一 collective 内对同一 Notify resource
+的多次 record/wait，故 DEP-007 继续阻塞，阻塞原因是缺少共享
+channel/protocol occurrence token。
+
+### 8.12 msprof operation identity 合同（ID-001～ID-005 撤销）
+
+生产端不再生成 `op_instance_id/retry_generation`。collective invocation 在 semantic 与
+physical TASK exact 合并后，由 consolidated msprof DB 提供：
+
+```text
+OperationIdentity = (group_name, op_name)
+```
+
+- `group_name`、`op_name` 来自 `COMMUNICATION_OP -> STRING_IDS`。
+- `op_name` 是 msprof 的完整 opaque operation 名，例如
+  `hcom_allReduce__612_0_1`；工具不依赖各后缀段的长期格式。
+- 文档说明 `612` 这类第一段是通信域 hash 后三位，不能单独承担通信域唯一性；
+  因此规范 identity 同时包含 `group_name`。
+- 当前 `test/out` 的 `group_name` 为 `group_name_0`，不是完整 hash。工具只能验证
+  DB 内本地 `opId <-> (group_name, op_name)` 一一映射，并要求同一次分析输入属于同一个
+  profile run；不能声称该名称跨独立采集全局唯一。
+- `opId` 和 operation connection 是单 DB 本地引用，只用于映射验证和诊断，不进入
+  跨 device/rank identity。
+- 名称缺失、一对多或多对一时，operation scope 标记 `missing/ambiguous`，不得按时间、
+  行号或本地 ID 猜测。
+
+物理匹配与 operation ownership 仍是两层合同：
+
+```text
+semantic <-> profiler:
+(node_id, device_id, stream_id, task_id)
+或 FFts parent + context
+
+collective invocation:
+(group_name, op_name)
+```
+
+当前实现把 tuple 编码为 `profiler_op_scope` 稳定摘要；同一 profile run 内跨 device/node
+的相同 tuple 得到相同 scope。跨多次采集汇总时，由输入 manifest 增加统一
+`profile_run_id` 外层边界。若同一采集内 graph replay 或 retry 复用了相同 `op_name`，
+该 tuple 也无法区分 attempt，必须从 msprof 或设备侧获得独立 execution epoch；不得恢复
+HCOMM 本地自增数冒充跨 rank 共享身份。
+
+撤销后，HCOMM 不再承担 communicator 锁、map/set、FNV 哈希、`OpParam` 传播、
+operation TLS、worker 快照或额外 plog 字段。semantic schema 保持 v4，merged 合同为
+42 列。当前 `test/out` 回放为 28,502/28,502 exact、44,008 个 physical task、7 个
+operation scope；38 项 Python 单测覆盖跨 device/node 一致性、group 隔离和本地映射歧义。
 
 ## 9. 兼容性与非目标
 
@@ -941,7 +990,9 @@ PROFILER_TRACE_EX
 当前改动也没有：
 
 - 为所有 ring/mesh/hierarchical/NHR/RDMA/AIV 算法补齐 phase scope；
-- 生成跨节点统一的 collective invocation id；
+- 为 direct Notify 生成 channel/protocol occurrence token；
+- 为 ACL graph 每次 device replay 生成执行 epoch；
+- 为 graph replay/retry 提供独立 attempt identity；
 - 提供跨节点时钟校准；
 - 生成 wait interval、NHR dependency 或 critical path artifact。
 
@@ -958,11 +1009,12 @@ PROFILER_TRACE_EX
 
 ### P1：正确性与精确关联
 
-1. **缺少 op instance。** `opId/opType` 虽存在于结构体，但当前不赋值、不序列化，
-   多轮 AllReduce 的语义配对可能串轮。
-2. **FFts correlation 已通过 v2 设备数据验收，v4 仍需构建确认。** `test/out` 已证明
-   `graph_instance_id/ffts_ctx_id` 和 graph parent correlation 能 100% exact；
-   v4 删除本地序号，但仍需 HCOMM 构建和一轮短采集确认格式。
+1. **operation 名称有采集边界。** 当前 `group_name=group_name_0` 是导出编号，不是完整
+   hash；同一次输入可按 `(group_name, op_name)` 分区，跨独立 profile run 必须增加统一
+   run boundary。graph replay/retry 是否复用名字仍需专门采集验证。
+2. **FFts correlation 已通过设备数据验收。** `test/out` 已证明
+   `graph_instance_id/ffts_ctx_id` 和 graph parent correlation 能 100% exact；移除实例字段
+   后仍需 HCOMM 构建和一轮短采集确认 schema v4 格式。
 3. **vector 只标首任务。** `traceXxx` 布尔量牺牲了完整 slice/subtask 语义覆盖。
 4. **AIV 只有 probe。** 专用 AIV Save 路径不会产生完整 `[HcclTaskSemantic]`。
 5. **空 task 语义行为未定义。** 返回成功但不执行 report/probe 的 Save 重载是否对应
@@ -973,14 +1025,15 @@ PROFILER_TRACE_EX
 ### P2：可维护性与资源
 
 1. **字符串是裸指针。** 当前字面量安全，但 API 没有表达或强制生命周期要求。
-2. **当前没有 C++ 单元测试。** 开关缓存、嵌套恢复、one-shot、capture stream、
-   graph instance 并发和提前返回均缺少直接回归测试。
+2. **当前没有 C++ 单元测试。** 开关缓存、one-shot、capture stream、graph instance
+   并发和提前返回均缺少直接回归测试。
 3. **`profiler_manager_impl.cc` 是无功能格式变更。** 应避免与功能提交混合，降低审查噪声。
 
 ## 11. 当前可验证的验收口径
 
-P0 消费端止错和 P1 correlation 代码已经实现，但新 schema 尚未经过 HCOMM 构建和设备侧
-重新采集，因此当前实现仍应视为 single-ring direct 的实验性生产端。设备验收至少需要满足：
+P0 消费端止错、P1 correlation 和 schema v4 消费代码已经实现，但撤销实例字段后的生产端
+尚未经过 HCOMM 构建和设备侧重新采集，因此当前实现仍应视为 single-ring direct 的实验性
+生产端。设备验收至少需要满足：
 
 1. HCOMM 自身构建通过；
 2. `HCCL_STEP_TRACE=0` 时无语义日志且功能结果与 8.5.0 一致；
@@ -993,4 +1046,8 @@ P0 消费端止错和 P1 correlation 代码已经实现，但新 schema 尚未�
    `ffts_parent_ctx_matches > 0`；
 7. 普通 task 和新采集 composite task 均必须 exact；工具不再提供 ordinal heuristic；
 8. 测试算法强制逻辑不进入生产默认选择；
-9. 开销测试覆盖开关关闭与开启两种状态。
+9. 同一 collective invocation 在各 rank/device 上得到相同 `(group_name, op_name)`，
+   连续 AllReduce 的 `op_name` 不同，本地 `opId` 映射无歧义；
+10. 多通信域、graph replay 与 retry 采集验证 operation 名称是否唯一；不唯一时必须
+    输出 missing/ambiguous 或新增明确 execution epoch，不能按时间猜测；
+11. 开销测试覆盖开关关闭与开启两种状态。
