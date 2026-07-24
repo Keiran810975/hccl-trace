@@ -9,8 +9,11 @@
 plog semantic ─┐
                ├─ merge_timeline.py ── merged.csv
 msprof DB ─────┘                         ├─ validate_trace.py
-                                        ├─ visualize_dependency_graph.py → node/edge/ambiguity CSV
-                                        └─ visualize_html.py → interactive HTML
+                                        ├─ visualize_dependency_graph.py
+                                        │    ├─ execution node/edge/ambiguity CSV
+                                        │    └─ resource node/edge/ambiguity CSV
+                                        ├─ validate_dependency_graph.py
+                                        └─ visualize_html.py → HTML/SVG
 ```
 
 DB 解析从 `TASK` 保留物理 stream/task/context、`connection_id` 和整数纳秒起止时间，
@@ -60,23 +63,50 @@ semantic schema v1、无版本日志和旧空格 token 格式已不再支持。�
 
 ```bash
 python -m tools.diagnosis.visualize_dependency_graph merged.csv \
-  -o dependency
+  -o dep_graph
 
-python -m tools.diagnosis.visualize_html merged.csv \
-  --view dependency \
-  --output dependency.html
+python -m tools.diagnosis.visualize_html dep_graph_nodes.csv \
+  --edges-csv dep_graph_edges.csv \
+  --view execution \
+  --output dependency_execution.html
+
+python -m tools.diagnosis.visualize_html dep_graph_resource_nodes.csv \
+  --edges-csv dep_graph_resource_edges.csv \
+  --view resource \
+  --output dependency.html \
+  --svg-output dependency_resource.svg
+
+python -m tools.diagnosis.validate_dependency_graph dep_graph \
+  --summary-output dep_graph_gate_summary.csv
 ```
 
 execution node 使用
 `(node, device, physical stream, task, subtask, connection)` 的稳定摘要作为
 `graph_id`，CSV 重排和时间精度变化不会改变 ID；重复 physical identity 是硬错误。
-node/edge CSV 当前标记 `graph_schema_version=3`。execution graph 保留 Notify，
-resource graph 的控制收缩合同见 `spec.md`，尚由后续 DEP-012 实现。
+node/edge CSV 当前标记 `graph_schema_version=4`。execution graph 保留 Notify；
+resource graph 只保留 `sdma/rdma/reduce_inline/reduce_tbe` 资源任务，并把唯一可达的
+`resource -> record -> wait -> resource` 控制链收缩为资源边。资源节点继续复用 execution
+`graph_id`；缺少一侧资源任务时生成稳定 boundary，多候选时只写 ambiguity，不做笛卡尔积。
 
 edge ID 由 `(graph_schema_version, kind, src, dst, relation_id)` 生成稳定摘要，nodes/edges
 按稳定 ID 输出；CSV 行序不表示同步 occurrence。每次导出同时生成
 `dependency_summary.csv`，统计重复 ID、缺失端点、自环、root/leaf、孤立节点、
 cycle residual、edge kind 和 Notify ambiguity。重复 ID、缺失端点或自环会阻止导出。
+
+resource edge 保存 `source_execution_edge_ids/control_graph_ids/record_graph_id/wait_graph_id`，
+可反查完整控制证据。Notify 同步边还输出：
+
+- `wait_span_ns`：wait 节点本地持续时间，也是当前同步边 `weight_ns`；
+- `remote_block_ns/post_signal_ns`：同节点时，以 record 完成时刻切分 wait span 的观测值；
+- `handoff_gap_ns`：wait 完成到下游资源任务开始的非负间隔；
+- `timing_status`：跨节点未校准时为 `cross_node_uncalibrated`，此时不输出
+  `remote_block_ns/post_signal_ns`，避免比较不同节点时钟。
+
+依赖图 HTML/SVG 只读取已导出的 node/edge artifact，不在布局代码中重新推断依赖。
+`validate_dependency_graph.py` 对 execution/resource 的重复 ID、缺失端点、自环、环、
+Notify/收缩歧义及禁用伪边做门禁，并显式统计 stream/sync/payload/boundary。
+`ffts_physical_stream_order`、默认 `time_inferred` 和旧 `notify_sync_inferred` 必须为 0。
+可用 `--golden-summary` 固定期望统计；任何未更新的统计变化都会使门禁失败。
 
 依赖边包含证据等级：
 

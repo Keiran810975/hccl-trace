@@ -131,6 +131,12 @@ MERGE_LOG="${OUT_DIR}/merge.log"
 VALIDATE_LOG="${OUT_DIR}/validate.log"
 TIMELINE_SVG="${OUT_DIR}/timeline.svg"
 DEPENDENCY_HTML="${OUT_DIR}/dependency.html"
+DEPENDENCY_EXECUTION_HTML="${OUT_DIR}/dependency_execution.html"
+DEPENDENCY_EXECUTION_SVG="${OUT_DIR}/dependency_execution.svg"
+DEPENDENCY_RESOURCE_SVG="${OUT_DIR}/dependency_resource.svg"
+DEPENDENCY_PREFIX="${OUT_DIR}/dep_graph"
+DEPENDENCY_GATE_LOG="${OUT_DIR}/dependency_validate.log"
+DEPENDENCY_GATE_SUMMARY="${OUT_DIR}/dep_graph_gate_summary.csv"
 TIMELINE_HTML="${OUT_DIR}/timeline_time.html"
 
 echo "[step-trace] Merging semantic plog and msprof profiler events"
@@ -155,15 +161,38 @@ PYTHONPATH="${ROOT_DIR}/hccl" "${PYTHON_BIN}" -m tools.diagnosis.merge_timeline 
     "${MERGE_ARGS[@]}" \
     2>&1 | tee "${MERGE_LOG}"
 
+echo "[step-trace] Exporting execution and resource dependency artifacts"
+PYTHONPATH="${ROOT_DIR}/hccl" "${PYTHON_BIN}" -m tools.diagnosis.visualize_dependency_graph \
+    "${MERGED_CSV}" \
+    --output-prefix "${DEPENDENCY_PREFIX}"
+
+echo "[step-trace] Validating dependency artifacts"
+PYTHONPATH="${ROOT_DIR}/hccl" "${PYTHON_BIN}" -m tools.diagnosis.validate_dependency_graph \
+    "${DEPENDENCY_PREFIX}" \
+    --summary-output "${DEPENDENCY_GATE_SUMMARY}" \
+    2>&1 | tee "${DEPENDENCY_GATE_LOG}"
+
 if [[ "${VISUALIZE}" == "1" ]]; then
     echo "[step-trace] Rendering timeline SVG"
     PYTHONPATH="${ROOT_DIR}/hccl" "${PYTHON_BIN}" -m tools.diagnosis.visualize_timeline \
         "${MERGED_CSV}" \
         --output "${TIMELINE_SVG}"
 
-    echo "[step-trace] Rendering physical dependency HTML"
+    echo "[step-trace] Rendering execution dependency HTML/SVG from artifacts"
     PYTHONPATH="${ROOT_DIR}/hccl" "${PYTHON_BIN}" -m tools.diagnosis.visualize_html \
-        "${MERGED_CSV}" --view dependency --output "${OUT_DIR}/dependency.html"
+        "${DEPENDENCY_PREFIX}_nodes.csv" \
+        --edges-csv "${DEPENDENCY_PREFIX}_edges.csv" \
+        --view execution \
+        --output "${DEPENDENCY_EXECUTION_HTML}" \
+        --svg-output "${DEPENDENCY_EXECUTION_SVG}"
+
+    echo "[step-trace] Rendering resource dependency HTML/SVG from artifacts"
+    PYTHONPATH="${ROOT_DIR}/hccl" "${PYTHON_BIN}" -m tools.diagnosis.visualize_html \
+        "${DEPENDENCY_PREFIX}_resource_nodes.csv" \
+        --edges-csv "${DEPENDENCY_PREFIX}_resource_edges.csv" \
+        --view resource \
+        --output "${DEPENDENCY_HTML}" \
+        --svg-output "${DEPENDENCY_RESOURCE_SVG}"
 
     echo "[step-trace] Rendering fine-grained interactive time view"
     PYTHONPATH="${ROOT_DIR}/hccl" "${PYTHON_BIN}" -m tools.diagnosis.visualize_html \
@@ -180,8 +209,11 @@ echo "[step-trace] PASS"
 echo "  merged:   ${MERGED_CSV}"
 echo "  summary:  ${SUMMARY_CSV}"
 echo "  validate: ${VALIDATE_LOG}"
+echo "  dependency gate: ${DEPENDENCY_GATE_LOG}"
+echo "  dependency summary: ${DEPENDENCY_GATE_SUMMARY}"
 if [[ "${VISUALIZE}" == "1" ]]; then
     echo "  timeline:   ${TIMELINE_SVG}"
-    echo "  dependency: ${DEPENDENCY_HTML}"
+    echo "  execution dependency: ${DEPENDENCY_EXECUTION_HTML}"
+    echo "  resource dependency:  ${DEPENDENCY_HTML}"
     echo "  time HTML:  ${TIMELINE_HTML}"
 fi

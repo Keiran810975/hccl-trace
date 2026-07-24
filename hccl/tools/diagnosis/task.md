@@ -336,31 +336,40 @@
 
 ### DEP-012 折叠 resource graph
 
-- [ ] **仓库**：HCCL
+- [x] **仓库**：HCCL
 - **依赖**：DEP-011
-- **工作**：按可达关系收缩 `resource -> record -> wait -> resource`；缺端使用 boundary。
-- **验收**：resource edge 可反查原始 Notify，分支和控制链不丢关系。
+- **完成**：显式保留 `sdma/rdma/reduce_inline/reduce_tbe`，沿 execution order 搜索首个
+  resource frontier，收缩 order、Notify 与 payload 控制链；缺端生成稳定 boundary，
+  多 frontier 写 ambiguity 且不做候选笛卡尔积。
+- **验收**：每条 resource edge 保存原 execution edge、control node、record/wait 和
+  relation ID。当前 DB 为 11,432 nodes、22,245 edges、0 boundary、0 contraction ambiguity。
 
 ### DEP-013 计算同步边时间指标
 
-- [ ] **仓库**：HCCL
+- [x] **仓库**：HCCL
 - **依赖**：DEP-012
-- **工作**：输出 `wait_span_ns/remote_block_ns/post_signal_ns/handoff_gap_ns`。
-- **验收**：边界时间有测试；未校准的跨节点边不计算可比较权重。
+- **完成**：输出 `wait_span_ns/remote_block_ns/post_signal_ns/handoff_gap_ns` 和
+  `timing_status`；Notify `weight_ns=wait_span_ns`。同节点围绕 record 完成时刻做观测分解；
+  未校准跨节点不输出 remote/post 跨时钟差。
+- **验收**：单测覆盖本地边界、跨节点留空和 handoff；指标采用 Decimal 微秒转纳秒。
 
 ### DEP-014 支持 execution/resource 双视图
 
-- [ ] **仓库**：HCCL
+- [x] **仓库**：HCCL
 - **依赖**：DEP-011、DEP-012、DEP-013
-- **工作**：SVG/HTML 只消费共享 artifact，不在布局层推断依赖。
-- **验收**：两种视图共享稳定 ID；resource 视图展示边指标和 evidence。
+- **完成/验收**：HTML/SVG 均从导出的 node/edge CSV 构建，不在布局层调用依赖推断；
+  execution/resource 真实任务共享 `graph_id`，resource 详情显示 evidence 与等待指标。
 
 ### DEP-015 建立依赖图门禁
 
-- [ ] **仓库**：HCCL
+- [x] **仓库**：HCCL
 - **依赖**：DEP-014
-- **工作**：统计 stream、sync、payload、ambiguity、环、boundary 和伪边删除。
-- **验收**：FFts 伪顺序和默认 time-inferred 均为 0；golden 变化需说明。
+- **完成**：`validate_dependency_graph.py` 同时门禁 execution/resource 完整性、Notify/
+  收缩歧义、环与禁用边，输出 stream/sync/payload/boundary 分类统计，支持
+  `--golden-summary` 精确比较。
+- **验收**：当前 DB 中 FFts physical-stream 伪顺序、默认 time-inferred、旧 inferred
+  Notify、cycle、boundary 和 contraction ambiguity 均为 0；graph schema 升级到 v4，
+  51 项 Python 单测通过。资源图新增统计及 schema 变化已在 `spec.md` 解释。
 
 ## 8. M5：覆盖矩阵
 

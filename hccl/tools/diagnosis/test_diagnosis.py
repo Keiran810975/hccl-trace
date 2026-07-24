@@ -42,6 +42,11 @@ if __package__ in (None, ""):
     )
     from diagnosis.visualize_html import build_execution_dependency_model
     from diagnosis.visualize_timeline import assign_time_slots
+    from diagnosis.resource_dependency_graph import build_resource_graph
+    from diagnosis.validate_dependency_graph import (
+        HARD_ZERO_METRICS,
+        validate_dependency_artifacts,
+    )
 else:
     from .dependency_model import (
         NOTIFY_SEQUENCE_DB_ORDINAL,
@@ -71,6 +76,11 @@ else:
     )
     from .visualize_html import build_execution_dependency_model
     from .visualize_timeline import assign_time_slots
+    from .resource_dependency_graph import build_resource_graph
+    from .validate_dependency_graph import (
+        HARD_ZERO_METRICS,
+        validate_dependency_artifacts,
+    )
 
 
 def profiler_task(
@@ -269,6 +279,25 @@ def direct_notify_row(
         "_slice": 5 if event else -1,
     })
     return row
+
+
+def dependency_edge(kind, src, dst, edge_id, relation_id=""):
+    return {
+        "graph_schema_version": "4",
+        "edge_id": edge_id,
+        "kind": kind,
+        "src": src,
+        "dst": dst,
+        "reason": "fixture",
+        "evidence": "fixture",
+        "confidence": "exact",
+        "relation_id": relation_id,
+        "semantic_status": "both",
+        "signal_kind": "ack",
+        "phase": "reduce_scatter_direct",
+        "step": "0",
+        "slice": "0",
+    }
 
 
 class DiagnosisToolTest(unittest.TestCase):
@@ -1017,6 +1046,227 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertEqual(summary["edge_count"], "1")
         self.assertEqual(summary["missing_edge_sources"], "0")
         self.assertEqual(summary["cycle_residual_nodes"], "0")
+
+    def test_resource_graph_contracts_notify_control_chain_and_metrics(self):
+        resource_before = execution_row(0, 45, 1, 0)
+        record = execution_row(1, 45, 2, 2, kind="notify_record")
+        wait = execution_row(2, 13, 1, 1, kind="notify_wait")
+        wait["_stop"] = 4.0
+        wait["_duration"] = 3.0
+        resource_after = execution_row(3, 13, 2, 5)
+        edges = [
+            dependency_edge(
+                "direct_stream_order_observed", "p0", "p1", "e_order_a"
+            ),
+            dependency_edge(
+                "direct_notify_sync_exact",
+                "p1",
+                "p2",
+                "e_notify",
+                "dnr_fixture",
+            ),
+            dependency_edge(
+                "direct_stream_order_observed", "p2", "p3", "e_order_b"
+            ),
+        ]
+
+        nodes, resource_edges, ambiguities = build_resource_graph(
+            [resource_before, record, wait, resource_after],
+            edges,
+        )
+
+        self.assertEqual({row["_graph_id"] for row in nodes}, {"p0", "p3"})
+        self.assertEqual(ambiguities, [])
+        self.assertEqual(len(resource_edges), 1)
+        edge = resource_edges[0]
+        self.assertEqual(edge["kind"], "resource_notify_sync_exact")
+        self.assertEqual((edge["src"], edge["dst"]), ("p0", "p3"))
+        self.assertEqual(edge["relation_id"], "dnr_fixture")
+        self.assertEqual(edge["wait_span_ns"], "3000")
+        self.assertEqual(edge["remote_block_ns"], "2000")
+        self.assertEqual(edge["post_signal_ns"], "1000")
+        self.assertEqual(edge["handoff_gap_ns"], "1000")
+        self.assertEqual(edge["weight_ns"], "3000")
+        self.assertEqual(edge["timing_status"], "same_node_observed")
+        self.assertEqual(
+            set(edge["source_execution_edge_ids"].split(";")),
+            {"e_order_a", "e_notify", "e_order_b"},
+        )
+        self.assertEqual(
+            set(edge["control_graph_ids"].split(";")),
+            {"p1", "p2"},
+        )
+
+    def test_resource_graph_cross_node_does_not_compare_remote_timestamps(self):
+        before = execution_row(0, 45, 1, 0)
+        record = execution_row(1, 45, 2, 2, kind="notify_record")
+        wait = execution_row(2, 13, 1, 1, kind="notify_wait")
+        after = execution_row(3, 13, 2, 5)
+        wait["_node_id"] = "node1"
+        after["_node_id"] = "node1"
+        edges = [
+            dependency_edge(
+                "direct_stream_order_observed", "p0", "p1", "e_order_a"
+            ),
+            dependency_edge(
+                "direct_notify_sync_exact",
+                "p1",
+                "p2",
+                "e_notify",
+                "dnr_fixture",
+            ),
+            dependency_edge(
+                "direct_stream_order_observed", "p2", "p3", "e_order_b"
+            ),
+        ]
+
+        _, resource_edges, _ = build_resource_graph(
+            [before, record, wait, after], edges
+        )
+        edge = resource_edges[0]
+
+        self.assertEqual(edge["timing_status"], "cross_node_uncalibrated")
+        self.assertEqual(edge["wait_span_ns"], "1000")
+        self.assertEqual(edge["weight_ns"], "1000")
+        self.assertEqual(edge["remote_block_ns"], "")
+        self.assertEqual(edge["post_signal_ns"], "")
+        self.assertEqual(edge["handoff_gap_ns"], "3000")
+
+    def test_resource_graph_uses_boundary_for_missing_resource_endpoint(self):
+        record = execution_row(0, 45, 1, 2, kind="notify_record")
+        wait = execution_row(1, 13, 1, 1, kind="notify_wait")
+        after = execution_row(2, 13, 2, 5)
+        edges = [
+            dependency_edge(
+                "direct_notify_sync_exact",
+                "p0",
+                "p1",
+                "e_notify",
+                "dnr_fixture",
+            ),
+            dependency_edge(
+                "direct_stream_order_observed", "p1", "p2", "e_order_b"
+            ),
+        ]
+
+        nodes, resource_edges, ambiguities = build_resource_graph(
+            [record, wait, after], edges
+        )
+
+        boundaries = [
+            row for row in nodes if row.get("_node_kind") == "boundary"
+        ]
+        self.assertEqual(len(boundaries), 1)
+        self.assertEqual(boundaries[0]["_boundary_side"], "upstream")
+        self.assertEqual(len(resource_edges), 1)
+        self.assertEqual(resource_edges[0]["src"], boundaries[0]["_graph_id"])
+        self.assertEqual(resource_edges[0]["dst"], "p2")
+        self.assertEqual(ambiguities, [])
+
+    def test_resource_graph_does_not_cross_product_multiple_frontiers(self):
+        first = execution_row(0, 45, 1, 0)
+        second = execution_row(1, 46, 1, 0)
+        record = execution_row(2, 47, 1, 2, kind="notify_record")
+        wait = execution_row(3, 13, 1, 1, kind="notify_wait")
+        after = execution_row(4, 13, 2, 5)
+        edges = [
+            dependency_edge(
+                "direct_stream_order_observed", "p0", "p2", "e_order_a"
+            ),
+            dependency_edge(
+                "direct_stream_order_observed", "p1", "p2", "e_order_b"
+            ),
+            dependency_edge(
+                "direct_notify_sync_exact",
+                "p2",
+                "p3",
+                "e_notify",
+                "dnr_fixture",
+            ),
+            dependency_edge(
+                "direct_stream_order_observed", "p3", "p4", "e_order_c"
+            ),
+        ]
+
+        _, resource_edges, ambiguities = build_resource_graph(
+            [first, second, record, wait, after], edges
+        )
+
+        self.assertFalse(any(
+            edge["kind"] == "resource_notify_sync_exact"
+            for edge in resource_edges
+        ))
+        self.assertEqual(len(ambiguities), 1)
+        self.assertEqual(ambiguities[0]["upstream_resource_count"], 2)
+        self.assertEqual(ambiguities[0]["downstream_resource_count"], 1)
+
+    def test_dependency_gate_rejects_forbidden_inference_edge(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            execution_summary = root / "execution_summary.csv"
+            resource_summary = root / "resource_summary.csv"
+            execution_edges = root / "execution_edges.csv"
+            resource_edges = root / "resource_edges.csv"
+            summary_fields = ["metric", "value"]
+            for path, rows in (
+                (
+                    execution_summary,
+                    [
+                        {"metric": metric, "value": "0"}
+                        for metric in (
+                            *HARD_ZERO_METRICS,
+                            "notify_relation_ambiguous",
+                            "notify_relation_incomplete",
+                            "notify_relation_conflict",
+                        )
+                    ],
+                ),
+                (
+                    resource_summary,
+                    [
+                        {"metric": metric, "value": "0"}
+                        for metric in (
+                            *HARD_ZERO_METRICS,
+                            "contraction_ambiguities",
+                            "boundary_nodes",
+                        )
+                    ],
+                ),
+            ):
+                with path.open("w", encoding="utf-8", newline="") as output:
+                    writer = csv.DictWriter(output, fieldnames=summary_fields)
+                    writer.writeheader()
+                    writer.writerows(rows)
+            with execution_edges.open(
+                "w", encoding="utf-8", newline=""
+            ) as output:
+                writer = csv.DictWriter(
+                    output, fieldnames=["edge_id", "kind", "src", "dst"]
+                )
+                writer.writeheader()
+                writer.writerow({
+                    "edge_id": "e_forbidden",
+                    "kind": "notify_sync_inferred",
+                    "src": "a",
+                    "dst": "b",
+                })
+            with resource_edges.open(
+                "w", encoding="utf-8", newline=""
+            ) as output:
+                writer = csv.DictWriter(
+                    output, fieldnames=["edge_id", "kind", "src", "dst"]
+                )
+                writer.writeheader()
+            ok, stats, failures = validate_dependency_artifacts(
+                execution_summary,
+                execution_edges,
+                resource_summary,
+                resource_edges,
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(stats["forbidden_edge_count"], 1)
+        self.assertTrue(any("forbidden_edge_count" in item for item in failures))
 
     def test_ffts_order_is_rebuilt_per_semantic_logical_stream(self):
         rows = [

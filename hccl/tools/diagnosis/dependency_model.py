@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 
-GRAPH_SCHEMA_VERSION = 3
+GRAPH_SCHEMA_VERSION = 4
 
 OPERATION_SCOPE_UNIQUE = "unique"
 OPERATION_SCOPE_MISSING = "missing"

@@ -598,7 +598,8 @@ execution graph 是规范事实层；resource graph 是它的确定性派生视�
 删除。只有在 producer/consumer 与控制节点关系均已唯一确认时，resource graph 才可把
 `payload_before -> notify_record -> notify_wait -> payload_after` 收缩为一条同步边。收缩边
 至少保留原始 control node ID、relation identity、evidence 和 ambiguity 状态；缺失、多候选
-或冲突时保留控制节点，不猜测收缩。
+或冲突时不猜测收缩。控制节点始终保留在 execution artifact；resource artifact 对缺失端
+生成稳定 boundary，对多候选输出 ambiguity 并禁止候选笛卡尔积。
 
 #### 8.6.1 稳定身份
 
@@ -670,18 +671,60 @@ duplicate、missing endpoint 或 self-loop 会阻止 artifact 导出。cycle res
 execution graph 的执行节点保存 `task_start/task_stop/duration`，顺序/同步边本身不把
 `duration` 重复解释为耗时。resource graph 的边权按以下口径生成：
 
-- 普通先后边权为 `0`；
-- 已唯一收缩的 Notify 同步边，等待权重为 consumer 可执行时刻减去其已满足前驱时刻，
-  下限为 `0`；
-- 无法唯一确定满足时刻时权重为 unknown，不使用跨 stream 的 wall-clock 最近值填充。
+- 普通顺序边不输出等待权重；
+- `wait_span_ns = max(0, wait.stop - wait.start)`，来自 wait 所在设备的本地 DB 时间；
+  当前 Notify 同步边的 `weight_ns` 使用该值；
+- 同节点时，以 `record.stop` 将 wait span 截断分成
+  `remote_block_ns` 与 `post_signal_ns`。两者是围绕 record 完成时刻的观测分解，
+  不宣称等价于硬件内部 Notify 可见时刻；
+- `handoff_gap_ns = max(0, downstream_resource.start - wait.stop)`，只在 wait 与
+  下游资源任务同节点且下游端真实存在时输出；
+- 跨节点且没有时钟校准 artifact 时，`timing_status=cross_node_uncalibrated`，
+  `remote_block_ns/post_signal_ns` 留空，不比较不同节点的绝对时间。wait 本地 duration
+  仍可报告，但不能与其他节点的 wall-clock 权重直接比较。
 
-因此关键路径长度由资源节点 duration 与可证明的同步等待共同组成，避免把 Notify wait
-任务自身 duration 和收缩边等待重复计费。稳定 edge identity 与 summary artifact 引入后，
-图 artifact 使用 `graph_schema_version=3`；未来更改 identity、收缩或权重语义必须升级版本。
+`wait_span_ns` 是控制等待的显式边权；关键路径实现不得再同时把已经收缩的 Notify wait
+节点 duration 加入 resource 图，否则会重复计费。稳定 edge identity、资源收缩和边权合同
+落地后，图 artifact 使用 `graph_schema_version=4`；未来更改 identity、收缩或权重语义必须
+升级版本。
 
 当前 DB replay 的 execution artifact 为 44,008 nodes、53,441 edges、2,059 isolated、
 2,761 roots、2,761 leaves；duplicate node/edge、missing source/destination、self-loop 和
-cycle residual 均为 0。
+cycle residual 均为 0。resource artifact 为 11,432 个资源节点、22,245 条边：
+10,051 条顺序边、10,052 条 Notify 同步边和 2,142 条 payload 边；当前样例 boundary 与
+收缩 ambiguity 均为 0，cycle residual 为 0。32,576 个控制/辅助 execution 不作为 resource
+节点，但其稳定 ID 通过 `control_graph_ids/source_execution_edge_ids` 保留在派生边中。
+
+#### 8.6.4 resource 收缩算法与 artifact
+
+资源任务采用显式白名单 `sdma/rdma/reduce_inline/reduce_tbe`。算法只在 execution graph
+的两种顺序边上搜索首个资源 frontier：
+
+1. 从同步边的 record 端沿顺序边反向搜索，遇到资源任务即停止；
+2. 从 wait 端沿顺序边正向搜索，遇到资源任务即停止；
+3. 两侧各恰好一个 frontier 时生成资源同步边，并合并所有经过的顺序边 ID 和控制节点 ID；
+4. 某侧为零时生成按 `(source edge, relation, side)` 稳定命名的 boundary；
+5. 任一侧多于一个资源 frontier 时写入 `*_resource_ambiguities.csv`，不生成候选组合边。
+
+局部顺序链也按相同“遇到下一个资源任务即停止”规则收缩，派生为
+`resource_stream_order_observed` 或 `resource_ffts_order_observed`。Notify 边分别映射为
+`resource_notify_sync_exact/resource_notify_sync_observed`，payload 映射为
+`resource_payload_semantic`。实际资源节点沿用 execution `graph_id`，因此两种视图可以直接
+互相定位。
+
+导出合同包含：
+
+- `*_resource_nodes.csv`：真实资源节点与必要 boundary；
+- `*_resource_edges.csv`：稳定边、原 execution edge/control node、Notify relation 和时间指标；
+- `*_resource_ambiguities.csv`：多 frontier 候选和不收缩原因；
+- `*_resource_summary.csv`：结构完整性、边类型、boundary、歧义与 timing status。
+
+HTML/SVG 读取这些固定 artifact，不调用构边函数。`validate_dependency_graph.py` 同时读取
+execution/resource summary 与 edge CSV，要求 duplicate、missing endpoint、self-loop、
+cycle residual、Notify ambiguous/incomplete/conflict、resource contraction ambiguity、
+`ffts_physical_stream_order`、默认 time-inferred 和旧 inferred Notify 边为 0。boundary
+默认作为事实统计，可用 `--max-boundary-nodes` 收紧；`--golden-summary` 对指定统计做精确
+比较，统计变化必须先在 spec 中解释再更新 golden。
 
 ### 8.7 单机 stream 顺序规则（DEP-003/DEP-004）
 

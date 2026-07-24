@@ -255,6 +255,96 @@ def read_execution_rows(path: Path) -> List[dict]:
     return rows
 
 
+def read_graph_artifact_nodes(path: Path) -> List[dict]:
+    """Read stable execution/resource node artifacts without rebuilding edges."""
+    rows: List[dict] = []
+    graph_ids = set()
+    with path.open("r", encoding="utf-8-sig", newline="") as source:
+        for index, row in enumerate(csv.DictReader(source)):
+            graph_id = str(row.get("graph_id", "")).strip()
+            if not graph_id:
+                raise ValueError(
+                    "missing graph_id at artifact row {}".format(index + 2)
+                )
+            if graph_id in graph_ids:
+                raise ValueError("duplicate graph_id in artifact: {}".format(graph_id))
+            graph_ids.add(graph_id)
+            start_order = to_decimal(row.get("task_start"))
+            stop_order = to_decimal(row.get("task_stop"))
+            if start_order is None or stop_order is None:
+                raise ValueError(
+                    "missing task time for graph node {}".format(graph_id)
+                )
+            start_order, stop_order = (
+                min(start_order, stop_order),
+                max(start_order, stop_order),
+            )
+            duration = to_decimal(row.get("duration"))
+            if duration is None:
+                duration = stop_order - start_order
+            stream_id = to_int(
+                row.get("profiler_stream_id") or row.get("stream_id")
+            )
+            task_id = to_int(
+                row.get("profiler_task_id") or row.get("task_id")
+            )
+            item = dict(row)
+            item.update({
+                "_source_row": index,
+                "_graph_id": graph_id,
+                "_node_id": row.get("node_id", ""),
+                "_device_id": to_int(row.get("device_id")),
+                "_user_rank": to_int(row.get("user_rank")),
+                "_rank": to_int(row.get("device_id")),
+                "_rank_size": to_int(row.get("rank_size")),
+                "_stream_id": stream_id,
+                "_task_id": task_id,
+                "_subtask_id": to_int(row.get("subtask_id")),
+                "_connection_id": to_int(row.get("connection_id")),
+                "_operation_scope": row.get("profiler_op_scope", ""),
+                "_operation_scope_status": row.get(
+                    "profiler_op_scope_status", ""
+                ),
+                "_peer_rank": to_int(row.get("peer_rank")),
+                "_notify_id": to_int(row.get("notify_id")),
+                "_step": to_int(row.get("step")),
+                "_slice": to_int(row.get("slice")),
+                "_start": float(start_order),
+                "_stop": float(stop_order),
+                "_start_order": start_order,
+                "_stop_order": stop_order,
+                "_duration": float(abs(duration)),
+                "_phase_group": phase_group(row.get("phase", "")),
+                "_node_kind": row.get("node_kind", "execution"),
+                "_boundary_side": row.get("boundary_side", ""),
+                "_boundary_reason": row.get("boundary_reason", ""),
+                "_boundary_relation_id": row.get(
+                    "boundary_relation_id", ""
+                ),
+            })
+            rows.append(item)
+    rows.sort(key=lambda item: item["_graph_id"])
+    return rows
+
+
+def read_graph_artifact_edges(path: Path) -> List[dict]:
+    """Read stable dependency edges exactly as exported."""
+    edges: List[dict] = []
+    edge_ids = set()
+    with path.open("r", encoding="utf-8-sig", newline="") as source:
+        for index, row in enumerate(csv.DictReader(source)):
+            edge_id = str(row.get("edge_id", "")).strip()
+            if not edge_id:
+                raise ValueError(
+                    "missing edge_id at artifact row {}".format(index + 2)
+                )
+            if edge_id in edge_ids:
+                raise ValueError("duplicate edge_id in artifact: {}".format(edge_id))
+            edge_ids.add(edge_id)
+            edges.append(dict(row))
+    return sorted(edges, key=lambda edge: edge["edge_id"])
+
+
 def execution_sort_key(row: dict):
     return (
         row["_node_id"], row["_device_id"], row["_stream_id"],
@@ -1209,6 +1299,21 @@ def main() -> int:
         ambiguity_counts,
         graph_stats,
     ) = export_dependency_tables(args.merged_csv, prefix)
+    if __package__ in (None, ""):
+        from diagnosis.resource_dependency_graph import (
+            export_resource_dependency_tables,
+        )
+    else:
+        from .resource_dependency_graph import (
+            export_resource_dependency_tables,
+        )
+    (
+        resource_nodes_path,
+        resource_edges_path,
+        resource_ambiguities_path,
+        resource_summary_path,
+        resource_stats,
+    ) = export_resource_dependency_tables(nodes_path, edges_path, prefix)
     for kind in PHYSICAL_EDGE_KINDS:
         print(f"{kind}={counts[kind]}")
     for status in (
@@ -1232,7 +1337,22 @@ def main() -> int:
     ):
         print(f"graph_{metric}={graph_stats[metric]}")
     print(f"summary_csv={summary_path}")
-    return 1 if ambiguity_counts[NOTIFY_RELATION_CONFLICT] else 0
+    print(f"resource_nodes_csv={resource_nodes_path}")
+    print(f"resource_edges_csv={resource_edges_path}")
+    print(f"resource_ambiguities_csv={resource_ambiguities_path}")
+    print(f"resource_summary_csv={resource_summary_path}")
+    for label, metric in (
+        ("resource_task_nodes", "resource_task_nodes"),
+        ("resource_boundary_nodes", "boundary_nodes"),
+        ("resource_edge_count", "edge_count"),
+        ("resource_contraction_ambiguities", "contraction_ambiguities"),
+        ("resource_cycle_residual_nodes", "cycle_residual_nodes"),
+    ):
+        print(f"{label}={resource_stats[metric]}")
+    return 1 if (
+        ambiguity_counts[NOTIFY_RELATION_CONFLICT]
+        or resource_stats["contraction_ambiguities"]
+    ) else 0
 
 
 if __name__ == "__main__":
