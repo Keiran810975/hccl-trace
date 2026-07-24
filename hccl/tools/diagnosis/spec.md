@@ -647,8 +647,23 @@ semantic 可以 exact 匹配 physical task，但 operation scope 仍可能 missi
 4. `heuristic`：时间最近、出现顺序 zip 等研究性猜测。
 
 `heuristic` 永远不能标为 exact/observed，也不能默认进入因果图。多个候选必须输出
-ambiguity（候选及原因），不能通过“最近时间”选一个。当前 edge ID 仍是单次导出的顺序号；
-DEP-011 将按上述规范边身份稳定化。
+ambiguity（候选及原因），不能通过“最近时间”选一个。DEP-011 已将 edge ID 实现为上述
+规范元组的稳定摘要；reason、evidence、时间、CSV 行号和构造顺序不进入 identity。同一
+`(kind, src, dst)` 出现不同 relation ID 是硬冲突，稳定摘要碰撞也是硬错误。nodes/edges
+按稳定 ID 排序，消费端不得依赖 CSV 行序表达 ordinal；Notify ordinal 保存在
+`sequence_value`。
+
+execution artifact 使用固定列合同，并额外输出 `*_summary.csv`：
+
+- node/edge 总数及各 edge kind 数量；
+- duplicate node/edge ID；
+- missing source/destination 与 self-loop；
+- root、leaf、isolated node；
+- Kahn 拓扑处理后的 `cycle_residual_nodes/has_cycle`；
+- Notify relation ambiguity 状态计数。
+
+duplicate、missing endpoint 或 self-loop 会阻止 artifact 导出。cycle residual 与 isolated
+先作为事实统计，不在 DEP-011 阶段推断删除；门禁策略属于 DEP-015。
 
 #### 8.6.3 边权与控制收缩
 
@@ -661,8 +676,12 @@ execution graph 的执行节点保存 `task_start/task_stop/duration`，顺序/�
 - 无法唯一确定满足时刻时权重为 unknown，不使用跨 stream 的 wall-clock 最近值填充。
 
 因此关键路径长度由资源节点 duration 与可证明的同步等待共同组成，避免把 Notify wait
-任务自身 duration 和收缩边等待重复计费。direct DB ordinal 引入后图 artifact 使用
-`graph_schema_version=2`；未来更改 identity、收缩或权重语义必须升级版本。
+任务自身 duration 和收缩边等待重复计费。稳定 edge identity 与 summary artifact 引入后，
+图 artifact 使用 `graph_schema_version=3`；未来更改 identity、收缩或权重语义必须升级版本。
+
+当前 DB replay 的 execution artifact 为 44,008 nodes、53,441 edges、2,059 isolated、
+2,761 roots、2,761 leaves；duplicate node/edge、missing source/destination、self-loop 和
+cycle residual 均为 0。
 
 ### 8.7 单机 stream 顺序规则（DEP-003/DEP-004）
 
@@ -1005,7 +1024,7 @@ HCOMM 本地自增数冒充跨 rank 共享身份。
 撤销后，HCOMM 不再承担 communicator 锁、map/set、FNV 哈希、`OpParam` 传播、
 operation TLS、worker 快照或额外 plog 字段。semantic schema 保持 v4，merged 合同为
 42 列。当前 `test/out` 回放为 28,502/28,502 exact、44,008 个 physical task、7 个
-operation scope；43 项 Python 单测覆盖跨 device/node 一致性、group 隔离、本地映射歧义
+operation scope；46 项 Python 单测覆盖跨 device/node 一致性、group 隔离、本地映射歧义
 和 direct Notify ordinal 门禁。
 
 ## 9. 兼容性与非目标

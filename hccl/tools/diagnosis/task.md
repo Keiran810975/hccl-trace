@@ -154,9 +154,10 @@
 - **边界**：当前样例 `group_name=group_name_0`，并非完整 hash；同一次分析输入必须代表
   同一 profile run。多 profile run 汇总需要外层 `profile_run_id`，同名 graph replay/retry
   若被 msprof 复用仍需要独立 execution epoch 证据。
-- **验证**：38 项 Python 单测通过；`test/out` 回放保持 28,502/28,502 exact、
-  44,008 个 physical task、7 个 operation scope、42 列；依赖边仍为 53,777，
-  Notify 为 4,676 observed、28 single、0 ambiguous/incomplete。
+- **验证**：当前 46 项 Python 单测通过；`test/out` 回放保持 28,502/28,502 exact、
+  44,008 个 physical task、7 个 operation scope、42 列。后续 DEP 已将图更新为
+  53,441 条稳定边，其中 direct Notify exact 5,376、FFts observed 4,676、
+  Notify single 28、ambiguous/incomplete/conflict 0。
 
 ## 6. M2：现有语义质量
 
@@ -319,10 +320,19 @@
 
 ### DEP-011 产出 execution graph artifact
 
-- [ ] **仓库**：HCCL
+- [x] **仓库**：HCCL
 - **依赖**：DEP-003、DEP-004、DEP-006、DEP-008、DEP-009、DEP-010
-- **工作**：输出稳定 nodes/edges，保留资源 task、Notify、stream、payload 和证据。
-- **验收**：endpoint 完整、edge identity 唯一，环/孤立/缺失分别统计。
+- **完成**：
+  - node ID 使用既有 physical execution identity；edge ID 使用
+    `(graph_schema_version, kind, src, dst, relation_id)` 的稳定摘要；
+  - nodes/edges 使用固定列合同并按稳定 ID 排序，不依赖构造顺序或 CSV 行序；
+  - 输出 `*_summary.csv`，统计 node/edge、edge kind、Notify ambiguity、重复 ID、
+    缺失端点、自环、root/leaf、孤立节点和 cycle residual；
+  - 重复 ID、缺失 endpoint 或自环是 artifact 完整性硬错误；环和孤立节点先事实记录，
+    由 DEP-015 决定门禁策略。
+- **验证**：当前 DB 为 44,008 nodes、53,441 edges、2,059 isolated、2,761 roots、
+  2,761 leaves；duplicate node/edge、missing source/destination、self-loop、
+  cycle residual 均为 0。graph schema 升级到 v3，46 项 Python 单测通过。
 
 ### DEP-012 折叠 resource graph
 
@@ -495,15 +505,14 @@
 ```text
 HYG-001 + HYG-002 -> E2E-001 -> E2E-002
 
-SEQ-001 -> SEQ-002 + SEQ-003（已完成：删除本地 task sequence）
 CTX-001 -> CTX-002..CTX-005 -> TST-001..TST-005
 
 SEM-001 -> SEM-002
 SEM-003 -> SEM-004 + SEM-005
 
 DEP-001 -> DEP-002 -> DEP-003 + DEP-004
-DEP-001 -> DEP-005 -> DEP-006 + DEP-008（已完成）
-DEP-002 + DEP-005 -> DEP-007 -> DEP-009
+DEP-001 -> DEP-005 -> DEP-006 + DEP-008
+DEP-002 + DEP-005 -> DEP-007 -> DEP-009（已完成）
 DEP-006 + DEP-009 -> DEP-010
 DEP-003..DEP-010 -> DEP-011 -> DEP-012 -> DEP-013 -> DEP-014 -> DEP-015
 

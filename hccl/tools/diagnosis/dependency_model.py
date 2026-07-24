@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 
-GRAPH_SCHEMA_VERSION = 2
+GRAPH_SCHEMA_VERSION = 3
 
 OPERATION_SCOPE_UNIQUE = "unique"
 OPERATION_SCOPE_MISSING = "missing"
@@ -94,6 +94,29 @@ class ExecutionIdentity:
                 self.task_id,
                 self.subtask_id,
                 self.connection_id,
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class DependencyEdgeIdentity:
+    """Stable execution-graph edge identity, independent of export order."""
+
+    kind: str
+    src_graph_id: str
+    dst_graph_id: str
+    relation_id: str = ""
+
+    @property
+    def stable_id(self) -> str:
+        return stable_id(
+            "e",
+            (
+                GRAPH_SCHEMA_VERSION,
+                self.kind,
+                self.src_graph_id,
+                self.dst_graph_id,
+                self.relation_id,
             ),
         )
 

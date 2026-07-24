@@ -35,7 +35,9 @@ if __package__ in (None, ""):
     from diagnosis.schema import GraphCorrelation, ProfilerTask
     from diagnosis.validate_trace import validate_rows
     from diagnosis.visualize_dependency_graph import (
+        analyze_execution_graph,
         build_execution_edges,
+        export_dependency_tables,
         read_execution_rows,
     )
     from diagnosis.visualize_html import build_execution_dependency_model
@@ -62,7 +64,9 @@ else:
     from .schema import GraphCorrelation, ProfilerTask
     from .validate_trace import validate_rows
     from .visualize_dependency_graph import (
+        analyze_execution_graph,
         build_execution_edges,
+        export_dependency_tables,
         read_execution_rows,
     )
     from .visualize_html import build_execution_dependency_model
@@ -694,12 +698,11 @@ class DiagnosisToolTest(unittest.TestCase):
         ]
         self.assertEqual(len(exact), 2)
         self.assertEqual(
-            [(edge["src"], edge["dst"]) for edge in exact],
-            [("p0", "p2"), ("p1", "p3")],
-        )
-        self.assertEqual(
-            [edge["sequence_value"] for edge in exact],
-            ["0", "1"],
+            {
+                edge["sequence_value"]: (edge["src"], edge["dst"])
+                for edge in exact
+            },
+            {"0": ("p0", "p2"), "1": ("p1", "p3")},
         )
         self.assertEqual(
             {edge["sequence_kind"] for edge in exact},
@@ -921,6 +924,99 @@ class DiagnosisToolTest(unittest.TestCase):
         )
         self.assertNotIn(("p1", "p2"), stream_pairs)
         self.assertNotIn(("p2", "p1"), stream_pairs)
+
+    def test_dependency_edge_id_is_stable_across_input_reorder(self):
+        rows = [
+            execution_row(0, 45, 1, 0),
+            execution_row(1, 45, 2, 2),
+            execution_row(2, 45, 3, 4),
+        ]
+
+        forward = build_execution_edges(rows)
+        reverse = build_execution_edges(list(reversed(rows)))
+
+        self.assertEqual(forward, reverse)
+        self.assertEqual(len({edge["edge_id"] for edge in forward}), 2)
+        self.assertTrue(all(
+            edge["edge_id"].startswith("e_") for edge in forward
+        ))
+
+    def test_execution_graph_quality_reports_cycles_isolation_and_missing_endpoints(self):
+        rows = [
+            execution_row(0, 45, 1, 0),
+            execution_row(1, 45, 2, 2),
+            execution_row(2, 13, 1, 0),
+            execution_row(3, 13, 2, 2),
+        ]
+        edges = [
+            {"edge_id": "e_a", "src": "p0", "dst": "p1"},
+            {"edge_id": "e_b", "src": "p1", "dst": "p0"},
+            {"edge_id": "e_c", "src": "missing", "dst": "p2"},
+        ]
+
+        stats = analyze_execution_graph(rows, edges)
+
+        self.assertEqual(stats["node_count"], 4)
+        self.assertEqual(stats["edge_count"], 3)
+        self.assertEqual(stats["missing_edge_sources"], 1)
+        self.assertEqual(stats["missing_edge_destinations"], 0)
+        self.assertEqual(stats["isolated_nodes"], 2)
+        self.assertEqual(stats["cycle_residual_nodes"], 2)
+        self.assertEqual(stats["has_cycle"], 1)
+
+    def test_execution_graph_export_writes_fixed_schema_and_summary(self):
+        source_rows = [
+            {
+                "match_status": "profiler_only",
+                "node_id": "node0",
+                "device_id": "0",
+                "profiler_stream_id": "45",
+                "profiler_task_id": str(task_id),
+                "subtask_id": "-1",
+                "connection_id": "77",
+                "task_start": str(start),
+                "task_stop": str(start + 1),
+                "duration": "1",
+            }
+            for task_id, start in ((1, 100), (2, 102))
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            merged = Path(temp_dir) / "merged.csv"
+            with merged.open("w", encoding="utf-8", newline="") as output:
+                writer = csv.DictWriter(
+                    output, fieldnames=list(source_rows[0])
+                )
+                writer.writeheader()
+                writer.writerows(source_rows)
+            result = export_dependency_tables(
+                merged, Path(temp_dir) / "dependency"
+            )
+            nodes_path, edges_path, _, summary_path = result[:4]
+            with nodes_path.open(
+                "r", encoding="utf-8", newline=""
+            ) as source:
+                node_fields = next(csv.reader(source))
+            with edges_path.open(
+                "r", encoding="utf-8", newline=""
+            ) as source:
+                edge_rows = list(csv.DictReader(source))
+            with summary_path.open(
+                "r", encoding="utf-8", newline=""
+            ) as source:
+                summary = {
+                    row["metric"]: row["value"]
+                    for row in csv.DictReader(source)
+                }
+
+        self.assertEqual(node_fields[:3], [
+            "graph_schema_version", "graph_id", "match_status"
+        ])
+        self.assertEqual(len(edge_rows), 1)
+        self.assertTrue(edge_rows[0]["edge_id"].startswith("e_"))
+        self.assertEqual(summary["node_count"], "2")
+        self.assertEqual(summary["edge_count"], "1")
+        self.assertEqual(summary["missing_edge_sources"], "0")
+        self.assertEqual(summary["cycle_residual_nodes"], "0")
 
     def test_ffts_order_is_rebuilt_per_semantic_logical_stream(self):
         rows = [

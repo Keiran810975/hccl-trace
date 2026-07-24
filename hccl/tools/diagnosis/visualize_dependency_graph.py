@@ -16,6 +16,7 @@ from typing import Dict, List, Tuple
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from diagnosis.dependency_model import (
+        DependencyEdgeIdentity,
         DirectNotifyChannelIdentity,
         DirectNotifyRelationIdentity,
         ExecutionIdentity,
@@ -33,9 +34,10 @@ if __package__ in (None, ""):
         NotifyRelationIdentity,
         normalize_notify_endpoint,
     )
-    from diagnosis.schema import write_csv
+    from diagnosis.schema import MERGED_FIELDS, write_csv
 else:
     from .dependency_model import (
+        DependencyEdgeIdentity,
         DirectNotifyChannelIdentity,
         DirectNotifyRelationIdentity,
         ExecutionIdentity,
@@ -53,7 +55,7 @@ else:
         NotifyRelationIdentity,
         normalize_notify_endpoint,
     )
-    from .schema import write_csv
+    from .schema import MERGED_FIELDS, write_csv
 
 
 EDGE_COLOR = {
@@ -64,6 +66,33 @@ EDGE_COLOR = {
     "peer_payload_semantic": "#1f77b4",
 }
 PHYSICAL_EDGE_KINDS = tuple(EDGE_COLOR)
+
+EDGE_FIELDS = [
+    "graph_schema_version",
+    "edge_id",
+    "kind",
+    "src",
+    "dst",
+    "src_device",
+    "dst_device",
+    "src_stream",
+    "dst_stream",
+    "src_task",
+    "dst_task",
+    "reason",
+    "evidence",
+    "confidence",
+    "relation_id",
+    "sequence_kind",
+    "sequence_value",
+    "semantic_status",
+    "signal_kind",
+    "phase",
+    "step",
+    "slice",
+]
+
+GRAPH_SUMMARY_FIELDS = ["metric", "value"]
 
 NOTIFY_AMBIGUITY_FIELDS = [
     "graph_schema_version",
@@ -242,7 +271,8 @@ def build_execution_edges(
 ) -> List[dict]:
     """Build stream, local synchronization, and peer semantic dependencies."""
     edges: List[dict] = []
-    seen = set()
+    edge_by_endpoints = {}
+    identities_by_stable_id = {}
 
     def add(
         kind: str,
@@ -260,18 +290,42 @@ def build_execution_edges(
         step: int = -1,
         slice_id: int = -1,
     ) -> None:
-        if not src or not dst or src is dst:
+        if not src or not dst:
             return
-        key = (kind, src["_graph_id"], dst["_graph_id"])
-        if key in seen:
+        src_graph_id = src["_graph_id"]
+        dst_graph_id = dst["_graph_id"]
+        if src_graph_id == dst_graph_id:
             return
-        seen.add(key)
+        identity = DependencyEdgeIdentity(
+            kind,
+            src_graph_id,
+            dst_graph_id,
+            relation_id,
+        )
+        endpoint_key = (kind, src_graph_id, dst_graph_id)
+        existing = edge_by_endpoints.get(endpoint_key)
+        if existing is not None:
+            if existing != identity:
+                raise ValueError(
+                    "conflicting relation identities for dependency edge "
+                    "{} {} -> {}".format(kind, src_graph_id, dst_graph_id)
+                )
+            return
+        stable_collision = identities_by_stable_id.get(identity.stable_id)
+        if stable_collision is not None and stable_collision != identity:
+            raise ValueError(
+                "dependency edge stable ID collision for {}".format(
+                    identity.stable_id
+                )
+            )
+        edge_by_endpoints[endpoint_key] = identity
+        identities_by_stable_id[identity.stable_id] = identity
         edges.append({
             "graph_schema_version": GRAPH_SCHEMA_VERSION,
-            "edge_id": f"e{len(edges)}",
+            "edge_id": identity.stable_id,
             "kind": kind,
-            "src": src["_graph_id"],
-            "dst": dst["_graph_id"],
+            "src": src_graph_id,
+            "dst": dst_graph_id,
             "src_device": src["_device_id"],
             "dst_device": dst["_device_id"],
             "src_stream": src["_stream_id"],
@@ -298,7 +352,7 @@ def build_execution_edges(
     if notify_ambiguities is not None:
         notify_ambiguities.extend(ambiguities)
     _add_peer_semantic_edges(rows, add)
-    return edges
+    return sorted(edges, key=lambda edge: edge["edge_id"])
 
 
 def _add_direct_stream_order_edges(rows: List[dict], add) -> None:
@@ -982,20 +1036,112 @@ def _add_peer_semantic_edges(rows: List[dict], add) -> None:
             )
 
 
+def analyze_execution_graph(rows: List[dict], edges: List[dict]) -> Counter:
+    """Return structural quality statistics for one execution graph artifact."""
+    stats = Counter()
+    node_ids = [row["_graph_id"] for row in rows]
+    node_id_set = set(node_ids)
+    edge_ids = [str(edge.get("edge_id", "")) for edge in edges]
+    stats["graph_schema_version"] = GRAPH_SCHEMA_VERSION
+    stats["node_count"] = len(node_ids)
+    stats["edge_count"] = len(edges)
+    stats["duplicate_node_ids"] = len(node_ids) - len(node_id_set)
+    stats["duplicate_edge_ids"] = len(edge_ids) - len(set(edge_ids))
+
+    missing_sources = [
+        edge for edge in edges if edge.get("src") not in node_id_set
+    ]
+    missing_destinations = [
+        edge for edge in edges if edge.get("dst") not in node_id_set
+    ]
+    self_loops = [
+        edge for edge in edges if edge.get("src") == edge.get("dst")
+    ]
+    stats["missing_edge_sources"] = len(missing_sources)
+    stats["missing_edge_destinations"] = len(missing_destinations)
+    stats["self_loop_edges"] = len(self_loops)
+
+    adjacency = {node_id: set() for node_id in node_id_set}
+    reverse = {node_id: set() for node_id in node_id_set}
+    incident = set()
+    for edge in edges:
+        src = edge.get("src")
+        dst = edge.get("dst")
+        if src not in node_id_set or dst not in node_id_set or src == dst:
+            continue
+        adjacency[src].add(dst)
+        reverse[dst].add(src)
+        incident.add(src)
+        incident.add(dst)
+
+    stats["isolated_nodes"] = len(node_id_set - incident)
+    stats["root_nodes"] = sum(
+        1 for node_id in node_id_set if not reverse[node_id]
+    )
+    stats["leaf_nodes"] = sum(
+        1 for node_id in node_id_set if not adjacency[node_id]
+    )
+
+    indegree = {
+        node_id: len(reverse[node_id]) for node_id in node_id_set
+    }
+    ready = sorted(
+        node_id for node_id, degree in indegree.items() if degree == 0
+    )
+    cursor = 0
+    processed = 0
+    while cursor < len(ready):
+        node_id = ready[cursor]
+        cursor += 1
+        processed += 1
+        for successor in sorted(adjacency[node_id]):
+            indegree[successor] -= 1
+            if indegree[successor] == 0:
+                ready.append(successor)
+    stats["cycle_residual_nodes"] = len(node_id_set) - processed
+    stats["has_cycle"] = int(stats["cycle_residual_nodes"] > 0)
+    return stats
+
+
+def _assert_execution_graph_integrity(stats: Counter) -> None:
+    failures = {
+        name: stats[name]
+        for name in (
+            "duplicate_node_ids",
+            "duplicate_edge_ids",
+            "missing_edge_sources",
+            "missing_edge_destinations",
+            "self_loop_edges",
+        )
+        if stats[name]
+    }
+    if failures:
+        raise ValueError(
+            "invalid execution graph artifact: {}".format(
+                ", ".join(
+                    "{}={}".format(name, failures[name])
+                    for name in sorted(failures)
+                )
+            )
+        )
+
+
 def export_dependency_tables(
     merged_csv: Path,
     prefix: Path,
-) -> Tuple[Path, Path, Path, Counter, Counter]:
+):
     rows = read_execution_rows(merged_csv)
     notify_ambiguities: List[dict] = []
     edges = build_execution_edges(rows, notify_ambiguities)
+    graph_stats = analyze_execution_graph(rows, edges)
+    _assert_execution_graph_integrity(graph_stats)
     nodes_path = prefix.with_name(prefix.name + "_nodes.csv")
     edges_path = prefix.with_name(prefix.name + "_edges.csv")
     ambiguities_path = prefix.with_name(
         prefix.name + "_notify_ambiguities.csv"
     )
-    node_fields = [key for key in rows[0] if not key.startswith("_")] if rows else []
-    node_fields = ["graph_schema_version", "graph_id"] + node_fields
+    summary_path = prefix.with_name(prefix.name + "_summary.csv")
+    node_fields = ["graph_schema_version", "graph_id"] + list(MERGED_FIELDS)
     node_rows = [
         dict(
             {
@@ -1004,24 +1150,47 @@ def export_dependency_tables(
             },
             **{key: row.get(key, "") for key in node_fields[2:]},
         )
-                 for row in rows]
-    write_csv(str(nodes_path), node_fields, node_rows)
-    write_csv(
-        str(edges_path),
-        list(edges[0]) if edges else ["graph_schema_version", "edge_id"],
-        edges,
+        for row in sorted(rows, key=lambda item: item["_graph_id"])
+    ]
+    edge_counts = Counter(edge["kind"] for edge in edges)
+    ambiguity_counts = Counter(
+        row["status"] for row in notify_ambiguities
     )
+    summary = Counter(graph_stats)
+    for kind, count in edge_counts.items():
+        summary["edge_kind_{}".format(kind)] = count
+    for status, count in ambiguity_counts.items():
+        summary["notify_relation_{}".format(status)] = count
+    write_csv(str(nodes_path), node_fields, node_rows)
+    write_csv(str(edges_path), EDGE_FIELDS, edges)
     write_csv(
         str(ambiguities_path),
         NOTIFY_AMBIGUITY_FIELDS,
-        notify_ambiguities,
+        sorted(
+            notify_ambiguities,
+            key=lambda row: (
+                row.get("relation_id", ""),
+                row.get("status", ""),
+                row.get("endpoint_graph_ids", ""),
+            ),
+        ),
+    )
+    write_csv(
+        str(summary_path),
+        GRAPH_SUMMARY_FIELDS,
+        (
+            {"metric": metric, "value": summary[metric]}
+            for metric in sorted(summary)
+        ),
     )
     return (
         nodes_path,
         edges_path,
         ambiguities_path,
-        Counter(edge["kind"] for edge in edges),
-        Counter(row["status"] for row in notify_ambiguities),
+        summary_path,
+        edge_counts,
+        ambiguity_counts,
+        graph_stats,
     )
 
 
@@ -1035,8 +1204,10 @@ def main() -> int:
         nodes_path,
         edges_path,
         ambiguities_path,
+        summary_path,
         counts,
         ambiguity_counts,
+        graph_stats,
     ) = export_dependency_tables(args.merged_csv, prefix)
     for kind in PHYSICAL_EDGE_KINDS:
         print(f"{kind}={counts[kind]}")
@@ -1050,6 +1221,17 @@ def main() -> int:
     print(f"nodes_csv={nodes_path}")
     print(f"edges_csv={edges_path}")
     print(f"notify_ambiguities_csv={ambiguities_path}")
+    for metric in (
+        "node_count",
+        "edge_count",
+        "isolated_nodes",
+        "missing_edge_sources",
+        "missing_edge_destinations",
+        "cycle_residual_nodes",
+        "has_cycle",
+    ):
+        print(f"graph_{metric}={graph_stats[metric]}")
+    print(f"summary_csv={summary_path}")
     return 1 if ambiguity_counts[NOTIFY_RELATION_CONFLICT] else 0
 
 

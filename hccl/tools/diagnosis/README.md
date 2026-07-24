@@ -70,8 +70,13 @@ python -m tools.diagnosis.visualize_html merged.csv \
 execution node 使用
 `(node, device, physical stream, task, subtask, connection)` 的稳定摘要作为
 `graph_id`，CSV 重排和时间精度变化不会改变 ID；重复 physical identity 是硬错误。
-node/edge CSV 当前标记 `graph_schema_version=2`。execution graph 保留 Notify，
+node/edge CSV 当前标记 `graph_schema_version=3`。execution graph 保留 Notify，
 resource graph 的控制收缩合同见 `spec.md`，尚由后续 DEP-012 实现。
+
+edge ID 由 `(graph_schema_version, kind, src, dst, relation_id)` 生成稳定摘要，nodes/edges
+按稳定 ID 输出；CSV 行序不表示同步 occurrence。每次导出同时生成
+`dependency_summary.csv`，统计重复 ID、缺失端点、自环、root/leaf、孤立节点、
+cycle residual、edge kind 和 Notify ambiguity。重复 ID、缺失端点或自环会阻止导出。
 
 依赖边包含证据等级：
 
