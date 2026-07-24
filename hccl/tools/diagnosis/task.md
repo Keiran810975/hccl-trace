@@ -261,22 +261,26 @@
   （14 缺 producer、14 缺 consumer）、0 ambiguous、0 incomplete；单测覆盖
   唯一配对、单边、多端禁止排序 zip、graph instance 隔离资源复用。
 
-### DEP-007 为 direct Notify 输出同步 token
+### DEP-007 从 DB 完整 Notify 序列派生 direct occurrence
 
-- [!] **仓库**：HCOMM
+- [x] **仓库**：HCCL
 - **依赖**：DEP-002、DEP-005
-- **阻塞**：DB `(group_name, op_name)` 已隔离 collective invocation，但
-  Notify/transport 仍未暴露跨 rank 共享的 `channel_id + protocol occurrence sequence`。
-  `notify_id` 是复用资源，`task_id/connection_id` 是本地执行关联；operation scope
-  单独仍不能区分同一 collective 内的多次 record/wait。
-- **调查证据**：当前 direct 9,399 个 endpoint 去掉 sequence 后只形成 784 个候选组，
-  每组聚合 11～12 个端点。给 Tx/Rx 各自增加本地计数器只能在理想调用顺序下对齐；
-  非对称 retry 会使后续整体错位，多 channel 会从相同初值碰撞，回绕会复用旧 token。
-- **解除条件**：由 transport 协议层输出
-  `(channel_id, signal_kind, protocol_seq_or_epoch_seq)`，离线侧与
-  `(group_name, op_name)` operation scope 组合，
-  使用饱和/epoch 机制禁止静默 wrap。完成后必须重新构建 HCOMM，并采集含正常、并发、
-  retry 和多 channel 的设备数据，验收每个 token 恰好一个 producer/consumer。
+- **状态调整**：解除生产端 token 阻塞。msprof DB 的
+  `COMMUNICATION_TASK_INFO.notifyId/srcRank/dstRank` 覆盖 matched 与
+  profiler-only Notify，可恢复同一物理资源的完整 Record/Wait 序列。
+- **DEP-007A**：merge 时校验 semantic 与 DB 的 notify/rank 一致性；profiler-only
+  Notify 使用 DB 元数据填充现有 `notify_id/user_rank/peer_rank/task_kind`，不增加重复列。
+- **DEP-007B**：定义 direct channel：
+  `(node_id, operation_scope, notify_id, producer_rank, consumer_rank)`；Record 方向为
+  `srcRank -> dstRank`，Wait 方向归一化为 `dstRank -> srcRank`。
+- **DEP-007C**：同一 channel 两侧仅在各自本地物理 stream 内排序，派生
+  `db_notify_ordinal`；不比较跨设备绝对时间，不使用 `connection_id/task_id` 作为
+  跨 rank identity。
+- **严格门禁**：两侧必须各自只有一个 stream、数量相等、顺序唯一、operation scope
+  唯一；否则整组进入 ambiguity，禁止 `zip(min)`。
+- **完成与验证**：不增加 merged 列；18,779 条 matched Notify 的 semantic/DB
+  notify 与 rank 全部一致。16 个跨 rank Notify resource、7 个 operation scope 形成
+  112 个 direct channel；每组 48 Record + 48 Wait，生成 5,376 个 occurrence。
 
 ### DEP-008 删除 connection/time 默认推断
 
@@ -288,19 +292,30 @@
   旧 JSON 3,016 条和 DB 5,094 条 connection/time 结果都不再进入因果图，单测验证
   即使 connection 和时间形成唯一最近候选也不构边。
 
-### DEP-009 消费显式同步 token
+### DEP-009 构建 direct Notify exact relation
 
-- [ ] **仓库**：HCCL
+- [x] **仓库**：HCCL
 - **依赖**：DEP-005、DEP-007
-- **工作**：按 token 构建 exact relation，并校验 notify/rank/phase。
-- **验收**：重复、单边、冲突 token 使质量门禁失败。
+- **DEP-009A**：按 channel 内相同 `db_notify_ordinal` 配对 Record/Wait，生成
+  `direct_notify_sync_exact`，保存稳定 relation ID。
+- **DEP-009B**：语义只作为 relation annotation 与一致性校验，分为
+  `both/partial/none/conflict`；phase/step/slice 不参与物理 occurrence 身份。
+- **DEP-009C**：数量不等、多 stream、顺序冲突、元数据缺失输出到
+  `*_notify_ambiguities.csv`；不得按最近时间补配。
+- **完成与验证**：当前 DB exact 5,376，其中 both 4,695、partial 9、none 672、
+  conflict 0；direct single/ambiguous/incomplete/conflict 均为 0。单测覆盖跨设备时间
+  反序不影响 ordinal、计数不等禁止部分 zip，以及语义 annotation。
 
 ### DEP-010 合并 Notify 与 peer semantic 证据
 
-- [ ] **仓库**：HCCL
+- [x] **仓库**：HCCL
 - **依赖**：DEP-005、DEP-006、DEP-009
-- **工作**：ACK/data-signal 合为一条同步边及多份 evidence；payload 边保持独立。
-- **验收**：无重复控制边；身份冲突进入 validation。
+- **DEP-010A**：ACK/data-signal 只保留 exact Notify 边，peer semantic 作为 annotation
+  与 evidence，不再按跨设备时间排序 `zip` 生成控制边。
+- **DEP-010B**：payload 数据边保持独立，不与 Notify 控制同步合并。
+- **完成与验证**：`peer_signal_semantic=0`，exact 边保存
+  `semantic_status/signal_kind/phase/step/slice`；payload 仍为 2,142 条独立 semantic edge。
+  FFts 4,676 条 observed relation 与 28 条 single 保持不变。
 
 ### DEP-011 产出 execution graph artifact
 

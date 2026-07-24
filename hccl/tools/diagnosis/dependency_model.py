@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 
-GRAPH_SCHEMA_VERSION = 1
+GRAPH_SCHEMA_VERSION = 2
 
 OPERATION_SCOPE_UNIQUE = "unique"
 OPERATION_SCOPE_MISSING = "missing"
@@ -25,11 +25,13 @@ NOTIFY_SIGNAL_DATA = "data_signal"
 NOTIFY_SEQUENCE_FFTS_GRAPH = "ffts_graph_instance"
 NOTIFY_SEQUENCE_PROTOCOL = "protocol_sequence"
 NOTIFY_SEQUENCE_TOKEN = "dependency_token"
+NOTIFY_SEQUENCE_DB_ORDINAL = "db_notify_ordinal"
 
 NOTIFY_RELATION_UNIQUE = "unique"
 NOTIFY_RELATION_SINGLE = "single"
 NOTIFY_RELATION_AMBIGUOUS = "ambiguous"
 NOTIFY_RELATION_INCOMPLETE = "incomplete"
+NOTIFY_RELATION_CONFLICT = "conflict"
 
 NOTIFY_ENDPOINT_RULES = {
     ("notify_record", "tx_ack_start"): (
@@ -121,6 +123,67 @@ class NotifyResourceIdentity:
     @property
     def stable_id(self) -> str:
         return stable_id("notify", (self.node_id, self.notify_id))
+
+
+@dataclass(frozen=True)
+class DirectNotifyChannelIdentity:
+    """One cross-rank direct Notify resource within a collective invocation."""
+
+    node_id: str
+    operation_scope: str
+    producer_rank: int
+    consumer_rank: int
+    notify_id: int
+
+    @property
+    def missing_fields(self) -> tuple[str, ...]:
+        missing = []
+        for name in ("node_id", "operation_scope"):
+            if not str(getattr(self, name) or "").strip():
+                missing.append(name)
+        for name in ("producer_rank", "consumer_rank", "notify_id"):
+            if int(getattr(self, name)) < 0:
+                missing.append(name)
+        return tuple(missing)
+
+    @property
+    def complete(self) -> bool:
+        return not self.missing_fields
+
+    @property
+    def stable_id(self) -> str:
+        return stable_id(
+            "dnc",
+            (
+                GRAPH_SCHEMA_VERSION,
+                self.node_id,
+                self.operation_scope,
+                NOTIFY_RANK_DOMAIN_USER,
+                self.producer_rank,
+                self.consumer_rank,
+                self.notify_id,
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class DirectNotifyRelationIdentity:
+    """One direct Notify state transition, derived from complete DB sequences."""
+
+    channel: DirectNotifyChannelIdentity
+    ordinal: int
+
+    @property
+    def stable_id(self) -> str:
+        return stable_id(
+            "dnr",
+            (
+                GRAPH_SCHEMA_VERSION,
+                self.channel.stable_id,
+                NOTIFY_SEQUENCE_DB_ORDINAL,
+                self.ordinal,
+            ),
+        )
 
 
 @dataclass(frozen=True)

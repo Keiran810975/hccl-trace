@@ -154,6 +154,26 @@ def merge_records(
                                     operation_scope=_operation_scope_for(
                                         operation_scopes, matched_profiler)))
             continue
+        notify_mismatches = _notify_metadata_mismatches(
+            semantic, matched_profiler
+        )
+        if notify_mismatches:
+            for mismatch in notify_mismatches:
+                stats[mismatch] += 1
+            stats["notify_metadata_mismatch"] += 1
+            matched_profiler_keys.add(matched_profiler.execution_key)
+            rows.append(_merged_row(
+                "notify_metadata_mismatch",
+                semantic,
+                matched_profiler,
+                duplicate_semantic,
+                duplicate_profiler,
+                match_method,
+                "invalid",
+                matched_correlation,
+                _operation_scope_for(operation_scopes, matched_profiler),
+            ))
+            continue
         stats["matched"] += 1
         if match_confidence == "exact":
             stats["exact_matched"] += 1
@@ -179,7 +199,10 @@ def merge_records(
     stats["duplicate_semantic_keys"] = sum(1 for count in semantic_counts.values() if count > 1)
     stats["duplicate_profiler_execution_keys"] = sum(
         1 for count in profiler_execution_counts.values() if count > 1)
-    stats["invalid_matches"] = stats.get("ffts_ctx_kind_mismatches", 0)
+    stats["invalid_matches"] = (
+        stats.get("ffts_ctx_kind_mismatches", 0)
+        + stats.get("notify_metadata_mismatch", 0)
+    )
     stats["match_rate_percent"] = round(
         stats.get("matched", 0) * 100.0 / len(semantic_list), 2
     ) if semantic_list else 0
@@ -278,6 +301,38 @@ def _is_compatible_task_kind(
     if not expected:
         return True
     return str(profiler.event_name or "").strip().upper() in expected
+
+
+def _normalized_rank(value: int) -> int:
+    return -1 if int(value) == 0xFFFFFFFF else int(value)
+
+
+def _notify_metadata_mismatches(
+    semantic: SemanticRecord,
+    profiler: ProfilerTask,
+) -> tuple[str, ...]:
+    """Validate trace-side Notify identity against authoritative DB metadata."""
+    semantic_kind = str(semantic.task_kind or "").strip().lower()
+    profiler_kind = str(profiler.task_kind or "").strip().lower()
+    if semantic_kind not in ("notify_record", "notify_wait"):
+        return ()
+    mismatches = []
+    if profiler_kind not in ("notify_record", "notify_wait"):
+        mismatches.append("notify_task_kind_mismatch")
+    if profiler.profiler_notify_id < 0:
+        mismatches.append("notify_db_metadata_missing")
+    elif semantic.notify_id != profiler.profiler_notify_id:
+        mismatches.append("notify_id_mismatch")
+    if profiler.profiler_src_rank < 0:
+        mismatches.append("notify_db_metadata_missing")
+    elif _normalized_rank(semantic.user_rank) != profiler.profiler_src_rank:
+        mismatches.append("notify_rank_mismatch")
+    if (
+        profiler.profiler_dst_rank >= 0
+        and _normalized_rank(semantic.peer_rank) != profiler.profiler_dst_rank
+    ):
+        mismatches.append("notify_rank_mismatch")
+    return tuple(dict.fromkeys(mismatches))
 
 
 def _exact_matches(
@@ -407,6 +462,16 @@ def _merged_row(status: str, semantic: SemanticRecord, profiler: ProfilerTask, d
                 graph_correlation: GraphCorrelation = None,
                 operation_scope: Tuple[str, str] = ("", "")):
     row = semantic.to_row()
+    if profiler and profiler.task_kind in ("notify_record", "notify_wait"):
+        # DB metadata covers profiler-only tasks as well as matched semantic
+        # tasks. Keep one canonical merged representation instead of adding
+        # duplicate profiler_notify/src/dst columns.
+        row["task_kind"] = profiler.task_kind
+        if profiler.profiler_notify_id >= 0:
+            row["notify_id"] = profiler.profiler_notify_id
+        if profiler.profiler_src_rank >= 0:
+            row["user_rank"] = profiler.profiler_src_rank
+        row["peer_rank"] = profiler.profiler_dst_rank
     row.update({
         "node_id": profiler.node_id if profiler else semantic.node_id,
         "device_id": profiler.device_id if profiler else semantic.device_id,

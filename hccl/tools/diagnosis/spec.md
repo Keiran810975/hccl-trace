@@ -661,8 +661,8 @@ execution graph 的执行节点保存 `task_start/task_stop/duration`，顺序/�
 - 无法唯一确定满足时刻时权重为 unknown，不使用跨 stream 的 wall-clock 最近值填充。
 
 因此关键路径长度由资源节点 duration 与可证明的同步等待共同组成，避免把 Notify wait
-任务自身 duration 和收缩边等待重复计费。图 artifact 使用
-`graph_schema_version=1`；未来更改 identity、收缩或权重语义必须升级版本。
+任务自身 duration 和收缩边等待重复计费。direct DB ordinal 引入后图 artifact 使用
+`graph_schema_version=2`；未来更改 identity、收缩或权重语义必须升级版本。
 
 ### 8.7 单机 stream 顺序规则（DEP-003/DEP-004）
 
@@ -719,7 +719,7 @@ resource identity = (node_id, notify_id)
 ```
 
 resource 只回答“使用哪块 Notify 存储”。它会跨 step、graph launch 和 collective operation
-复用，不能直接生成 record→wait 边。一次同步 occurrence 的规范 identity 为：
+复用，不能直接生成 record→wait 边。FFts 同步 occurrence 的规范 identity 为：
 
 ```text
 (
@@ -749,18 +749,36 @@ resource 只回答“使用哪块 Notify 存储”。它会跨 step、graph laun
 - `notify_id` 保留物理资源证据，但不是 occurrence sequence；
 - `sequence_kind/value` 隔离同一资源在同一算法位置的多次复用。
 
-sequence 支持三种合同：
+sequence 支持四种合同：
 
 | `sequence_kind` | 来源 | 适用范围 |
 |---|---|---|
 | `ffts_graph_instance` | HCOMM `graph_instance_id` | 当前单机 FFts graph occurrence |
-| `protocol_sequence` | 后续生产端协议序号 | direct、跨 rank/channel |
+| `db_notify_ordinal` | DB 完整 channel 的两侧本地序号 | 当前单机 direct |
+| `protocol_sequence` | 后续生产端协议序号 | 无 consolidated DB 的 direct |
 | `dependency_token` | 后续生产端显式共享 token | 无可靠自然序号的同步关系 |
 
 当前 FFts graph instance 仍是进程内生成值，只能在相同 node、operation scope 和规范 rank
 角色下作为单机候选 sequence，不能当成跨节点全局 ID。如果各 rank graph 序列不一致，
-端点必须进入 single/ambiguous 状态，禁止按时间补配。direct 当前
-`graph_instance_id=-1`，在 DEP-007 输出共享 sequence 前 relation identity 不完整。
+端点必须进入 single/ambiguous 状态，禁止按时间补配。
+
+direct 使用独立、物理优先的 relation identity：
+
+```text
+channel = (
+  graph_schema_version,
+  node_id,
+  operation_scope,
+  rank_domain,
+  producer_rank,
+  consumer_rank,
+  notify_id
+)
+relation = (channel, db_notify_ordinal)
+```
+
+`signal_kind/phase/step/slice` 对 direct 是可选 annotation，不进入稳定 ID；因此
+profiler-only 端点不会因为语义覆盖率变化而改变 relation identity。
 
 #### 8.8.1 端点角色归一化
 
@@ -885,49 +903,65 @@ Notify record。相同设备数据在 JSON 浮点时间下得到 3,016 条，在
 DB replay 中 inferred 从 5,094 降为 0，总边数从 58,871 降为 53,777；节点 44,008、
 FFts exact Notify 4,676、single 28 均不变。
 
-### 8.11 direct Notify token 的阻塞结论（DEP-007）
+### 8.11 direct Notify DB ordinal（DEP-007～DEP-010）
 
-现有生产端没有满足“跨 rank 共享、每次同步唯一”的 direct sequence：
+生产端不需要新增同步 token。consolidated msprof DB 已为所有 matched 与 profiler-only
+Notify task 提供 `notifyId/srcRank/dstRank`，可恢复物理资源的完整状态序列。merge 将其
+规范化到现有字段，不增加重复列：
 
-- `notify_id` 标识可复用 Notify 存储，同一 resource 跨 operation/step 多次使用；
-- 已废弃的 `semantic_seq/profiler_seq` 原本按本地 device/stream 分配，producer 与
-  consumer 数值不同，不能作为共享 token；
-- physical `task_id` 是本地 stream task identity；
-- `connection_id` 来自 msprof physical execution/operation 本地关联，不由 HCOMM 同步协议
-  作为共享 occurrence token 输出；
-- `notify_stage` 在当前 transport direct 信号路径为 invalid，不能当作协议轮次。
+| merged 字段 | matched | profiler-only Notify |
+|---|---|---|
+| `notify_id` | semantic 与 DB 相等后保留一个值 | DB `notifyId` |
+| `user_rank` | semantic 与 DB `srcRank` 一致 | DB `srcRank` |
+| `peer_rank` | semantic 与有效 DB `dstRank` 一致 | DB `dstRank` |
+| `task_kind` | semantic/DB 一致 | DB task kind |
 
-当前 9,399 个 direct Notify endpoint 在缺少 sequence 时折叠成 784 个候选组，每组
-11～12 个端点，证明现有字段不足以精确配对。给 producer/consumer 各自维护一个本地
-自增计数器在理想 SPMD 顺序下可能暂时对齐，但不满足验收：
+任何 matched Notify 的 ID、rank 或 kind 冲突都标记
+`notify_metadata_mismatch/invalid`，不得进入 exact 合并统计。当前采集的 18,779 条
+matched Notify 上述字段全部一致。
 
-- 单侧 retry 会使计数错位，并把后续 consumer 错配给前一 producer；
-- 多 channel/transport 若从同一初值开始，会产生相同 sequence；
-- 无显式 epoch 的整数 wrap 会复用历史 identity；
-- collective 并发或调用序差异无法由本地计数检测。
-
-msprof DB 的 `(group_name, op_name)` 已提供 collective invocation 分区，但 transport
-occurrence 层仍缺失，因此当前仍不向 schema 写入伪 `dependency_token/protocol_seq`。
-完整合同应由 DB operation scope 与 transport token 共同提供：
+direct channel identity 为：
 
 ```text
-dependency token =
 (
-  group_name,
-  op_name,
-  channel_id,
+  node_id,
+  operation_scope,
+  notify_id,
   producer_rank,
-  consumer_rank,
-  signal_kind,
-  protocol_seq_or_epoch_seq
+  consumer_rank
 )
 ```
 
-尚需 channel 隔离并行 transport、协议序号隔离同一 resource 的连续 occurrence。下一步
-应在 transport 协议层赋值，并由新设备采集验证正常、并发、retry、channel 与
-wrap/饱和边界。operation scope 单独仍不能区分同一 collective 内对同一 Notify resource
-的多次 record/wait，故 DEP-007 继续阻塞，阻塞原因是缺少共享
-channel/protocol occurrence token。
+Record 使用 `producer=srcRank, consumer=dstRank`；Wait 归一化为
+`producer=dstRank, consumer=srcRank`。`dstRank=-1` 是本地控制 Notify，不进入跨 rank
+builder。同一 channel 的 Record 和 Wait 分别只在各自本地 physical stream 内排序：
+
+```text
+Record[ordinal] -> Wait[ordinal]
+sequence_kind = db_notify_ordinal
+```
+
+该规则来自 Notify 的 `record: 0->1`、`wait-and-reset: 1->0` 状态机。跨设备
+`task_start/task_stop` 不参与 identity：远端信号可见点可能早于源端 Record task 的 profiler
+结束点，设备间时间也可能有偏差。当前语义完整的 4,650 对中有 2,048 对原始
+`wait_stop < record_stop`，反向差值为 0.25～132.5 ns，因此“最近的后续 wait”不能作为
+配对规则。
+
+严格门禁要求 producer/consumer 各自只有一个 local stream、数量相等、顺序唯一且
+operation scope 唯一。任何计数不等、多 stream 或顺序冲突都使整个 channel 进入
+ambiguity，禁止 `zip(min)`。稳定 direct relation ID 只包含 channel 与 ordinal；语义
+`signal_kind/phase/step/slice` 是 annotation，分为：
+
+- `both`：两端都有语义且坐标一致；
+- `partial`：只有一端有语义；
+- `none`：两端均为 profiler-only；
+- `conflict`：语义方向或坐标冲突，保留物理边并输出冲突 artifact。
+
+当前 DB replay 得到 16 个跨 rank Notify resource、7 个 operation scope、112 个 direct
+channel；每个 channel 均为 48 Record + 48 Wait，且两端各自只有一个 stream。最终生成
+5,376 条 `direct_notify_sync_exact/exact`：both 4,695、partial 9、none 672、conflict 0。
+原 `peer_signal_semantic` 时间排序边已删除；ACK/data-signal 语义只附着到 exact Notify
+relation，payload 数据边仍独立保留。
 
 ### 8.12 msprof operation identity 合同（ID-001～ID-005 撤销）
 
@@ -971,7 +1005,8 @@ HCOMM 本地自增数冒充跨 rank 共享身份。
 撤销后，HCOMM 不再承担 communicator 锁、map/set、FNV 哈希、`OpParam` 传播、
 operation TLS、worker 快照或额外 plog 字段。semantic schema 保持 v4，merged 合同为
 42 列。当前 `test/out` 回放为 28,502/28,502 exact、44,008 个 physical task、7 个
-operation scope；38 项 Python 单测覆盖跨 device/node 一致性、group 隔离和本地映射歧义。
+operation scope；43 项 Python 单测覆盖跨 device/node 一致性、group 隔离、本地映射歧义
+和 direct Notify ordinal 门禁。
 
 ## 9. 兼容性与非目标
 
@@ -990,7 +1025,7 @@ PROFILER_TRACE_EX
 当前改动也没有：
 
 - 为所有 ring/mesh/hierarchical/NHR/RDMA/AIV 算法补齐 phase scope；
-- 为 direct Notify 生成 channel/protocol occurrence token；
+- 为跨节点或非 DB 输入生成 transport protocol occurrence token；
 - 为 ACL graph 每次 device replay 生成执行 epoch；
 - 为 graph replay/retry 提供独立 attempt identity；
 - 提供跨节点时钟校准；

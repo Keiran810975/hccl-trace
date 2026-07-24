@@ -21,7 +21,10 @@ def validate_rows(rows, min_match_rate):
         stats[status] += 1
         if status == "matched":
             stats["exact_matched"] += 1
-        elif status == "correlation_kind_mismatch":
+        elif status in (
+            "correlation_kind_mismatch",
+            "notify_metadata_mismatch",
+        ):
             stats["invalid_matches"] += 1
         if row.get("duplicate_semantic") == "1":
             stats["duplicate_semantic_rows"] += 1

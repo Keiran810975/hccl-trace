@@ -15,6 +15,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from diagnosis.dependency_model import (
+        NOTIFY_SEQUENCE_DB_ORDINAL,
         NOTIFY_SEQUENCE_FFTS_GRAPH,
         NOTIFY_SEQUENCE_TOKEN,
         NotifyRelationIdentity,
@@ -41,6 +42,7 @@ if __package__ in (None, ""):
     from diagnosis.visualize_timeline import assign_time_slots
 else:
     from .dependency_model import (
+        NOTIFY_SEQUENCE_DB_ORDINAL,
         NOTIFY_SEQUENCE_FFTS_GRAPH,
         NOTIFY_SEQUENCE_TOKEN,
         NotifyRelationIdentity,
@@ -228,6 +230,43 @@ def ffts_notify_row(
     return row
 
 
+def direct_notify_row(
+    index,
+    rank,
+    peer,
+    kind,
+    start,
+    notify_id=99,
+    stream=45,
+    event="",
+):
+    row = execution_row(
+        index,
+        stream,
+        index + 1,
+        start,
+        kind=kind,
+        connection=100 + index,
+        event=event,
+        rank=rank,
+        peer=peer,
+        notify_id=notify_id,
+    )
+    row.update({
+        "match_status": "matched" if event else "profiler_only",
+        "task_kind": kind if event else "",
+        "profiler_task_kind": kind,
+        "profiler_op_scope": "op_fixture",
+        "profiler_op_scope_status": "unique",
+        "_operation_scope": "op_fixture",
+        "_operation_scope_status": "unique",
+        "phase": "reduce_scatter_direct" if event else "",
+        "_step": 2 if event else -1,
+        "_slice": 5 if event else -1,
+    })
+    return row
+
+
 class DiagnosisToolTest(unittest.TestCase):
     def test_notify_endpoint_roles_normalize_tx_and_rx_to_same_relation(self):
         producer = normalize_notify_endpoint(
@@ -341,14 +380,19 @@ class DiagnosisToolTest(unittest.TestCase):
 
     def test_ffts_parent_ctx_correlation_matches_exact_subtask(self):
         profilers = [
-            profiler_task("Write Value", 45, 1, 100, subtask=8),
+            replace(
+                profiler_task("Write Value", 45, 1, 100, subtask=8),
+                profiler_notify_id=99,
+                profiler_src_rank=0,
+                profiler_dst_rank=1,
+            ),
             profiler_task("SDMA", 45, 1, 101, subtask=13),
         ]
         semantics = list(parse_plog_lines([
             "[HcclTaskSemantic] schema_version[2] device_id[0] stream_id[45] hccl_task_id[0] "
             "semantic_seq[0] profiler_seq[6] task_kind[notify_record] event[tx_ack_start] "
             "phase[reduce_scatter_direct] ffts_ctx_id[8] "
-            "graph_instance_id[7]\n",
+            "graph_instance_id[7] notify_id[99] user_rank[0] peer_rank[1]\n",
             "[HcclTaskSemantic] schema_version[2] device_id[0] stream_id[13] hccl_task_id[0] "
             "semantic_seq[0] profiler_seq[3] task_kind[reduce_inline] "
             "event[rx_payload_reduce_start] phase[reduce_scatter_direct] "
@@ -480,6 +524,51 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertEqual(tasks[2].profiler_src_rank, 0)
         self.assertEqual(tasks[2].profiler_dst_rank, 1)
 
+    def test_merge_canonicalizes_profiler_only_notify_metadata(self):
+        task = replace(
+            profiler_task("NOTIFY_RECORD", 45, 1, 100),
+            profiler_notify_id=99,
+            profiler_src_rank=0,
+            profiler_dst_rank=1,
+            op_name="hcom_allReduce__fixture_0",
+            group_name="group_fixture",
+            profiler_op_id=7,
+        )
+
+        rows, _ = merge_records([], [task])
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["match_status"], "profiler_only")
+        self.assertEqual(rows[0]["task_kind"], "notify_record")
+        self.assertEqual(rows[0]["notify_id"], 99)
+        self.assertEqual(rows[0]["user_rank"], 0)
+        self.assertEqual(rows[0]["peer_rank"], 1)
+        self.assertEqual(rows[0]["profiler_op_scope_status"], "unique")
+
+    def test_merge_rejects_semantic_db_notify_identity_mismatch(self):
+        task = replace(
+            profiler_task("NOTIFY_RECORD", 45, 1, 100),
+            profiler_notify_id=99,
+            profiler_src_rank=0,
+            profiler_dst_rank=1,
+            op_name="hcom_allReduce__fixture_0",
+            group_name="group_fixture",
+            profiler_op_id=7,
+        )
+        semantics = list(parse_plog_lines([
+            "[HcclTaskSemantic] schema_version[4] device_id[0] stream_id[45] "
+            "hccl_task_id[1] task_kind[notify_record] event[tx_ack_start] "
+            "phase[reduce_scatter_direct] step[0] slice[1] user_rank[0] "
+            "peer_rank[1] notify_id[98]\n",
+        ]))
+
+        rows, stats = merge_records(semantics, [task])
+
+        self.assertEqual(rows[0]["match_status"], "notify_metadata_mismatch")
+        self.assertEqual(rows[0]["match_confidence"], "invalid")
+        self.assertEqual(stats["notify_id_mismatch"], 1)
+        self.assertEqual(stats["invalid_matches"], 1)
+
     def test_msprof_db_rejects_unknown_schema(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = os.path.join(temp_dir, "msprof_fixture.db")
@@ -577,27 +666,116 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertIn("direct_stream_order_observed", kinds)
         self.assertNotIn("notify_sync_inferred", kinds)
 
-    def test_physical_dependency_peer_semantic_pair(self):
+    def test_signal_semantic_does_not_create_time_zipped_control_edge(self):
         tx = execution_row(0, 45, 1, 0, event="tx_ack_start", rank=0, peer=1, step=0, slice_id=6)
         rx = execution_row(1, 45, 1, 1, event="rx_ack_start", rank=1, peer=0, step=0, slice_id=6)
         edges = build_execution_edges([tx, rx])
-        peer = [edge for edge in edges if edge["kind"] == "peer_signal_semantic"]
-        self.assertEqual(len(peer), 1)
-        self.assertEqual(peer[0]["confidence"], "semantic")
+        self.assertFalse(any(
+            edge["kind"] == "peer_signal_semantic" for edge in edges
+        ))
 
-    def test_direct_notify_id_without_shared_sequence_is_not_observed(self):
-        record = execution_row(0, 45, 1, 0, kind="notify_record", notify_id=99)
-        wait = execution_row(1, 13, 1, 1, kind="notify_wait", notify_id=99)
-        record["_connection_id"] = -1
-        wait["_connection_id"] = -1
-        record["task_kind"] = "notify_record"
-        wait["task_kind"] = "notify_wait"
-        edges = build_execution_edges([record, wait])
-        observed = [
-            edge for edge in edges
-            if edge["kind"] == "ffts_notify_sync_observed"
+    def test_direct_notify_db_ordinal_builds_exact_edges_without_cross_device_time(self):
+        records = [
+            direct_notify_row(0, 0, 1, "notify_record", 10),
+            direct_notify_row(1, 0, 1, "notify_record", 20),
         ]
-        self.assertEqual(observed, [])
+        waits = [
+            direct_notify_row(2, 1, 0, "notify_wait", 9),
+            direct_notify_row(3, 1, 0, "notify_wait", 19),
+        ]
+        ambiguities = []
+        edges = build_execution_edges(
+            records + waits,
+            notify_ambiguities=ambiguities,
+        )
+        exact = [
+            edge for edge in edges
+            if edge["kind"] == "direct_notify_sync_exact"
+        ]
+        self.assertEqual(len(exact), 2)
+        self.assertEqual(
+            [(edge["src"], edge["dst"]) for edge in exact],
+            [("p0", "p2"), ("p1", "p3")],
+        )
+        self.assertEqual(
+            [edge["sequence_value"] for edge in exact],
+            ["0", "1"],
+        )
+        self.assertEqual(
+            {edge["sequence_kind"] for edge in exact},
+            {NOTIFY_SEQUENCE_DB_ORDINAL},
+        )
+        self.assertEqual(
+            {edge["semantic_status"] for edge in exact},
+            {"none"},
+        )
+        self.assertEqual(ambiguities, [])
+
+    def test_direct_notify_unequal_counts_are_not_partially_zipped(self):
+        rows = [
+            direct_notify_row(0, 0, 1, "notify_record", 10),
+            direct_notify_row(1, 0, 1, "notify_record", 20),
+            direct_notify_row(2, 1, 0, "notify_wait", 19),
+        ]
+        ambiguities = []
+        edges = build_execution_edges(rows, notify_ambiguities=ambiguities)
+
+        self.assertFalse(any(
+            edge["kind"] == "direct_notify_sync_exact" for edge in edges
+        ))
+        direct = [
+            row for row in ambiguities
+            if row["sequence_kind"] == NOTIFY_SEQUENCE_DB_ORDINAL
+        ]
+        self.assertEqual(len(direct), 1)
+        self.assertEqual(direct[0]["status"], "ambiguous")
+        self.assertEqual((direct[0]["producer_count"], direct[0]["consumer_count"]), (2, 1))
+
+    def test_direct_notify_semantics_are_annotations_on_exact_relation(self):
+        record = direct_notify_row(
+            0, 0, 1, "notify_record", 10, event="tx_ack_start"
+        )
+        wait = direct_notify_row(
+            1, 1, 0, "notify_wait", 9, event="rx_ack_start"
+        )
+        edges = build_execution_edges([record, wait])
+        exact = [
+            edge for edge in edges
+            if edge["kind"] == "direct_notify_sync_exact"
+        ]
+
+        self.assertEqual(len(exact), 1)
+        self.assertEqual(exact[0]["semantic_status"], "both")
+        self.assertEqual(exact[0]["signal_kind"], "ack")
+        self.assertEqual(exact[0]["phase"], "reduce_scatter_direct")
+        self.assertEqual(exact[0]["step"], 2)
+        self.assertEqual(exact[0]["slice"], 5)
+
+    def test_direct_notify_semantic_conflict_is_explicit_without_losing_physical_edge(self):
+        record = direct_notify_row(
+            0, 0, 1, "notify_record", 10, event="tx_ack_start"
+        )
+        wait = direct_notify_row(
+            1, 1, 0, "notify_wait", 9, event="rx_data_signal_start"
+        )
+        ambiguities = []
+
+        edges = build_execution_edges(
+            [record, wait],
+            notify_ambiguities=ambiguities,
+        )
+
+        exact = [
+            edge for edge in edges
+            if edge["kind"] == "direct_notify_sync_exact"
+        ]
+        self.assertEqual(len(exact), 1)
+        self.assertEqual(exact[0]["semantic_status"], "conflict")
+        conflicts = [
+            row for row in ambiguities if row["status"] == "conflict"
+        ]
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(conflicts[0]["relation_id"], exact[0]["relation_id"])
 
     def test_ffts_notify_unique_relation_builds_observed_edge(self):
         producer = ffts_notify_row(

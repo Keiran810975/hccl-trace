@@ -70,7 +70,7 @@ python -m tools.diagnosis.visualize_html merged.csv \
 execution node 使用
 `(node, device, physical stream, task, subtask, connection)` 的稳定摘要作为
 `graph_id`，CSV 重排和时间精度变化不会改变 ID；重复 physical identity 是硬错误。
-node/edge CSV 当前标记 `graph_schema_version=1`。execution graph 保留 Notify，
+node/edge CSV 当前标记 `graph_schema_version=2`。execution graph 保留 Notify，
 resource graph 的控制收缩合同见 `spec.md`，尚由后续 DEP-012 实现。
 
 依赖边包含证据等级：
@@ -82,18 +82,20 @@ resource graph 的控制收缩合同见 `spec.md`，尚由后续 DEP-012 实现�
 - `ffts_notify_sync_observed`：完整 FFts relation identity 下恰好一个 producer 与一个
   consumer，`observed`；边保存稳定 relation ID。单边、多端或缺字段写入
   `dependency_notify_ambiguities.csv`，不生成因果边。
-- `peer_signal_semantic` / `peer_payload_semantic`：显式 peer rank、phase、step、slice 相同，
-  再按 occurrence 顺序配对，`semantic`。
+- `direct_notify_sync_exact`：按 DB operation scope、Notify resource、规范 rank 方向分
+  channel，再按两侧各自 local physical stream 的 ordinal 配对，`exact`；不比较跨设备时间。
+- `peer_payload_semantic`：显式 peer rank、phase、step、slice 相同，再按 occurrence 顺序
+  配对，`semantic`；payload 数据边与 Notify 控制边独立。
 
-Notify 资源身份是 `(node_id, notify_id)`，它会跨 step、graph 和 operation 复用，不能直接
-代表一次同步。规范 relation identity 还包含 operation scope、producer/consumer、signal、
-phase/step/slice 和 graph/protocol sequence；不包含时间或 `connection_id`。当前 FFts 已有
-graph sequence 可生成 relation candidate，direct 必须等待生产端共享 token。
+Notify 资源会跨 step、graph 和 operation 复用，不能单独代表一次同步。FFts relation 使用
+graph instance；direct relation 使用
+`(node, operation scope, notify, producer, consumer, db_notify_ordinal)`。两者都不包含跨设备
+时间或 `connection_id`。
 
 当前 DB golden replay 的 FFts Notify 结果为 4,676 条 observed edge、28 条 single
-ambiguity、0 条 multi-endpoint ambiguity、0 条 incomplete。direct 的共享 token 被
-transport 侧缺失的 channel/protocol occurrence sequence 阻塞；实例 ID 已完成，但本地
-task/stream 计数仍不能替代跨 rank protocol sequence。
+ambiguity、0 条 multi-endpoint ambiguity、0 条 incomplete。direct 结果为 5,376 条 exact：
+语义 both 4,695、partial 9、none 672、conflict 0。ACK/data-signal 不再生成
+`peer_signal_semantic` 时间排序边。
 
 DEP-008 已删除默认 connection/time Notify 推断。旧 JSON 的 3,016 条和 DB 的 5,094 条
 最近时间边均不再进入因果图；如果未来恢复研究模式，必须使用独立显式入口并标为
