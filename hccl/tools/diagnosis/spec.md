@@ -137,8 +137,8 @@ RS/AG 算法模板建立 phase/step/slice/rank context
 | `submitTs` | `0` | `hrtMsprofSysCycleTime()` 的 Host 提交周期时间。 |
 | `notifyId` | `0` | Notify task 从 `TaskParaNotify.notifyID` 补齐。 |
 | `notifyStage` | `-1` | Notify stage。 |
-| `step` | `0` | 算法 step。 |
-| `slice` | `0` | 算法分片编号。 |
+| `step` | `0` | phase 内的逻辑因果桶；不是 physical task identity 或唯一 task 序号。 |
+| `slice` | `0` | 算法 rank slice 编号；不是 vector element、字节 offset 或 primitive ordinal。 |
 | `userRank` | `0` | 用户通信域 rank。 |
 | `commRank` | `0` | 算法内部通信 rank；工厂可显式传入。 |
 | `rankSize` | `0` | 通信域大小。 |
@@ -373,7 +373,7 @@ phase 固定为 `reduce_scatter_direct`，algorithm 固定为 `single_ring_direc
 peer rank 来自实际 `leftLink_`/`rightLink_` 的 remote rank。
 
 当前初始化 copy 使用 `step=0`，虽然原注释把它描述为“第 -1 步”；最终 copy 使用
-`step=rankSize-1`。因此 step 是展示/配对用逻辑编号，不是对原算法注释的严格直译。
+`step=rankSize-1`。这里的 step 按 7.6 的因果桶合同解释，不是对原算法注释的严格直译。
 
 ### 7.5 AllGather concurrent-direct
 
@@ -391,7 +391,51 @@ phase 固定为 `allgather_direct`，algorithm 固定为 `single_ring_direct`。
 
 与 RS 一样，模板维护 tx/rx 各自的 slice 和 peer context，再由叶子事件 scope 补全动作。
 
-### 7.6 算法选择测试补丁
+### 7.6 step 语义合同与门禁（SEM-006）
+
+`step` 的正式定义是：
+
+> `step` 是一个 phase 内、从 0 开始的逻辑因果桶（causal bucket / round anchor），
+> 用于把准备、通信和收尾 task 关联到相应算法进度。它不是 physical task identity，
+> 也不保证一个 step 只有一个 task。
+
+对 `rank_size=N` 的当前 single-ring direct RS/AG：
+
+```text
+step 0       = round 0 的 init/prelude task + main communication round 0
+step 1..N-2  = main communication round 1..N-2
+step N-1     = 所有 main round 完成后的 final/epilogue task
+```
+
+因此同一个 step 可以包含不同 stream、event、slice 和 task kind；例如 RS 的 step 0
+同时包含主/从流 init copy 和 main round-0 task。这是合法的并行/准备关系，不是
+duplicate。step 只有放在以下作用域中才有意义：
+
+```text
+collective/graph occurrence + phase + step
+```
+
+relation 还必须结合 `slice`、producer/consumer rank、event/signal kind 及其精确
+sequence。不得单独使用 step 建边或推断物理顺序；物理顺序仍来自 direct stream、
+FFts context 和 Notify relation evidence。
+
+`validate_trace.py` 对已明确合同的 `reduce_scatter_direct/allgather_direct` 执行硬门禁：
+
+1. `rank_size` 必须为正整数；
+2. `0 <= step < rank_size`；
+3. ACK、payload、data-signal 等 main-round event 只能位于 `0..rank_size-2`；
+4. `rank_size-1` 只作为 final/epilogue 桶，不接受 main-round link event；
+5. 错误输出 CSV 行号、physical task 坐标及 phase/step/rank_size/slice/event；
+6. 未定义合同的 phase 不套用 Ring 规则，不使用邻接或时间进行猜测。
+
+当前 `test/out/function/merged.csv` 中 28,502 条 RS/AG semantic 全部通过该合同，
+`step_contract_violations=0`。本任务没有增加 `stage_kind`、没有修改 HCOMM schema，
+也没有改变 exact merge 或依赖边 identity。
+
+如果后续真实数据证明同一因果桶内存在无法由 event/slice/rank/sequence 区分的
+init/main 关系，再单独设计 `stage_kind=init|main|final`；在此之前不预设该问题。
+
+### 7.7 算法选择测试补丁
 
 当前有两处净差异明确写有 `[TEST PATCH]`：
 
@@ -688,12 +732,14 @@ execution graph 的执行节点保存 `task_start/task_stop/duration`，顺序/�
 落地后，图 artifact 使用 `graph_schema_version=4`；未来更改 identity、收缩或权重语义必须
 升级版本。
 
-当前 DB replay 的 execution artifact 为 44,008 nodes、53,441 edges、2,059 isolated、
-2,761 roots、2,761 leaves；duplicate node/edge、missing source/destination、self-loop 和
-cycle residual 均为 0。resource artifact 为 11,432 个资源节点、22,245 条边：
-10,051 条顺序边、10,052 条 Notify 同步边和 2,142 条 payload 边；当前样例 boundary 与
-收缩 ambiguity 均为 0，cycle residual 为 0。32,576 个控制/辅助 execution 不作为 resource
-节点，但其稳定 ID 通过 `control_graph_ids/source_execution_edge_ids` 保留在派生边中。
+当前 DB replay 的 execution artifact 为 44,008 nodes、56,675 edges、2,059 isolated、
+2,753 roots、2,753 leaves；duplicate node/edge、missing source/destination、self-loop 和
+cycle residual 均为 0。resource artifact 为 11,432 个真实资源节点和 8 个 boundary、
+25,479 条边：10,051 条顺序边和 15,428 条 Notify 同步边；
+收缩 ambiguity 为 0，cycle residual 为 0。8 个 boundary 分别表示每个 device 最初一条
+slave→main local Notify relation 没有可达的上游资源任务。32,576 个控制/辅助 execution
+不作为 resource 节点，但其稳定 ID 通过 `control_graph_ids/source_execution_edge_ids`
+保留在派生边中。
 
 #### 8.6.4 resource 收缩算法与 artifact
 
@@ -708,8 +754,8 @@ cycle residual 均为 0。resource artifact 为 11,432 个资源节点、22,245 
 
 局部顺序链也按相同“遇到下一个资源任务即停止”规则收缩，派生为
 `resource_stream_order_observed` 或 `resource_ffts_order_observed`。Notify 边分别映射为
-`resource_notify_sync_exact/resource_notify_sync_observed`，payload 映射为
-`resource_payload_semantic`。实际资源节点沿用 execution `graph_id`，因此两种视图可以直接
+`resource_notify_sync_exact/resource_local_notify_sync_exact/resource_notify_sync_observed`。
+实际资源节点沿用 execution `graph_id`，因此两种视图可以直接
 互相定位。
 
 导出合同包含：
@@ -1023,7 +1069,48 @@ ambiguity，禁止 `zip(min)`。稳定 direct relation ID 只包含 channel 与 
 channel；每个 channel 均为 48 Record + 48 Wait，且两端各自只有一个 stream。最终生成
 5,376 条 `direct_notify_sync_exact/exact`：both 4,695、partial 9、none 672、conflict 0。
 原 `peer_signal_semantic` 时间排序边已删除；ACK/data-signal 语义只附着到 exact Notify
-relation，payload 数据边仍独立保留。
+relation。
+
+原有 2,142 条 `peer_payload_semantic` 在移除自身后，全部仍可通过
+`direct_notify_sync_exact -> direct_stream_order_observed × 3` 的最短路径到达；没有一条
+纯 stream 可达，也没有一条依赖 local Notify。它既不增加可达关系，occurrence 又只按语义
+坐标和出现顺序配对，因此 `peer_payload_semantic/resource_payload_semantic` 已从默认因果图
+正式删除并加入禁用 edge kind。`tx/rx_payload_*` 事件仍作为节点语义保留。
+
+#### 8.11.1 主从流 local Notify DB ordinal（DEP-020）
+
+msprof DB 用 `dstRank=-1` 表示 device 内本地控制 Notify。它不进入 8.11 的跨 rank
+channel，而按以下 identity 独立分组：
+
+```text
+LocalNotifyChannel = (
+  node_id,
+  operation_scope,
+  device_id,
+  notify_id
+)
+
+LocalNotifyRelation = (
+  LocalNotifyChannel,
+  db_local_notify_ordinal
+)
+```
+
+`Notify Record` 为 producer，`Notify Wait` 为 consumer。只有两侧各自位于唯一 physical
+stream、数量相等、本地顺序唯一且 channel identity 完整时，才按各侧 stream 内 ordinal
+建立 `local_notify_sync_exact/exact`。配对不比较两个 stream 的时间，也不依赖
+`connection_id`；main→slave 与 slave→main 是两个独立 channel。任何数量不等、多 stream、
+顺序冲突或身份缺失都整组写入 Notify ambiguity artifact，不生成部分关系。
+
+local `notify_id` 可能是接近 `UINT64_MAX` 的十进制字符串。execution CSV reader 必须先用
+整数文本解析，禁止 `int(float(value))`；后者会在 `2^53` 以上合并不同 resource identity。
+回归测试固定两个仅相差 4 的宽整数 Notify ID 不发生碰撞。
+
+当前 replay 共 112 个 local channel，每个 48 Record + 48 Wait；`stream 45→13` 与
+`13→45` 各 56 个 channel，共生成 5,376 条 execution edge。resource graph 将其收缩为
+5,376 条 `resource_local_notify_sync_exact`，沿用 `wait_span_ns` 权重合同。8 条最初的
+slave→main relation 找不到上游资源 frontier，因此每个 device 生成一个稳定 upstream
+boundary；这表示资源视图覆盖边界，不是 missing endpoint。
 
 ### 8.12 msprof operation identity 合同（ID-001～ID-005 撤销）
 
@@ -1067,8 +1154,8 @@ HCOMM 本地自增数冒充跨 rank 共享身份。
 撤销后，HCOMM 不再承担 communicator 锁、map/set、FNV 哈希、`OpParam` 传播、
 operation TLS、worker 快照或额外 plog 字段。semantic schema 保持 v4，merged 合同为
 42 列。当前 `test/out` 回放为 28,502/28,502 exact、44,008 个 physical task、7 个
-operation scope；46 项 Python 单测覆盖跨 device/node 一致性、group 隔离、本地映射歧义
-和 direct Notify ordinal 门禁。
+operation scope；当前 54 项 Python 单测覆盖跨 device/node 一致性、group 隔离、本地
+映射歧义、direct Notify ordinal 和 Ring step 合同门禁。
 
 ## 9. 兼容性与非目标
 

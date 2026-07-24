@@ -15,6 +15,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from diagnosis.dependency_model import (
+        NOTIFY_SEQUENCE_DB_LOCAL_ORDINAL,
         NOTIFY_SEQUENCE_DB_ORDINAL,
         NOTIFY_SEQUENCE_FFTS_GRAPH,
         NOTIFY_SEQUENCE_TOKEN,
@@ -22,6 +23,7 @@ if __package__ in (None, ""):
         normalize_notify_endpoint,
     )
     from diagnosis.merge_timeline import (
+        PhaseConflictError,
         build_operation_scope_assignments,
         merge_records,
         parse_plog_inputs,
@@ -33,22 +35,25 @@ if __package__ in (None, ""):
     )
     from diagnosis.parse_plog import parse_graph_correlation_lines, parse_plog_lines
     from diagnosis.schema import GraphCorrelation, ProfilerTask
-    from diagnosis.validate_trace import validate_rows
+    from diagnosis.validate_trace import collect_step_contract_errors, validate_rows
     from diagnosis.visualize_dependency_graph import (
         analyze_execution_graph,
         build_execution_edges,
         export_dependency_tables,
         read_execution_rows,
+        to_int,
     )
     from diagnosis.visualize_html import build_execution_dependency_model
     from diagnosis.visualize_timeline import assign_time_slots
     from diagnosis.resource_dependency_graph import build_resource_graph
     from diagnosis.validate_dependency_graph import (
+        FORBIDDEN_EDGE_KINDS,
         HARD_ZERO_METRICS,
         validate_dependency_artifacts,
     )
 else:
     from .dependency_model import (
+        NOTIFY_SEQUENCE_DB_LOCAL_ORDINAL,
         NOTIFY_SEQUENCE_DB_ORDINAL,
         NOTIFY_SEQUENCE_FFTS_GRAPH,
         NOTIFY_SEQUENCE_TOKEN,
@@ -56,6 +61,7 @@ else:
         normalize_notify_endpoint,
     )
     from .merge_timeline import (
+        PhaseConflictError,
         build_operation_scope_assignments,
         merge_records,
         parse_plog_inputs,
@@ -67,17 +73,19 @@ else:
     )
     from .parse_plog import parse_graph_correlation_lines, parse_plog_lines
     from .schema import GraphCorrelation, ProfilerTask
-    from .validate_trace import validate_rows
+    from .validate_trace import collect_step_contract_errors, validate_rows
     from .visualize_dependency_graph import (
         analyze_execution_graph,
         build_execution_edges,
         export_dependency_tables,
         read_execution_rows,
+        to_int,
     )
     from .visualize_html import build_execution_dependency_model
     from .visualize_timeline import assign_time_slots
     from .resource_dependency_graph import build_resource_graph
     from .validate_dependency_graph import (
+        FORBIDDEN_EDGE_KINDS,
         HARD_ZERO_METRICS,
         validate_dependency_artifacts,
     )
@@ -188,7 +196,6 @@ def execution_row(index, stream, task, start, kind="sdma", connection=77, event=
         "_start": float(start),
         "_stop": float(start + 1),
         "_duration": 1.0,
-        "_phase_group": "reduce_scatter",
         "profiler_task_kind": kind,
         "event": event,
     }
@@ -281,6 +288,25 @@ def direct_notify_row(
     return row
 
 
+def local_notify_row(
+    index,
+    kind,
+    start,
+    stream,
+    device=0,
+    notify_id=99,
+):
+    return direct_notify_row(
+        index,
+        device,
+        -1,
+        kind,
+        start,
+        notify_id=notify_id,
+        stream=stream,
+    )
+
+
 def dependency_edge(kind, src, dst, edge_id, relation_id=""):
     return {
         "graph_schema_version": "4",
@@ -301,6 +327,14 @@ def dependency_edge(kind, src, dst, edge_id, relation_id=""):
 
 
 class DiagnosisToolTest(unittest.TestCase):
+    def test_dependency_reader_preserves_uint64_notify_identity(self):
+        first = 18446744069414978848
+        second = 18446744069414978852
+
+        self.assertEqual(to_int(str(first)), first)
+        self.assertEqual(to_int(str(second)), second)
+        self.assertNotEqual(to_int(str(first)), to_int(str(second)))
+
     def test_notify_endpoint_roles_normalize_tx_and_rx_to_same_relation(self):
         producer = normalize_notify_endpoint(
             "notify_record", "tx_ack_start", 3, 2
@@ -517,7 +551,89 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertEqual(stats["invalid_matches"], 1)
         self.assertEqual(stats["exact_match_rate_percent"], 50.0)
 
-    def test_exact_allgather_wins_reused_reduce_scatter_task_id(self):
+    def test_ring_step_contract_accepts_causal_buckets(self):
+        rows = [
+            {
+                "match_status": "matched", "duplicate_semantic": "0",
+                "duplicate_profiler": "0", "phase": "reduce_scatter_direct",
+                "step": "0", "rank_size": "8", "event": "copy_start",
+            },
+            {
+                "match_status": "matched", "duplicate_semantic": "0",
+                "duplicate_profiler": "0", "phase": "reduce_scatter_direct",
+                "step": "0", "rank_size": "8", "event": "tx_ack_start",
+            },
+            {
+                "match_status": "matched", "duplicate_semantic": "0",
+                "duplicate_profiler": "0", "phase": "allgather_direct",
+                "step": "6", "rank_size": "8", "event": "tx_payload_start",
+            },
+            {
+                "match_status": "matched", "duplicate_semantic": "0",
+                "duplicate_profiler": "0", "phase": "allgather_direct",
+                "step": "7", "rank_size": "8", "event": "copy_start",
+            },
+            {
+                "match_status": "matched", "duplicate_semantic": "0",
+                "duplicate_profiler": "0", "phase": "allgather_direct",
+                "step": "0", "rank_size": "1", "event": "copy_start",
+            },
+        ]
+        ok, stats = validate_rows(rows, 100.0)
+        self.assertTrue(ok)
+        self.assertEqual(stats["step_contract_rows"], 5)
+        self.assertEqual(stats["step_contract_violations"], 0)
+
+    def test_ring_step_contract_rejects_invalid_coordinates(self):
+        rows = [
+            {
+                "match_status": "matched", "duplicate_semantic": "0",
+                "duplicate_profiler": "0", "node_id": "node0",
+                "device_id": "0", "stream_id": "45", "task_id": "7",
+                "phase": "reduce_scatter_direct", "step": "-1",
+                "rank_size": "8", "slice": "2", "event": "copy_start",
+            },
+            {
+                "match_status": "matched", "duplicate_semantic": "0",
+                "duplicate_profiler": "0", "phase": "allgather_direct",
+                "step": "8", "rank_size": "8", "event": "copy_start",
+            },
+            {
+                "match_status": "matched", "duplicate_semantic": "0",
+                "duplicate_profiler": "0", "phase": "allgather_direct",
+                "step": "7", "rank_size": "8", "event": "rx_ack_start",
+            },
+        ]
+        ok, stats = validate_rows(rows, 100.0)
+        self.assertFalse(ok)
+        self.assertEqual(stats["step_contract_violations"], 3)
+        self.assertEqual(stats["step_contract_step_out_of_range"], 2)
+        self.assertEqual(stats["step_contract_main_event_in_epilogue"], 1)
+
+        errors = collect_step_contract_errors(rows)
+        self.assertEqual(len(errors), 3)
+        self.assertIn(
+            "row 2: reason=step_out_of_range node_id='node0' "
+            "device_id='0' stream_id='45' task_id='7'",
+            errors[0],
+        )
+        self.assertIn("phase='reduce_scatter_direct'", errors[0])
+        self.assertIn("step='-1'", errors[0])
+
+    def test_ring_step_contract_does_not_guess_for_unknown_phase(self):
+        rows = [
+            {
+                "match_status": "matched", "duplicate_semantic": "0",
+                "duplicate_profiler": "0", "phase": "mesh_phase",
+                "step": "99", "rank_size": "8", "event": "tx_payload_start",
+            },
+        ]
+        ok, stats = validate_rows(rows, 100.0)
+        self.assertTrue(ok)
+        self.assertEqual(stats["step_contract_rows"], 0)
+        self.assertEqual(stats["step_contract_violations"], 0)
+
+    def test_direct_rs_ag_reuse_raises_phase_conflict(self):
         profilers = [profiler_task("MEMCPY_ASYNC", 13, 3, 200, duration=2)]
         semantics = list(parse_plog_lines([
             "[HcclTaskSemantic] schema_version[2] device_id[0] stream_id[13] hccl_task_id[3] "
@@ -531,12 +647,12 @@ class DiagnosisToolTest(unittest.TestCase):
             "task_kind[sdma] event[copy_start] phase[allgather_direct] step[0]\n",
         ]))
 
-        rows, stats = merge_records(semantics, profilers)
-
-        self.assertEqual(stats["matched"], 1)
-        self.assertEqual(stats["unmatched_semantic"], 2)
-        self.assertEqual([row for row in rows if row["match_status"] == "matched"][0]["phase"],
-                         "allgather_direct")
+        with self.assertRaisesRegex(
+            PhaseConflictError,
+            "phase conflict.*stream_id=13.*task_id=3.*"
+            "reduce_scatter_direct.*allgather_direct",
+        ):
+            merge_records(semantics, profilers)
 
     def test_msprof_db_preserves_integer_time_and_enriches_metadata(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -707,6 +823,39 @@ class DiagnosisToolTest(unittest.TestCase):
             edge["kind"] == "peer_signal_semantic" for edge in edges
         ))
 
+    def test_peer_payload_semantic_does_not_create_causal_edge(self):
+        tx = execution_row(
+            0,
+            45,
+            1,
+            0,
+            kind="notify_record",
+            event="tx_payload_start",
+            rank=0,
+            peer=1,
+            step=0,
+            slice_id=6,
+        )
+        rx = execution_row(
+            1,
+            45,
+            1,
+            1,
+            event="rx_payload_copy_start",
+            rank=1,
+            peer=0,
+            step=0,
+            slice_id=6,
+        )
+
+        edges = build_execution_edges([tx, rx])
+
+        self.assertFalse(any(
+            edge["kind"] == "peer_payload_semantic" for edge in edges
+        ))
+        self.assertIn("peer_payload_semantic", FORBIDDEN_EDGE_KINDS)
+        self.assertIn("resource_payload_semantic", FORBIDDEN_EDGE_KINDS)
+
     def test_direct_notify_db_ordinal_builds_exact_edges_without_cross_device_time(self):
         records = [
             direct_notify_row(0, 0, 1, "notify_record", 10),
@@ -808,6 +957,118 @@ class DiagnosisToolTest(unittest.TestCase):
         ]
         self.assertEqual(len(conflicts), 1)
         self.assertEqual(conflicts[0]["relation_id"], exact[0]["relation_id"])
+
+    def test_local_notify_db_ordinal_builds_exact_cross_stream_edges(self):
+        records = [
+            local_notify_row(0, "notify_record", 10, 45),
+            local_notify_row(1, "notify_record", 20, 45),
+        ]
+        waits = [
+            local_notify_row(2, "notify_wait", 9, 13),
+            local_notify_row(3, "notify_wait", 19, 13),
+        ]
+        ambiguities = []
+
+        edges = build_execution_edges(
+            records + waits,
+            notify_ambiguities=ambiguities,
+        )
+        exact = [
+            edge for edge in edges
+            if edge["kind"] == "local_notify_sync_exact"
+        ]
+
+        self.assertEqual(len(exact), 2)
+        self.assertEqual(
+            {
+                edge["sequence_value"]: (edge["src"], edge["dst"])
+                for edge in exact
+            },
+            {"0": ("p0", "p2"), "1": ("p1", "p3")},
+        )
+        self.assertEqual(
+            {edge["sequence_kind"] for edge in exact},
+            {NOTIFY_SEQUENCE_DB_LOCAL_ORDINAL},
+        )
+        self.assertEqual({edge["confidence"] for edge in exact}, {"exact"})
+        self.assertEqual(ambiguities, [])
+
+    def test_local_notify_supports_slave_to_main_direction(self):
+        record = local_notify_row(0, "notify_record", 10, 13)
+        wait = local_notify_row(1, "notify_wait", 9, 45)
+
+        edges = build_execution_edges([record, wait])
+        exact = [
+            edge for edge in edges
+            if edge["kind"] == "local_notify_sync_exact"
+        ]
+
+        self.assertEqual(len(exact), 1)
+        self.assertEqual(
+            (exact[0]["src_stream"], exact[0]["dst_stream"]),
+            (13, 45),
+        )
+
+    def test_local_notify_unequal_counts_are_not_partially_zipped(self):
+        rows = [
+            local_notify_row(0, "notify_record", 10, 45),
+            local_notify_row(1, "notify_record", 20, 45),
+            local_notify_row(2, "notify_wait", 9, 13),
+        ]
+        ambiguities = []
+
+        edges = build_execution_edges(rows, notify_ambiguities=ambiguities)
+
+        self.assertFalse(any(
+            edge["kind"] == "local_notify_sync_exact" for edge in edges
+        ))
+        local = [
+            row for row in ambiguities
+            if row["sequence_kind"] == NOTIFY_SEQUENCE_DB_LOCAL_ORDINAL
+        ]
+        self.assertEqual(len(local), 1)
+        self.assertEqual(local[0]["status"], "ambiguous")
+        self.assertEqual(
+            (local[0]["producer_count"], local[0]["consumer_count"]),
+            (2, 1),
+        )
+
+    def test_local_notify_multiple_role_streams_are_ambiguous(self):
+        rows = [
+            local_notify_row(0, "notify_record", 10, 45),
+            local_notify_row(1, "notify_record", 20, 46),
+            local_notify_row(2, "notify_wait", 9, 13),
+            local_notify_row(3, "notify_wait", 19, 13),
+        ]
+        ambiguities = []
+
+        edges = build_execution_edges(rows, notify_ambiguities=ambiguities)
+
+        self.assertFalse(any(
+            edge["kind"] == "local_notify_sync_exact" for edge in edges
+        ))
+        self.assertEqual(len(ambiguities), 1)
+        self.assertEqual(ambiguities[0]["status"], "ambiguous")
+        self.assertEqual(ambiguities[0]["producer_stream_count"], 2)
+
+    def test_local_and_cross_rank_notify_channels_do_not_mix(self):
+        rows = [
+            local_notify_row(0, "notify_record", 10, 45),
+            local_notify_row(1, "notify_wait", 9, 13),
+            direct_notify_row(2, 0, 1, "notify_record", 10),
+            direct_notify_row(3, 1, 0, "notify_wait", 9),
+        ]
+
+        edges = build_execution_edges(rows)
+
+        self.assertEqual(
+            sum(edge["kind"] == "local_notify_sync_exact" for edge in edges),
+            1,
+        )
+        self.assertEqual(
+            sum(edge["kind"] == "direct_notify_sync_exact" for edge in edges),
+            1,
+        )
 
     def test_ffts_notify_unique_relation_builds_observed_edge(self):
         producer = ffts_notify_row(
@@ -1096,6 +1357,44 @@ class DiagnosisToolTest(unittest.TestCase):
             set(edge["control_graph_ids"].split(";")),
             {"p1", "p2"},
         )
+
+    def test_resource_graph_preserves_local_notify_kind_and_metrics(self):
+        resource_before = execution_row(0, 45, 1, 0)
+        record = execution_row(1, 45, 2, 2, kind="notify_record")
+        wait = execution_row(2, 13, 1, 1, kind="notify_wait")
+        wait["_stop"] = 4.0
+        wait["_duration"] = 3.0
+        resource_after = execution_row(3, 13, 2, 5)
+        edges = [
+            dependency_edge(
+                "direct_stream_order_observed", "p0", "p1", "e_order_a"
+            ),
+            dependency_edge(
+                "local_notify_sync_exact",
+                "p1",
+                "p2",
+                "e_local_notify",
+                "lnr_fixture",
+            ),
+            dependency_edge(
+                "direct_stream_order_observed", "p2", "p3", "e_order_b"
+            ),
+        ]
+
+        _, resource_edges, ambiguities = build_resource_graph(
+            [resource_before, record, wait, resource_after],
+            edges,
+        )
+
+        self.assertEqual(ambiguities, [])
+        self.assertEqual(len(resource_edges), 1)
+        edge = resource_edges[0]
+        self.assertEqual(edge["kind"], "resource_local_notify_sync_exact")
+        self.assertEqual((edge["src"], edge["dst"]), ("p0", "p3"))
+        self.assertEqual(edge["relation_id"], "lnr_fixture")
+        self.assertEqual(edge["wait_span_ns"], "3000")
+        self.assertEqual(edge["weight_ns"], "3000")
+        self.assertEqual(edge["timing_status"], "same_node_observed")
 
     def test_resource_graph_cross_node_does_not_compare_remote_timestamps(self):
         before = execution_row(0, 45, 1, 0)

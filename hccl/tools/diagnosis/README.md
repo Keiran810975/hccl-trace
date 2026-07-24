@@ -104,8 +104,9 @@ resource edge 保存 `source_execution_edge_ids/control_graph_ids/record_graph_i
 
 依赖图 HTML/SVG 只读取已导出的 node/edge artifact，不在布局代码中重新推断依赖。
 `validate_dependency_graph.py` 对 execution/resource 的重复 ID、缺失端点、自环、环、
-Notify/收缩歧义及禁用伪边做门禁，并显式统计 stream/sync/payload/boundary。
-`ffts_physical_stream_order`、默认 `time_inferred` 和旧 `notify_sync_inferred` 必须为 0。
+Notify/收缩歧义及禁用伪边做门禁，并显式统计 stream/sync/boundary。
+`ffts_physical_stream_order`、默认 `time_inferred`、旧 `notify_sync_inferred` 和已删除的
+payload semantic edge 必须为 0。
 可用 `--golden-summary` 固定期望统计；任何未更新的统计变化都会使门禁失败。
 
 依赖边包含证据等级：
@@ -119,18 +120,27 @@ Notify/收缩歧义及禁用伪边做门禁，并显式统计 stream/sync/payloa
   `dependency_notify_ambiguities.csv`，不生成因果边。
 - `direct_notify_sync_exact`：按 DB operation scope、Notify resource、规范 rank 方向分
   channel，再按两侧各自 local physical stream 的 ordinal 配对，`exact`；不比较跨设备时间。
-- `peer_payload_semantic`：显式 peer rank、phase、step、slice 相同，再按 occurrence 顺序
-  配对，`semantic`；payload 数据边与 Notify 控制边独立。
+- `local_notify_sync_exact`：对 DB `dstRank=-1` 的 device-local Notify，按
+  `(node, operation scope, device, notify)` 分 channel，再按 Record/Wait 各自 physical
+  stream 内 ordinal 配对，`exact`；不比较两个 stream 的时间。
 
 Notify 资源会跨 step、graph 和 operation 复用，不能单独代表一次同步。FFts relation 使用
 graph instance；direct relation 使用
 `(node, operation scope, notify, producer, consumer, db_notify_ordinal)`。两者都不包含跨设备
-时间或 `connection_id`。
+时间或 `connection_id`。local relation 使用
+`(node, operation scope, device, notify, db_local_notify_ordinal)`；64 位 Notify ID 按整数
+文本精确解析，不经过 `float`。
 
 当前 DB golden replay 的 FFts Notify 结果为 4,676 条 observed edge、28 条 single
 ambiguity、0 条 multi-endpoint ambiguity、0 条 incomplete。direct 结果为 5,376 条 exact：
 语义 both 4,695、partial 9、none 672、conflict 0。ACK/data-signal 不再生成
-`peer_signal_semantic` 时间排序边。
+`peer_signal_semantic` 时间排序边。local 结果为 5,376 条 exact，主→从和从→主各 2,688
+条，ambiguity/incomplete 为 0。
+
+`peer_payload_semantic/resource_payload_semantic` 已从默认因果图正式删除。当前样例原有
+2,142 条 payload semantic edge 全部可由“一条 `direct_notify_sync_exact` + 三条
+`direct_stream_order_observed`”的最短路径到达，未增加任何可达关系；其 occurrence 又只按
+语义坐标和出现顺序配对。门禁拒绝旧 edge kind，`tx/rx_payload_*` 事件仍保留为节点语义。
 
 DEP-008 已删除默认 connection/time Notify 推断。旧 JSON 的 3,016 条和 DB 的 5,094 条
 最近时间边均不再进入因果图；如果未来恢复研究模式，必须使用独立显式入口并标为
@@ -171,4 +181,8 @@ python test/measure_msprof_db_parse.py \
 ```
 
 质量门禁只接受 exact。质量结论必须同时报告 exact rate、kind mismatch、
-unmatched semantic 和 duplicate execution key。
+unmatched semantic 和 duplicate execution key。对当前 single-ring direct RS/AG，
+门禁还校验 phase 内的 step 因果桶合同：`0 <= step < rank_size`，且
+ACK/payload/data-signal 等 main-round event 不得进入 `step=rank_size-1` 的
+final/epilogue 桶。未知 phase 不套用 Ring 规则；错误会输出可定位的 CSV 行和 task
+坐标，不自动猜测修正。

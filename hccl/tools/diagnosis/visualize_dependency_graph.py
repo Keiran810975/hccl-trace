@@ -21,7 +21,10 @@ if __package__ in (None, ""):
         DirectNotifyRelationIdentity,
         ExecutionIdentity,
         GRAPH_SCHEMA_VERSION,
+        LocalNotifyChannelIdentity,
+        LocalNotifyRelationIdentity,
         NOTIFY_ENDPOINT_RULES,
+        NOTIFY_RANK_DOMAIN_DEVICE_LOCAL,
         NOTIFY_RANK_DOMAIN_USER,
         NOTIFY_RELATION_AMBIGUOUS,
         NOTIFY_RELATION_CONFLICT,
@@ -30,6 +33,7 @@ if __package__ in (None, ""):
         NOTIFY_ROLE_CONSUMER,
         NOTIFY_ROLE_PRODUCER,
         NOTIFY_SEQUENCE_DB_ORDINAL,
+        NOTIFY_SEQUENCE_DB_LOCAL_ORDINAL,
         NOTIFY_SEQUENCE_FFTS_GRAPH,
         NotifyRelationIdentity,
         normalize_notify_endpoint,
@@ -42,7 +46,10 @@ else:
         DirectNotifyRelationIdentity,
         ExecutionIdentity,
         GRAPH_SCHEMA_VERSION,
+        LocalNotifyChannelIdentity,
+        LocalNotifyRelationIdentity,
         NOTIFY_ENDPOINT_RULES,
+        NOTIFY_RANK_DOMAIN_DEVICE_LOCAL,
         NOTIFY_RANK_DOMAIN_USER,
         NOTIFY_RELATION_AMBIGUOUS,
         NOTIFY_RELATION_CONFLICT,
@@ -51,6 +58,7 @@ else:
         NOTIFY_ROLE_CONSUMER,
         NOTIFY_ROLE_PRODUCER,
         NOTIFY_SEQUENCE_DB_ORDINAL,
+        NOTIFY_SEQUENCE_DB_LOCAL_ORDINAL,
         NOTIFY_SEQUENCE_FFTS_GRAPH,
         NotifyRelationIdentity,
         normalize_notify_endpoint,
@@ -63,7 +71,7 @@ EDGE_COLOR = {
     "ffts_logical_stream_order": "#5c6bc0",
     "ffts_notify_sync_observed": "#2b8a3e",
     "direct_notify_sync_exact": "#7b3fb3",
-    "peer_payload_semantic": "#1f77b4",
+    "local_notify_sync_exact": "#d9488b",
 }
 PHYSICAL_EDGE_KINDS = tuple(EDGE_COLOR)
 
@@ -126,8 +134,13 @@ NOTIFY_AMBIGUITY_FIELDS = [
 def to_int(value: object, default: int = -1) -> int:
     try:
         text = str(value).strip()
-        return int(float(text)) if text else default
-    except (TypeError, ValueError):
+        if not text:
+            return default
+        try:
+            return int(text, 10)
+        except ValueError:
+            return int(float(text))
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -152,14 +165,6 @@ def execution_time_order_value(row: dict, name: str) -> Decimal:
     if internal in row:
         return row[internal]
     return Decimal(str(row["_{}".format(name)]))
-
-
-def phase_group(phase: str) -> str:
-    if phase.startswith("reduce_scatter"):
-        return "reduce_scatter"
-    if phase.startswith("allgather"):
-        return "allgather"
-    return phase or "hardware"
 
 
 def read_execution_rows(path: Path) -> List[dict]:
@@ -248,7 +253,6 @@ def read_execution_rows(path: Path) -> List[dict]:
                 "_start_order": min(start_order, stop_order),
                 "_stop_order": max(start_order, stop_order),
                 "_duration": abs(duration),
-                "_phase_group": phase_group(row.get("phase", "")),
             })
             rows.append(item)
     rows.sort(key=execution_sort_key)
@@ -314,7 +318,6 @@ def read_graph_artifact_nodes(path: Path) -> List[dict]:
                 "_start_order": start_order,
                 "_stop_order": stop_order,
                 "_duration": float(abs(duration)),
-                "_phase_group": phase_group(row.get("phase", "")),
                 "_node_kind": row.get("node_kind", "execution"),
                 "_boundary_side": row.get("boundary_side", ""),
                 "_boundary_reason": row.get("boundary_reason", ""),
@@ -439,9 +442,9 @@ def build_execution_edges(
     _add_ffts_logical_stream_order_edges(rows, add)
     ambiguities = _add_ffts_notify_sync_edges(rows, add)
     ambiguities.extend(_add_direct_notify_sync_edges(rows, add))
+    ambiguities.extend(_add_local_notify_sync_edges(rows, add))
     if notify_ambiguities is not None:
         notify_ambiguities.extend(ambiguities)
-    _add_peer_semantic_edges(rows, add)
     return sorted(edges, key=lambda edge: edge["edge_id"])
 
 
@@ -1083,47 +1086,210 @@ def _add_direct_notify_sync_edges(rows: List[dict], add) -> List[dict]:
     return ambiguities
 
 
-def _add_peer_semantic_edges(rows: List[dict], add) -> None:
-    receives: Dict[Tuple[int, int, str, int, int, str], List[dict]] = defaultdict(list)
-    transmits: Dict[Tuple[int, int, str, int, int, str], List[dict]] = defaultdict(list)
-    receive_kind = {
-        "rx_payload_reduce_start": "payload",
-        "rx_payload_copy_start": "payload",
+def _local_notify_endpoint(row: dict):
+    """Normalize one device-local direct Notify endpoint from DB fields."""
+    if row["_subtask_id"] >= 0 or row["_peer_rank"] != -1:
+        return None
+    task_kind = str(
+        row.get("profiler_task_kind") or row.get("task_kind") or ""
+    ).strip().lower()
+    if task_kind not in ("notify_record", "notify_wait"):
+        return None
+    operation_scope = str(
+        row.get("_operation_scope", row.get("profiler_op_scope", ""))
+    ).strip()
+    operation_scope_status = row.get(
+        "_operation_scope_status",
+        row.get("profiler_op_scope_status", ""),
+    )
+    if operation_scope_status != "unique":
+        operation_scope = ""
+    channel = LocalNotifyChannelIdentity(
+        node_id=row["_node_id"],
+        operation_scope=operation_scope,
+        device_id=row["_device_id"],
+        notify_id=row["_notify_id"],
+    )
+    return {
+        "row": row,
+        "role": (
+            NOTIFY_ROLE_PRODUCER
+            if task_kind == "notify_record"
+            else NOTIFY_ROLE_CONSUMER
+        ),
+        "channel": channel,
     }
-    for row in rows:
-        kind = receive_kind.get(row.get("event", ""))
-        if kind and row["_user_rank"] >= 0 and row["_peer_rank"] >= 0:
-            key = (
-                row["_peer_rank"], row["_user_rank"], kind, row["_step"], row["_slice"],
-                row["_phase_group"],
-            )
-            receives[key].append(row)
 
-    transmit_kind = {
-        "tx_payload_start": "payload",
-    }
-    for src in rows:
-        kind = transmit_kind.get(src.get("event", ""))
-        if not kind or src["_user_rank"] < 0 or src["_peer_rank"] < 0:
-            continue
-        key = (
-            src["_user_rank"], src["_peer_rank"], kind, src["_step"], src["_slice"],
-            src["_phase_group"],
+
+def _local_notify_ambiguity_row(
+    channel: LocalNotifyChannelIdentity,
+    endpoints: List[dict],
+    status: str,
+    reason: str,
+    missing_fields: str = "",
+) -> dict:
+    role_counts = Counter(endpoint["role"] for endpoint in endpoints)
+    producer_streams = {
+        (
+            endpoint["row"]["_node_id"],
+            endpoint["row"]["_device_id"],
+            endpoint["row"]["_stream_id"],
         )
-        transmits[key].append(src)
+        for endpoint in endpoints
+        if endpoint["role"] == NOTIFY_ROLE_PRODUCER
+    }
+    consumer_streams = {
+        (
+            endpoint["row"]["_node_id"],
+            endpoint["row"]["_device_id"],
+            endpoint["row"]["_stream_id"],
+        )
+        for endpoint in endpoints
+        if endpoint["role"] == NOTIFY_ROLE_CONSUMER
+    }
+    missing_role = ""
+    if not role_counts[NOTIFY_ROLE_PRODUCER]:
+        missing_role = NOTIFY_ROLE_PRODUCER
+    elif not role_counts[NOTIFY_ROLE_CONSUMER]:
+        missing_role = NOTIFY_ROLE_CONSUMER
+    return {
+        "graph_schema_version": GRAPH_SCHEMA_VERSION,
+        "relation_id": channel.stable_id,
+        "status": status,
+        "missing_role": missing_role,
+        "missing_fields": missing_fields,
+        "endpoint_count": len(endpoints),
+        "producer_count": role_counts[NOTIFY_ROLE_PRODUCER],
+        "consumer_count": role_counts[NOTIFY_ROLE_CONSUMER],
+        "producer_stream_count": len(producer_streams),
+        "consumer_stream_count": len(consumer_streams),
+        "node_id": channel.node_id,
+        "operation_scope": channel.operation_scope,
+        "rank_domain": NOTIFY_RANK_DOMAIN_DEVICE_LOCAL,
+        "producer_rank": -1,
+        "consumer_rank": -1,
+        "signal_kind": "",
+        "phase": "",
+        "step": -1,
+        "slice": -1,
+        "notify_id": channel.notify_id,
+        "sequence_kind": NOTIFY_SEQUENCE_DB_LOCAL_ORDINAL,
+        "sequence_value": "",
+        "semantic_status": "none",
+        "endpoint_graph_ids": "|".join(
+            sorted(endpoint["row"]["_graph_id"] for endpoint in endpoints)
+        ),
+        "reason": reason,
+    }
 
-    for key, senders in transmits.items():
-        receivers = receives.get(key, [])
-        if len(senders) != len(receivers):
+
+def _add_local_notify_sync_edges(rows: List[dict], add) -> List[dict]:
+    """Pair device-local Record/Wait sequences without cross-stream time zipping."""
+    groups: Dict[str, List[dict]] = defaultdict(list)
+    channels: Dict[str, LocalNotifyChannelIdentity] = {}
+    ambiguities: List[dict] = []
+    for row in rows:
+        endpoint = _local_notify_endpoint(row)
+        if endpoint is None:
             continue
-        senders.sort(key=lambda row: (row["_start"], row["_source_row"]))
-        receivers.sort(key=lambda row: (row["_start"], row["_source_row"]))
-        for src, dst in zip(senders, receivers):
-            add(
-                "peer_payload_semantic", src, dst,
-                "peer_rank semantic pair for payload, aligned by occurrence order",
-                "semantic_peer_phase_step_slice_occurrence", "semantic",
+        channel = endpoint["channel"]
+        if not channel.complete:
+            ambiguities.append(_local_notify_ambiguity_row(
+                channel,
+                [endpoint],
+                NOTIFY_RELATION_INCOMPLETE,
+                "local Notify endpoint has incomplete DB channel metadata",
+                "|".join(channel.missing_fields),
+            ))
+            continue
+        if channel.stable_id in channels and channels[channel.stable_id] != channel:
+            raise ValueError(
+                "local Notify channel stable ID collision for {}".format(
+                    channel.stable_id
+                )
             )
+        channels[channel.stable_id] = channel
+        groups[channel.stable_id].append(endpoint)
+
+    for channel_id, endpoints in groups.items():
+        channel = channels[channel_id]
+        producers = [
+            endpoint for endpoint in endpoints
+            if endpoint["role"] == NOTIFY_ROLE_PRODUCER
+        ]
+        consumers = [
+            endpoint for endpoint in endpoints
+            if endpoint["role"] == NOTIFY_ROLE_CONSUMER
+        ]
+        producer_streams = {
+            (
+                endpoint["row"]["_node_id"],
+                endpoint["row"]["_device_id"],
+                endpoint["row"]["_stream_id"],
+            )
+            for endpoint in producers
+        }
+        consumer_streams = {
+            (
+                endpoint["row"]["_node_id"],
+                endpoint["row"]["_device_id"],
+                endpoint["row"]["_stream_id"],
+            )
+            for endpoint in consumers
+        }
+        if not producers or not consumers:
+            ambiguities.append(_local_notify_ambiguity_row(
+                channel,
+                endpoints,
+                NOTIFY_RELATION_SINGLE,
+                "local Notify DB channel has only one endpoint role",
+            ))
+            continue
+        if len(producer_streams) != 1 or len(consumer_streams) != 1:
+            ambiguities.append(_local_notify_ambiguity_row(
+                channel,
+                endpoints,
+                NOTIFY_RELATION_AMBIGUOUS,
+                "local Notify role is not totally ordered by one physical stream",
+            ))
+            continue
+        if len(producers) != len(consumers):
+            ambiguities.append(_local_notify_ambiguity_row(
+                channel,
+                endpoints,
+                NOTIFY_RELATION_AMBIGUOUS,
+                "local Notify Record/Wait counts differ; ordinal alignment is unsafe",
+            ))
+            continue
+        if (
+            _has_ambiguous_direct_order(producers)
+            or _has_ambiguous_direct_order(consumers)
+        ):
+            ambiguities.append(_local_notify_ambiguity_row(
+                channel,
+                endpoints,
+                NOTIFY_RELATION_AMBIGUOUS,
+                "local Notify per-stream execution order is not unique",
+            ))
+            continue
+
+        producers.sort(key=_direct_notify_order_key)
+        consumers.sort(key=_direct_notify_order_key)
+        for ordinal, (producer, consumer) in enumerate(zip(producers, consumers)):
+            relation = LocalNotifyRelationIdentity(channel, ordinal)
+            add(
+                "local_notify_sync_exact",
+                producer["row"],
+                consumer["row"],
+                "same device-local DB Notify channel and per-stream execution ordinal",
+                "msprof_local_notify_resource_and_per_stream_ordinal",
+                "exact",
+                relation.stable_id,
+                NOTIFY_SEQUENCE_DB_LOCAL_ORDINAL,
+                str(ordinal),
+                "none",
+            )
+    return ambiguities
 
 
 def analyze_execution_graph(rows: List[dict], edges: List[dict]) -> Counter:

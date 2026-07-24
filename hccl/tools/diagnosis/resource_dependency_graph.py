@@ -42,6 +42,7 @@ ORDER_EDGE_KINDS = frozenset({
 })
 SYNC_EDGE_KIND_MAP = {
     "direct_notify_sync_exact": "resource_notify_sync_exact",
+    "local_notify_sync_exact": "resource_local_notify_sync_exact",
     "ffts_notify_sync_observed": "resource_notify_sync_observed",
 }
 RESOURCE_EDGE_COLOR = {
@@ -49,7 +50,7 @@ RESOURCE_EDGE_COLOR = {
     "resource_ffts_order_observed": "#5c6bc0",
     "resource_notify_sync_observed": "#2b8a3e",
     "resource_notify_sync_exact": "#7b3fb3",
-    "resource_payload_semantic": "#1f77b4",
+    "resource_local_notify_sync_exact": "#d9488b",
 }
 
 RESOURCE_NODE_FIELDS = [
@@ -464,7 +465,7 @@ def build_resource_graph(
             "observed",
         )
 
-    contract_kinds = set(SYNC_EDGE_KIND_MAP) | {"peer_payload_semantic"}
+    contract_kinds = set(SYNC_EDGE_KIND_MAP)
     for source_edge in sorted(execution_edges, key=lambda item: item["edge_id"]):
         if source_edge["kind"] not in contract_kinds:
             continue
@@ -523,12 +524,8 @@ def build_resource_graph(
             set(upstream_path["control_ids"])
             | set(downstream_path["control_ids"])
         )
-        if source_edge["kind"] in SYNC_EDGE_KIND_MAP:
-            kind = SYNC_EDGE_KIND_MAP[source_edge["kind"]]
-            reason = "Notify record/wait control chain contracted between resource tasks"
-        else:
-            kind = "resource_payload_semantic"
-            reason = "payload semantic dependency projected to unique resource frontiers"
+        kind = SYNC_EDGE_KIND_MAP[source_edge["kind"]]
+        reason = "Notify record/wait control chain contracted between resource tasks"
         add_edge(
             kind,
             src_id,

@@ -23,6 +23,8 @@ FORBIDDEN_EDGE_KINDS = frozenset({
     "ffts_physical_stream_order",
     "notify_sync_inferred",
     "peer_signal_semantic",
+    "peer_payload_semantic",
+    "resource_payload_semantic",
 })
 HARD_ZERO_METRICS = (
     "duplicate_node_ids",
@@ -118,6 +120,7 @@ def validate_dependency_artifacts(
         execution_kinds.get(kind, 0)
         for kind in (
             "direct_notify_sync_exact",
+            "local_notify_sync_exact",
             "ffts_notify_sync_observed",
         )
     )
@@ -132,7 +135,7 @@ def validate_dependency_artifacts(
     stats["resource_sync_edges"] = sum(
         count
         for kind, count in resource_kinds.items()
-        if kind.startswith("resource_notify_sync")
+        if kind.startswith("resource_") and "notify_sync" in kind
     )
     stats["resource_payload_edges"] = resource_kinds.get(
         "resource_payload_semantic", 0

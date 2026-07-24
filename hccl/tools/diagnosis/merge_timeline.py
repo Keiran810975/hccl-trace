@@ -57,6 +57,9 @@ FFTS_TASK_KIND_KERNEL_TYPES = {
     "notify_wait": {"NOTIFY WAIT"},
 }
 
+class PhaseConflictError(ValueError):
+    """One physical execution was claimed by different semantic phases."""
+
 
 def merge_records(
     semantics: Iterable[SemanticRecord],
@@ -78,7 +81,6 @@ def merge_records(
     stats.update(operation_scope_stats)
 
     semantic_counts = Counter(_semantic_dedupe_key(record) for record in semantic_list)
-    semantic_task_key_counts = Counter(record.merge_key for record in semantic_list)
     profiler_execution_counts = Counter(record.execution_key for record in profiler_list)
     profiler_exact_by_key = defaultdict(list)
     profiler_composite_by_execution = defaultdict(list)
@@ -99,6 +101,7 @@ def merge_records(
         1 for count in correlation_counts.values() if count > 1)
     rows = []
     matched_profiler_keys = set()
+    matched_semantics = {}
 
     for semantic in semantic_list:
         if semantic.device_id < 0:
@@ -128,8 +131,7 @@ def merge_records(
             match_confidence = "exact"
             stats["ffts_parent_ctx_matches"] += 1
         else:
-            exact_matches = _exact_matches(
-                profiler_exact_by_key, semantic, semantic_task_key_counts)
+            exact_matches = _exact_matches(profiler_exact_by_key, semantic)
             if exact_matches:
                 matches = exact_matches
                 match_method = "task_id"
@@ -147,15 +149,38 @@ def merge_records(
             stats["unmatched_semantic"] += 1
             rows.append(_merged_row("unmatched_semantic", semantic, None, duplicate_semantic, False))
             continue
-        if matched_profiler.execution_key in matched_profiler_keys:
+        previous_semantic = matched_semantics.get(
+            matched_profiler.execution_key
+        )
+        if previous_semantic is not None:
+            if _normalized_phase(previous_semantic.phase) != _normalized_phase(
+                semantic.phase
+            ):
+                raise PhaseConflictError(_phase_conflict_message(
+                    matched_profiler,
+                    previous_semantic,
+                    semantic,
+                ))
             stats["ambiguous_semantic"] += 1
-            rows.append(_merged_row("ambiguous_semantic", semantic, matched_profiler,
-                                    duplicate_semantic, True, match_method, match_confidence,
-                                    operation_scope=_operation_scope_for(
-                                        operation_scopes, matched_profiler)))
+            rows.append(_merged_row(
+                "ambiguous_semantic",
+                semantic,
+                matched_profiler,
+                duplicate_semantic,
+                True,
+                match_method,
+                match_confidence,
+                matched_correlation,
+                _operation_scope_for(
+                    operation_scopes,
+                    matched_profiler,
+                ),
+            ))
             continue
+        matched_semantics[matched_profiler.execution_key] = semantic
         notify_mismatches = _notify_metadata_mismatches(
-            semantic, matched_profiler
+            semantic,
+            matched_profiler,
         )
         if notify_mismatches:
             for mismatch in notify_mismatches:
@@ -178,9 +203,17 @@ def merge_records(
         if match_confidence == "exact":
             stats["exact_matched"] += 1
         matched_profiler_keys.add(matched_profiler.execution_key)
-        rows.append(_merged_row("matched", semantic, matched_profiler, duplicate_semantic, duplicate_profiler,
-                                match_method, match_confidence, matched_correlation,
-                                _operation_scope_for(operation_scopes, matched_profiler)))
+        rows.append(_merged_row(
+            "matched",
+            semantic,
+            matched_profiler,
+            duplicate_semantic,
+            duplicate_profiler,
+            match_method,
+            match_confidence,
+            matched_correlation,
+            _operation_scope_for(operation_scopes, matched_profiler),
+        ))
 
     for task in profiler_list:
         if task.execution_key in matched_profiler_keys:
@@ -338,14 +371,47 @@ def _notify_metadata_mismatches(
 def _exact_matches(
     profiler_exact_by_key,
     semantic: SemanticRecord,
-    semantic_task_key_counts,
 ) -> List[ProfilerTask]:
     if semantic.ffts_ctx_id >= 0:
         return []
-    if semantic.phase.startswith("reduce_scatter") and semantic_task_key_counts[semantic.merge_key] > 1:
-        return []
     tasks = _group_lookup(profiler_exact_by_key, semantic, semantic.task_id)
     return [task for task in tasks if _is_compatible_task_kind(semantic, task)]
+
+
+def _normalized_phase(value: str) -> str:
+    return str(value or "").strip()
+
+
+def _phase_conflict_message(
+    profiler: ProfilerTask,
+    previous: SemanticRecord,
+    current: SemanticRecord,
+) -> str:
+    identity = (
+        "node_id={!r}, device_id={}, stream_id={}, task_id={}, "
+        "subtask_id={}, connection_id={}"
+    ).format(
+        profiler.node_id,
+        profiler.device_id,
+        profiler.stream_id,
+        profiler.task_id,
+        profiler.subtask_id,
+        profiler.connection_id,
+    )
+    return (
+        "phase conflict for physical execution ({identity}): "
+        "first phase={first_phase!r}, step={first_step}, event={first_event!r}; "
+        "current phase={current_phase!r}, step={current_step}, "
+        "event={current_event!r}"
+    ).format(
+        identity=identity,
+        first_phase=_normalized_phase(previous.phase),
+        first_step=previous.step,
+        first_event=previous.event,
+        current_phase=_normalized_phase(current.phase),
+        current_step=current.step,
+        current_event=current.event,
+    )
 
 
 def _group_lookup(groups, semantic: SemanticRecord, task_id: int) -> List[ProfilerTask]:
@@ -526,11 +592,19 @@ def main() -> int:
     except MsprofDbError as error:
         parser.error(str(error))
 
-    rows, stats = merge_records(
-        parse_plog_inputs(args.plog, args.plog_dir, args.node_id),
-        profilers,
-        parse_graph_correlation_inputs(args.plog, args.plog_dir, args.node_id),
-    )
+    try:
+        rows, stats = merge_records(
+            parse_plog_inputs(args.plog, args.plog_dir, args.node_id),
+            profilers,
+            parse_graph_correlation_inputs(
+                args.plog,
+                args.plog_dir,
+                args.node_id,
+            ),
+        )
+    except PhaseConflictError as error:
+        print("phase_conflict_error={}".format(error), file=sys.stderr)
+        return 1
     write_csv(args.output, list(MERGED_FIELDS), rows)
     for key in sorted(stats):
         print("{}={}".format(key, stats[key]))

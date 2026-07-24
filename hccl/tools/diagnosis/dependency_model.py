@@ -18,6 +18,7 @@ OPERATION_SCOPE_AMBIGUOUS = "ambiguous"
 NOTIFY_ROLE_PRODUCER = "producer"
 NOTIFY_ROLE_CONSUMER = "consumer"
 NOTIFY_RANK_DOMAIN_USER = "user"
+NOTIFY_RANK_DOMAIN_DEVICE_LOCAL = "device_local"
 
 NOTIFY_SIGNAL_ACK = "ack"
 NOTIFY_SIGNAL_DATA = "data_signal"
@@ -26,6 +27,7 @@ NOTIFY_SEQUENCE_FFTS_GRAPH = "ffts_graph_instance"
 NOTIFY_SEQUENCE_PROTOCOL = "protocol_sequence"
 NOTIFY_SEQUENCE_TOKEN = "dependency_token"
 NOTIFY_SEQUENCE_DB_ORDINAL = "db_notify_ordinal"
+NOTIFY_SEQUENCE_DB_LOCAL_ORDINAL = "db_local_notify_ordinal"
 
 NOTIFY_RELATION_UNIQUE = "unique"
 NOTIFY_RELATION_SINGLE = "single"
@@ -204,6 +206,65 @@ class DirectNotifyRelationIdentity:
                 GRAPH_SCHEMA_VERSION,
                 self.channel.stable_id,
                 NOTIFY_SEQUENCE_DB_ORDINAL,
+                self.ordinal,
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class LocalNotifyChannelIdentity:
+    """One device-local Notify resource within a collective invocation."""
+
+    node_id: str
+    operation_scope: str
+    device_id: int
+    notify_id: int
+
+    @property
+    def missing_fields(self) -> tuple[str, ...]:
+        missing = []
+        for name in ("node_id", "operation_scope"):
+            if not str(getattr(self, name) or "").strip():
+                missing.append(name)
+        for name in ("device_id", "notify_id"):
+            if int(getattr(self, name)) < 0:
+                missing.append(name)
+        return tuple(missing)
+
+    @property
+    def complete(self) -> bool:
+        return not self.missing_fields
+
+    @property
+    def stable_id(self) -> str:
+        return stable_id(
+            "lnc",
+            (
+                GRAPH_SCHEMA_VERSION,
+                self.node_id,
+                self.operation_scope,
+                NOTIFY_RANK_DOMAIN_DEVICE_LOCAL,
+                self.device_id,
+                self.notify_id,
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class LocalNotifyRelationIdentity:
+    """One device-local Notify state transition from DB-side ordinals."""
+
+    channel: LocalNotifyChannelIdentity
+    ordinal: int
+
+    @property
+    def stable_id(self) -> str:
+        return stable_id(
+            "lnr",
+            (
+                GRAPH_SCHEMA_VERSION,
+                self.channel.stable_id,
+                NOTIFY_SEQUENCE_DB_LOCAL_ORDINAL,
                 self.ordinal,
             ),
         )

@@ -1,7 +1,8 @@
 # HCCL Step Trace 任务清单
 
-既有历史归档见 [`arch-988653fc0037.md`](arch-988653fc0037.md)。从 DEP-001 起，
-已完成任务继续保留在本文件；只有用户明确要求时才归档。
+历史归档见 [`arch-988653fc0037.md`](arch-988653fc0037.md)；当前依赖图实现归档见
+[`arch-4600cb628104.md`](arch-4600cb628104.md)。本文件只保留活动任务及仍有未来约束的
+阻塞项；完成项在用户指定归档后从活动清单删除。
 
 ## 1. 约定与里程碑
 
@@ -13,12 +14,12 @@
 | 里程碑 | 目标 | 完成条件 |
 |---|---|---|
 | M0 发布卫生 | 移除 Ring 测试强制 | HYG-001～002 |
-| M1 单机可靠语义 | 不丢记录、序号稳定、基础设施可测试 | CTX/SEQ/TST |
-| M2 实例与语义质量 | collective identity 稳定、phase/slice 唯一 | ID/SEM |
-| M3 msprof DB 事实源 | 已完成 | 见归档 |
-| M4 单机精确依赖图 | 精确 stream/sync relation 和资源图 | DEP |
+| M1 单机可靠语义 | 不丢记录、上下文机制可回归 | CTX-002、TST-001～005 |
+| M2 语义质量 | step 合同明确且可验证 | SEM-006 |
+| M4 依赖图增量 | 证据不增强、local Notify 与 FFts 边界完善 | DEP-016～017、DEP-020～027 |
 | M5 覆盖扩展 | 逐算法、逐 transport 可审计覆盖 | COV |
-| M6 多节点因果诊断 | protocol、clock、wait、critical path | MNT |
+| M6 多节点因果诊断 | protocol、profile run、clock、跨节点精确边 | MNT |
+| M7 诊断分析层 | critical path、等待归因和 rank imbalance | DIA |
 
 ## 2. M0：发布卫生
 
@@ -36,68 +37,14 @@
 - **工作**：删除多卡 `isRingTopo` 强制 executor 分支，恢复 8.5.0 规则。
 - **验收**：trace on/off 选择相同 executor；默认 mesh 回归通过。
 
-## 3. M1：Context、上报与序号
-
-### CTX-001 固化语义捕获时机契约
-
-- [ ] **仓库**：HCOMM
-- **工作**：明确“TaskData 构造时捕获，Run 时只消费快照”。
-- **验收**：scope 在 TaskData 构造后退出，Run 仍上报原快照。
+## 3. M1：上报可靠性
 
 ### CTX-002 修复提前返回导致 one-shot 丢失
 
 - [ ] **仓库/文件**：HCOMM `task_profiling.cc`
-- **依赖**：CTX-001
+- **依赖**：无
 - **工作**：为 addition-info、OP_BASE、非 capture 提前返回建立唯一且可验证的语义处理出口。
 - **验收**：覆盖 subscribe、OP_BASE、capture 组合；被捕获语义不会静默丢失。
-
-### CTX-003 约束字符串生命周期
-
-- [ ] **仓库**：HCOMM
-- **依赖**：CTX-001
-- **工作**：限制 API 为静态字符串表，或由 TaskData 做有界拥有型拷贝。
-- **验收**：延迟上报无悬空指针，内存上界和超长行为有测试。
-
-### CTX-004 补齐 AIV 语义快照路径
-
-- [ ] **仓库**：HCOMM
-- **依赖**：CTX-001
-- **工作**：让 AIV `Save()` 遵循统一捕获规则；若不支持则删除无效捕获路径并记录非目标。
-- **验收**：不存在“API 看似支持但永不输出”的状态。
-
-### CTX-005 处理空 task Save 路径
-
-- [ ] **仓库**：HCOMM
-- **依赖**：无
-- **工作**：审计空参数 `Save()` 是否对应物理 execution，并明确其 semantic/probe 行为。
-- **验收**：每个 Save 重载有明确分类，物理 execution 不会无说明丢失语义。
-
-### SEQ-001 决定 `profiler_seq/semantic_seq` 去留
-
-- [x] **仓库**：跨仓
-- **完成**：确认两个本地序号均不参与 exact merge、FFts correlation、依赖边或质量门禁；
-  `semantic_seq` 的去重用途由 direct merge key 和 FFts graph/context identity 替代。
-- **验收**：生产语义 schema v4 和公共 CSV 均删除两个字段；v2/v3 输入中的旧字段忽略。
-
-### SEQ-002 删除 per-device 序号表
-
-- [x] **仓库**：HCOMM
-- **依赖**：SEQ-001
-- **完成/验收**：删除两套按 device 懒分配的 65,536 `atomic<u64>` 数组及分配热路径；
-  `g_nextGraphInstanceId` 保留，它是 FFts graph identity，不属于已废弃 task sequence。
-
-### SEQ-003 删除 fallback 序号
-
-- [x] **仓库**：HCOMM
-- **依赖**：SEQ-001
-- **完成/验收**：随本地 task sequence 一并删除进程级 fallback，不再存在作用域静默退化。
-
-### LOG-001 完善 probe 字段
-
-- [ ] **仓库**：HCOMM
-- **依赖**：无
-- **工作**：若 probe 仅调试则删除无用参数；若可消费则输出完整身份和 schema。
-- **验收**：函数签名与日志字段一致，无未使用参数。
 
 ## 4. M1：基础设施测试
 
@@ -110,19 +57,19 @@
 ### TST-002 RAII 嵌套恢复测试
 
 - [ ] **仓库**：HCOMM
-- **依赖**：CTX-001
+- **依赖**：无
 - **工作/验收**：覆盖无父、单层、双层、事件 scope 和提前返回；退出后 TLS 完全恢复。
 
 ### TST-003 one-shot 捕获测试
 
 - [ ] **仓库**：HCOMM
-- **依赖**：CTX-001
+- **依赖**：无
 - **工作/验收**：首个 TaskData 捕获成功、第二个失败，外层后续 event 可重新捕获。
 
 ### TST-004 capture stream 身份测试
 
 - [ ] **仓库**：HCOMM
-- **依赖**：CTX-001
+- **依赖**：无
 - **工作/验收**：覆盖 `captureStreamID != streamID` 的 DMA/Reduce/Notify Save。
 
 ### TST-005 Notify 元数据测试
@@ -132,246 +79,158 @@
 - **工作**：验证 record/wait 的 notify id、stage、通用 peer 和 FFts context 字段。
 - **验收**：非 Notify task 不被误分类，不恢复已删除的重复字段。
 
-### TST-006 并发序号测试
+## 5. M2：现有语义质量
 
-- [x] **仓库**：HCOMM
-- **依赖**：SEQ-002、SEQ-003
-- **完成/验收**：本地 task sequence 及共享表已删除，不再需要该并发测试；FFts
-  `graph_instance_id` 的并发测试应在 graph correlation 专项任务中独立补充。
+### SEM-006 固化并校验 step 语义合同
 
-## 5. M2：算子实例身份
-
-### ID-001～ID-005 撤销生产端实例 ID，采用 msprof operation identity
-
-- [x] **仓库**：HCOMM、HCCL `tools/diagnosis`
-- **决策**：不再生成、传播或序列化 `op_instance_id/retry_generation`。DB 主输入已经提供
-  operation metadata，规范 collective invocation identity 为 `(group_name, op_name)`；
-  `op_name` 作为 opaque 值使用，不解析后缀作为私有合同。
-- **HCOMM 完成**：删除 communicator 计数器/锁/FNV/碰撞集合、`OpParam` 字段、
-  operation TLS/RAII、worker 快照及 plog 字段；生产 schema 回到 v4。
-- **HCCL 完成**：删除 semantic/merged schema 字段及 v5 parser/validator；operation scope
-  摘要只由 `(group_name, op_name)` 生成，本地 `opId` 仅验证映射唯一性。
-- **边界**：当前样例 `group_name=group_name_0`，并非完整 hash；同一次分析输入必须代表
-  同一 profile run。多 profile run 汇总需要外层 `profile_run_id`，同名 graph replay/retry
-  若被 msprof 复用仍需要独立 execution epoch 证据。
-- **验证**：当前 46 项 Python 单测通过；`test/out` 回放保持 28,502/28,502 exact、
-  44,008 个 physical task、7 个 operation scope、42 列。后续 DEP 已将图更新为
-  53,441 条稳定边，其中 direct Notify exact 5,376、FFts observed 4,676、
-  Notify single 28、ambiguous/incomplete/conflict 0。
-
-## 6. M2：现有语义质量
-
-### SEM-001 调查 RS/AG 物理 task 重叠声明
-
-- [ ] **仓库**：HCCL 分析任务
-- **工作**：按 physical execution 列出多 phase 声明。
-- **产物/验收**：冲突 CSV；每类冲突有调用栈或 graph 证据，不按最近时间猜测。
-
-### SEM-002 修复 RS/AG phase 唯一归属
-
-- [ ] **仓库**：HCOMM
-- **依赖**：SEM-001
-- **工作**：调整 scope；必要时使用明确 `phase_transition`，不复制 task。
-- **验收**：golden trace phase 冲突为 0。
-
-### SEM-003 定义 task/slice ordinal
-
-- [ ] **仓库**：跨仓设计文档
-- **工作**：区分算法 slice、vector element、primitive submission 和 physical context。
-- **验收**：四种序号不再复用同一字段。
-
-### SEM-004 修复 ReduceScatter 首元素标注
-
-- [ ] **仓库**：HCOMM
-- **依赖**：SEM-003
-- **工作**：为 RS vector primitive 建立可关联 ordinal，删除首元素布尔标记。
-- **验收**：每条 semantic 精确指向一个 execution，无 duplicate。
-
-### SEM-005 修复 AllGather 首元素标注
-
-- [ ] **仓库**：HCOMM
-- **依赖**：SEM-003
-- **工作**：为 AG init/sub/final copy 和 receive vector 使用明确 ordinal。
-- **验收**：覆盖率和预期 task 数有 golden 断言。
-
-### SEM-006 校准 step 编号
-
-- [ ] **仓库**：HCOMM、schema 文档
-- **工作**：明确 init、主循环、final 编号；必要时增加 `stage_kind`。
-- **验收**：任意 rank 的 step 无歧义，不因编号碰撞串边。
-
-## 7. M4：单机精确依赖图
-
-### DEP-001 定义双层图合同
-
-- [x] **仓库**：HCCL 文档
-- **完成**：定义 execution/resource graph、稳定 identity、证据等级、歧义、控制收缩和
-  边权；execution 保留 Notify，resource 收缩边必须反查控制证据，时间最近不得产生 exact。
-- **验证**：合同已写入 `spec.md` 8.6。
-
-### DEP-002 建立稳定 operation/execution identity
-
-- [x] **仓库**：HCCL
-- **依赖**：DEP-001
-- **完成**：使用 DB operation scope；node ID 不再依赖 CSV 行号或时间；重复 execution
-  identity 为硬错误；本地 `opId` 只做 scope 映射验证，operation connection 仅作本地诊断，
-  两者都不用于跨 device/rank 关联。
-- **验证**：44,008 个 execution 全量反序后 ID 全部不变；operation scope
-  unique 43,680、missing 328、ambiguous 0；诊断单元测试覆盖 operation scope 的跨
-  device、跨 node、group 隔离和本地映射歧义。
-
-### DEP-003 隔离 direct stream 顺序
-
-- [x] **仓库**：HCCL
-- **依赖**：DEP-001、DEP-002
-- **完成**：direct builder 只接收 `subtask_id < 0`，按 node/device/physical stream 和
-  DB 精确十进制时间分组；同起始时间作为无序 bucket，不靠 CSV 行号强排，重叠 pair 不建边。
-- **验证**：27,544 个 direct execution、32 个 physical stream 组生成 27,512 条
-  `direct_stream_order_observed`；FFts row 进入数为 0，时间精度/同时间测试通过。
-
-### DEP-004 使用逻辑 stream 重建 FFts 顺序
-
-- [x] **仓库**：HCCL
-- **依赖**：DEP-001、DEP-002
-- **完成**：只对 exact matched 且 operation/parent/context 完整的 FFts row，按
-  node/device/pid/op/graph parent/semantic stream 分组，以唯一 context 声明序建边。
-- **验证**：14,405 个 context、670 个逻辑流组生成 13,735 条
-  `ffts_logical_stream_order`；跨逻辑 stream 边为 0。原 2,352 是旧分析估计；当前 DB
-  全量审计实际删除 4,690 条双向跨逻辑流伪边，并隔离所有 profiler-only FFts context。
-
-### DEP-005 定义 Notify relation identity
-
-- [x] **仓库**：跨仓设计文档、HCCL 共享模型
-- **依赖**：DEP-001
-- **完成**：区分 Notify resource 与 relation occurrence；relation identity 固化为
-  op、规范化 producer/consumer、signal、phase/step/slice、notify resource 和
-  graph/protocol sequence，不包含时间、connection 或本地 opId。
-- **验证**：相同 16 个 Notify resource 在 FFts 中展开为 4,704 个 relation candidate：
-  4,676 个唯一 producer+consumer，14 个仅 producer、14 个仅 consumer；资源跨 graph
-  复用时 stable relation ID 不同。direct 因缺共享 sequence 明确保持 incomplete。
-
-### DEP-006 精确配对 FFts Notify
-
-- [x] **仓库**：HCCL
-- **依赖**：DEP-004、DEP-005
-- **完成**：按完整 `NotifyRelationIdentity` 分组；仅恰好一个 producer 和一个
-  consumer 时生成 `ffts_notify_sync_observed/observed`，边保存稳定 relation ID。
-  单边、多端和缺字段分别输出 `single/ambiguous/incomplete` 到
-  `*_notify_ambiguities.csv`，不读取时间做消歧。
-- **验证**：当前 DB replay 生成 4,676 条唯一 observed relation、28 条 single
-  （14 缺 producer、14 缺 consumer）、0 ambiguous、0 incomplete；单测覆盖
-  唯一配对、单边、多端禁止排序 zip、graph instance 隔离资源复用。
-
-### DEP-007 从 DB 完整 Notify 序列派生 direct occurrence
-
-- [x] **仓库**：HCCL
-- **依赖**：DEP-002、DEP-005
-- **状态调整**：解除生产端 token 阻塞。msprof DB 的
-  `COMMUNICATION_TASK_INFO.notifyId/srcRank/dstRank` 覆盖 matched 与
-  profiler-only Notify，可恢复同一物理资源的完整 Record/Wait 序列。
-- **DEP-007A**：merge 时校验 semantic 与 DB 的 notify/rank 一致性；profiler-only
-  Notify 使用 DB 元数据填充现有 `notify_id/user_rank/peer_rank/task_kind`，不增加重复列。
-- **DEP-007B**：定义 direct channel：
-  `(node_id, operation_scope, notify_id, producer_rank, consumer_rank)`；Record 方向为
-  `srcRank -> dstRank`，Wait 方向归一化为 `dstRank -> srcRank`。
-- **DEP-007C**：同一 channel 两侧仅在各自本地物理 stream 内排序，派生
-  `db_notify_ordinal`；不比较跨设备绝对时间，不使用 `connection_id/task_id` 作为
-  跨 rank identity。
-- **严格门禁**：两侧必须各自只有一个 stream、数量相等、顺序唯一、operation scope
-  唯一；否则整组进入 ambiguity，禁止 `zip(min)`。
-- **完成与验证**：不增加 merged 列；18,779 条 matched Notify 的 semantic/DB
-  notify 与 rank 全部一致。16 个跨 rank Notify resource、7 个 operation scope 形成
-  112 个 direct channel；每组 48 Record + 48 Wait，生成 5,376 个 occurrence。
-
-### DEP-008 删除 connection/time 默认推断
-
-- [x] **仓库**：HCCL
-- **依赖**：DEP-005
-- **完成**：从默认 builder、edge vocabulary 和 HTML 图例删除
-  `notify_sync_inferred`；不提供隐式 research fallback。
-- **验收**：DB replay 的 inferred 从 5,094 降为 0，总边数从 58,871 降为 53,777；
-  旧 JSON 3,016 条和 DB 5,094 条 connection/time 结果都不再进入因果图，单测验证
-  即使 connection 和时间形成唯一最近候选也不构边。
-
-### DEP-009 构建 direct Notify exact relation
-
-- [x] **仓库**：HCCL
-- **依赖**：DEP-005、DEP-007
-- **DEP-009A**：按 channel 内相同 `db_notify_ordinal` 配对 Record/Wait，生成
-  `direct_notify_sync_exact`，保存稳定 relation ID。
-- **DEP-009B**：语义只作为 relation annotation 与一致性校验，分为
-  `both/partial/none/conflict`；phase/step/slice 不参与物理 occurrence 身份。
-- **DEP-009C**：数量不等、多 stream、顺序冲突、元数据缺失输出到
-  `*_notify_ambiguities.csv`；不得按最近时间补配。
-- **完成与验证**：当前 DB exact 5,376，其中 both 4,695、partial 9、none 672、
-  conflict 0；direct single/ambiguous/incomplete/conflict 均为 0。单测覆盖跨设备时间
-  反序不影响 ordinal、计数不等禁止部分 zip，以及语义 annotation。
-
-### DEP-010 合并 Notify 与 peer semantic 证据
-
-- [x] **仓库**：HCCL
-- **依赖**：DEP-005、DEP-006、DEP-009
-- **DEP-010A**：ACK/data-signal 只保留 exact Notify 边，peer semantic 作为 annotation
-  与 evidence，不再按跨设备时间排序 `zip` 生成控制边。
-- **DEP-010B**：payload 数据边保持独立，不与 Notify 控制同步合并。
-- **完成与验证**：`peer_signal_semantic=0`，exact 边保存
-  `semantic_status/signal_kind/phase/step/slice`；payload 仍为 2,142 条独立 semantic edge。
-  FFts 4,676 条 observed relation 与 28 条 single 保持不变。
-
-### DEP-011 产出 execution graph artifact
-
-- [x] **仓库**：HCCL
-- **依赖**：DEP-003、DEP-004、DEP-006、DEP-008、DEP-009、DEP-010
+- [x] **仓库**：HCCL 文档/测试；未修改 HCOMM 生产 schema
+- **依赖**：无
 - **完成**：
-  - node ID 使用既有 physical execution identity；edge ID 使用
-    `(graph_schema_version, kind, src, dst, relation_id)` 的稳定摘要；
-  - nodes/edges 使用固定列合同并按稳定 ID 排序，不依赖构造顺序或 CSV 行序；
-  - 输出 `*_summary.csv`，统计 node/edge、edge kind、Notify ambiguity、重复 ID、
-    缺失端点、自环、root/leaf、孤立节点和 cycle residual；
-  - 重复 ID、缺失 endpoint 或自环是 artifact 完整性硬错误；环和孤立节点先事实记录，
-    由 DEP-015 决定门禁策略。
-- **验证**：当前 DB 为 44,008 nodes、53,441 edges、2,059 isolated、2,761 roots、
-  2,761 leaves；duplicate node/edge、missing source/destination、self-loop、
-  cycle residual 均为 0。graph schema 升级到 v3，46 项 Python 单测通过。
+  - 定义 `step` 为 phase 内逻辑因果桶：step 0 包含 init/prelude 与 main round 0，
+    `1..N-2` 为后续 main round，`N-1` 为 final/epilogue；
+  - `validate_trace.py` 对 RS/AG 校验 step/rank-size 范围，并禁止 main-round link event
+    进入 epilogue；未知 phase 不套用 Ring 假设；
+  - 冲突输出 CSV 行号、physical task 坐标及 phase/step/rank_size/slice/event，不进行
+    最近时间、邻接或自动重编号；
+  - 合同同步到 `spec.md`、诊断 README 和依赖关系文档。
+- **验收**：54 项 Python 单测通过；当前 golden 28,502 条 RS/AG semantic 全部通过，
+  `step_contract_violations=0`；未增加 `stage_kind`，未改变 schema、exact merge 或图 identity。
 
-### DEP-012 折叠 resource graph
+## 6. M4：单机精确依赖图增量
+
+### DEP-016 定义派生边证据传播合同
+
+- [ ] **仓库**：HCCL 文档/测试
+- **依赖**：无；graph v4 基线见 `arch-4600cb628104.md`
+- **工作**：
+  - 定义 `exact > observed > semantic > inferred > heuristic` 的证据格；
+  - 明确派生边 confidence 等于所有 source edge 中的最弱证据；
+  - 明确 kind 命名不得暗示强于实际 confidence 的证据；
+  - 确定 graph schema v5 的迁移范围。
+- **验收**：文档覆盖 direct、FFts、mixed order 和 Notify 收缩；单测表达
+  “收缩不得增强证据”的不变量。
+
+### DEP-017 修正 resource order 证据增强
+
+- [ ] **仓库**：HCCL
+- **依赖**：DEP-016
+- **工作**：
+  - `resource_dependency_graph.py` 按路径最弱 evidence/confidence 传播；
+  - 将 FFts resource order 从当前错误的 observed 表达调整为 semantic；
+  - mixed path 保存 source evidence 集合并取最弱等级；
+  - 升级 graph schema，避免新旧 edge identity 混用。
+- **验收**：
+  - direct resource order 仍为 observed；
+  - FFts resource order 不高于 semantic；
+  - 当前 10,051 条 resource order 总量不因纯证据修正改变；
+  - gate 拒绝任何 derived confidence 强于 source confidence 的边。
+
+### DEP-020 建立主从流本地 Notify 精确关系
 
 - [x] **仓库**：HCCL
-- **依赖**：DEP-011
-- **完成**：显式保留 `sdma/rdma/reduce_inline/reduce_tbe`，沿 execution order 搜索首个
-  resource frontier，收缩 order、Notify 与 payload 控制链；缺端生成稳定 boundary，
-  多 frontier 写 ambiguity 且不做候选笛卡尔积。
-- **验收**：每条 resource edge 保存原 execution edge、control node、record/wait 和
-  relation ID。当前 DB 为 11,432 nodes、22,245 edges、0 boundary、0 contraction ambiguity。
+- **依赖**：无；只消费 msprof DB 已有 Notify 物理字段
+- **范围**：direct task，且 DB `dstRank=-1`；不涉及 FFts context 或跨 rank Notify。
+- **工作**：
+  - 以 `(node_id, operation_scope, device_id, notify_id)` 定义本地 Notify channel；
+  - 将 `Notify Record` 作为 producer、`Notify Wait` 作为 consumer；
+  - producer/consumer 各自必须落在唯一物理 stream、数量相等且本地执行顺序唯一；
+  - 分别按两侧物理 stream 内的 DB 执行顺序编号，按 ordinal 建立
+    `local_notify_sync_exact`；
+  - 数量不等、多 stream、顺序不唯一或 identity 不完整时不部分配对，写入现有
+    Notify ambiguity artifact；
+  - resource graph 保留独立的 local Notify edge kind 与 wait timing。
+- **验收**：
+  - 支持 main→slave 与 slave→main 两个方向；
+  - 不读取跨 stream 时间先后来决定配对，不与跨 rank `direct_notify_sync_exact` 串组；
+  - 当前样例的 112 个完整 local channel 形成 5,376 条 exact execution edge；
+  - execution/resource graph 均无悬空端点、自环和环，重复导出 identity 稳定；
+  - 单测覆盖唯一配对、数量不等、多 stream、方向与 profiler-only endpoint。
+- **完成**：
+  - 新增 `LocalNotifyChannelIdentity/LocalNotifyRelationIdentity` 和
+    `local_notify_sync_exact`，resource graph 映射为
+    `resource_local_notify_sync_exact`；
+  - 修复 CSV 宽整数经 `float` 解析导致 `UINT64 notify_id` 碰撞的问题；
+  - 当前样例 112 个 channel 各 48 Record + 48 Wait，生成 5,376 条 execution/resource
+    local edge；main→slave 与 slave→main 各 2,688 条；
+  - Notify ambiguous/incomplete/conflict 为 0；execution/resource graph 的 duplicate、
+    missing endpoint、self-loop、cycle residual 均为 0；
+  - resource graph 有 8 个可解释的 upstream boundary：每个 device 最初一条
+    slave→main relation 之前无资源任务，不伪造端点；
+  - 61 项 Python 单测通过，当前 artifact 以 `--max-boundary-nodes 8` 通过门禁。
 
-### DEP-013 计算同步边时间指标
+### DEP-021 输出 FFts parent/context 覆盖审计
+
+- [ ] **仓库**：HCCL
+- **依赖**：无
+- **工作**：按 physical parent 输出 context 总数、matched/profiler-only 数、语义
+  `graph_instance_id` 覆盖和缺失原因；不得从时间邻近推断 graph membership。
+- **验收**：每个 FFts physical subtask 恰好归属一个 parent 覆盖组；当前“部分缺语义”
+  与“整组缺语义”的 parent 可区分，计数与 execution node artifact 一致。
+
+### DEP-022 补齐 profiler-only FFts graph membership
+
+- [ ] **仓库**：HCCL
+- **依赖**：DEP-021
+- **工作**：仅在同一 `(node, device, pid, operation_scope, parent_stream,
+  parent_task)` 下 graph identity 唯一时，将 graph membership 传播给 profiler-only
+  context；保留 `membership_source/status`，冲突时输出歧义而不选候选。
+- **验收**：补齐身份不会改变 `match_status`，不会自动产生 task 语义；同 parent 多 graph
+  或 operation 不唯一时零传播且有可审计原因。
+
+### DEP-023 输出 direct↔FFts 边界审计
+
+- [ ] **仓库**：HCCL
+- **依赖**：DEP-021
+- **工作**：识别 FFts parent 在 direct physical stream 中的前驱/后继以及当前被
+  direct stream order 直接跨越的边；只输出 boundary candidate，不建立 entry/exit
+  因果边。
+- **验收**：每个候选记录 parent identity、direct 前驱/后继、FFts context 集合和缺失项；
+  无 parent identity 时不使用时间邻居代替。
+
+### DEP-024 定义 FFts 内部依赖事实合同
+
+- [ ] **仓库**：HCOMM/HCCL 文档与 fixture
+- **依赖**：无
+- **工作**：确认 runtime 或 msprof 可导出的 graph arc/barrier/token；定义
+  `(graph instance, src context, dst context, relation kind)` 的最小 schema、证据等级与
+  不可用时的显式状态。
+- **验收**：覆盖串行、并行、fan-in、fan-out 和 barrier；明确 context 编号本身不是执行顺序，
+  无事实来源时不得构造内部边。
+
+### DEP-025 消费 FFts 内部依赖事实
+
+- [ ] **仓库**：HCCL；若 DB 不提供事实则需要 HCOMM 生产端
+- **依赖**：DEP-022、DEP-024
+- **工作**：解析并校验 FFts graph arc，将事实端点映射到 physical context node；
+  缺端点、重复 arc、跨 graph arc 和环写入独立审计 artifact。
+- **验收**：只为有明确 relation identity 的 arc 建边；并行 context 不因编号或物理时间
+  被串行化；所有内部边可回溯到源记录。
+
+### DEP-026 建立 direct↔FFts 精确 entry/exit 关系
+
+- [ ] **仓库**：HCCL
+- **依赖**：DEP-023、DEP-025
+- **工作**：由 FFts 内部 DAG 的 roots/leaves 建立 direct predecessor→roots 与
+  leaves→direct successor，并移除 direct stream order 对 parent 的跨越捷径。
+- **验收**：边界不使用 context 最小/最大编号或时间启发式；多 root/leaf 被完整保留；
+  resource contraction 后无 bypass、自环、环或证据增强。
+
+### DEP-027 删除传递冗余的 Peer payload semantic 因果边
 
 - [x] **仓库**：HCCL
-- **依赖**：DEP-012
-- **完成**：输出 `wait_span_ns/remote_block_ns/post_signal_ns/handoff_gap_ns` 和
-  `timing_status`；Notify `weight_ns=wait_span_ns`。同节点围绕 record 完成时刻做观测分解；
-  未校准跨节点不输出 remote/post 跨时钟差。
-- **验收**：单测覆盖本地边界、跨节点留空和 handoff；指标采用 Decimal 微秒转纳秒。
+- **依赖**：DEP-020
+- **完成**：
+  - 当前 2,142 条 `peer_payload_semantic` 删除自身后全部仍可达，最短替代路径统一为
+    `direct_notify_sync_exact -> direct_stream_order_observed × 3`；
+  - execution builder、resource contraction 与 HTML 图例不再支持
+    `peer_payload_semantic/resource_payload_semantic`；
+  - 门禁将两个旧 kind 作为 forbidden edge，payload event 仍作为节点语义保留；
+  - 删除已无意义的 DEP-018/019 及下游依赖，不再计划用 occurrence 或 protocol token
+    恢复 payload 因果边；
+  - 当前 execution/resource edge 分别为 56,675/25,479，payload edge 均为 0；
+    结构门禁通过，62 项 Python 单测通过。
 
-### DEP-014 支持 execution/resource 双视图
-
-- [x] **仓库**：HCCL
-- **依赖**：DEP-011、DEP-012、DEP-013
-- **完成/验收**：HTML/SVG 均从导出的 node/edge CSV 构建，不在布局层调用依赖推断；
-  execution/resource 真实任务共享 `graph_id`，resource 详情显示 evidence 与等待指标。
-
-### DEP-015 建立依赖图门禁
-
-- [x] **仓库**：HCCL
-- **依赖**：DEP-014
-- **完成**：`validate_dependency_graph.py` 同时门禁 execution/resource 完整性、Notify/
-  收缩歧义、环与禁用边，输出 stream/sync/payload/boundary 分类统计，支持
-  `--golden-summary` 精确比较。
-- **验收**：当前 DB 中 FFts physical-stream 伪顺序、默认 time-inferred、旧 inferred
-  Notify、cycle、boundary 和 contraction ambiguity 均为 0；graph schema 升级到 v4，
-  51 项 Python 单测通过。资源图新增统计及 schema 变化已在 `spec.md` 解释。
-
-## 8. M5：覆盖矩阵
+## 7. M5：覆盖矩阵
 
 ### COV-001 建立覆盖矩阵
 
@@ -412,27 +271,46 @@
 ### COV-007 覆盖 AIV
 
 - [ ] **仓库**：HCOMM
-- **依赖**：CTX-004、COV-001
-- **工作/验收**：只标注可关联 AIV kernel；父 AI_CORE 不伪装为内部 context。
+- **依赖**：COV-001
+- **工作/验收**：审计 AIV `Save()` 的语义捕获路径，只标注可关联 AIV kernel；父
+  AI_CORE 不伪装为内部 context，不保留看似支持但永不输出的捕获接口。
 
-## 9. M6：多节点与高级诊断
+### COV-008 审计 resource task-kind 覆盖
+
+- [ ] **仓库**：HCCL 文档/测试
+- **依赖**：COV-001、DEP-017
+- **工作**：统计 profiler task kind、当前 resource whitelist、profiler-only 和 isolated
+  节点；逐类评估 AI Core compute、新 transport primitive 是否消耗待分析资源。
+- **验收**：新增 resource kind 必须有物理语义、fixture/device case 和收缩测试；未知
+  kind 不自动进入 resource graph。
+
+## 8. M6：多节点与高级诊断
+
+### MNT-000 定义 profile-run manifest
+
+- [ ] **仓库**：跨仓设计文档/HCCL
+- **工作**：定义 `profile_run_id`、node 输入清单、采集起止、DB/plog 所属关系和 schema；
+  单次采集边界由 manifest 给出，不由每个 task 独立生成。
+- **验收**：相同 `(group_name, op_name)` 跨两次采集不会合并；缺失/重复 node 或跨 run
+  输入明确失败。
 
 ### MNT-001 定义跨节点 protocol sequence
 
 - [ ] **仓库**：跨仓设计文档
-- **依赖**：DEP-002、DEP-005
+- **依赖**：无；复用已归档的 operation/Notify identity 合同
 - **工作/验收**：定义 op/src/dst/kind/sequence；重传、并发和多 channel 不歧义。
 
 ### MNT-002 HCOMM 输出 protocol identity
 
 - [ ] **仓库**：HCOMM
 - **依赖**：MNT-001
-- **工作/验收**：tx/rx signal/payload 只凭 identity 配对，不依赖时间或 Ring 公式。
+- **工作/验收**：tx/rx signal 只凭 identity 配对，不依赖时间或 Ring 公式；不恢复
+  payload semantic 因果边。
 
 ### MNT-003 生成 wait-relation artifact
 
 - [ ] **仓库**：HCCL
-- **依赖**：DEP-001、DEP-005、MNT-002
+- **依赖**：MNT-002
 - **工作/验收**：输出 waiter、producer、interval、evidence；每条可追溯到同步 identity。
 
 ### MNT-004 采集时钟锚点
@@ -443,26 +321,76 @@
 ### MNT-005 实现时钟校准 artifact
 
 - [ ] **仓库**：HCCL
-- **依赖**：MNT-004
+- **依赖**：MNT-000、MNT-004
 - **工作/验收**：输出 offset/drift/error；缺锚点明确失败。
 
 ### MNT-006 构建多节点精确边
 
 - [ ] **仓库**：HCCL
-- **依赖**：DEP-001、MNT-002、MNT-005
+- **依赖**：MNT-000、MNT-002、MNT-005
 - **工作/验收**：以 protocol identity 建边，时间只作一致性检查。
 
 ### MNT-007 实现 critical path
 
 - [ ] **仓库**：HCCL
-- **依赖**：DEP-012、DEP-013、MNT-003、MNT-006
-- **工作/验收**：输出路径、累计时间、等待占比和证据；环单独报告。
+- **依赖**：DIA-002、MNT-003、MNT-006
+- **工作/验收**：将单机 critical-path 分析扩展到 calibrated 多节点图；输出路径、
+  累计时间、等待占比、最弱证据和校准误差；未校准边不得进入全局时间累计。
 
 ### MNT-008 实现 NHR 视图
 
 - [ ] **仓库**：HCCL
-- **依赖**：COV-005、DEP-014、MNT-006
+- **依赖**：COV-005、MNT-006
 - **工作/验收**：只筛选/布局共享 graph artifact，不复制 merge。
+
+## 9. M7：诊断分析层
+
+### DIA-001 定义单机 critical-path 计费合同
+
+- [ ] **仓库**：HCCL 文档/测试
+- **依赖**：DEP-017；等待指标合同见当前归档
+- **工作**：
+  - 定义 resource node duration 与 sync edge `weight_ns` 的累计方式；
+  - 明确已收缩 Notify wait 不重复计费；
+  - 定义 semantic edge 是否进入路径、如何报告路径最弱 evidence；
+  - 定义 isolated、boundary、ambiguity 和 cycle 的处理。
+- **验收**：用小型 DAG 手算 golden 覆盖并行分支、同步等待、零权边和不可比较时间。
+
+### DIA-002 实现单机 critical-path artifact
+
+- [ ] **仓库**：HCCL
+- **依赖**：DIA-001
+- **工作**：只消费 resource node/edge artifact，输出关键路径节点/边、累计 resource
+  duration、同步等待、handoff 和最弱 evidence。
+- **验收**：不重新构边；DAG 结果与手算 golden 一致；cycle、boundary 或 unknown timing
+  按合同显式失败或降级，不静默忽略。
+
+### DIA-003 输出 Top Wait 与同步归因
+
+- [ ] **仓库**：HCCL
+- **依赖**：DIA-001
+- **工作**：按 operation/rank/phase/signal 汇总 `wait_span/remote_block/post_signal/
+  handoff_gap`，并保存 record/wait/resource 反查 ID。
+- **验收**：输出 top-N CSV/HTML；每个归因项可回查 resource edge 和 execution 控制链；
+  observational 指标不标为硬件内部精确延迟。
+
+### DIA-004 输出 rank/operation imbalance
+
+- [ ] **仓库**：HCCL
+- **依赖**：DIA-003
+- **工作**：比较同 operation 各 rank 的资源 duration、同步等待和 handoff 分布，报告
+  max/min、p50/p95 和离群 rank。
+- **验收**：只比较相同 operation scope 与可比较时间域；缺 rank/operation 信息时单独
+  报告 coverage，不补默认值。
+
+### DIA-005 输出 graph coverage 报告
+
+- [ ] **仓库**：HCCL
+- **依赖**：COV-008
+- **工作**：汇总 matched/profiler-only、resource/excluded、isolated、boundary、
+  Notify ambiguity、已禁用旧边和未知 task kind。
+- **验收**：coverage 变化可进入 golden；报告能区分“真实控制节点被排除”和“功能尚未
+  覆盖”，避免把所有 profiler-only 节点视为噪声。
 
 ## 10. 端到端门禁
 
@@ -492,41 +420,52 @@
 ### E2E-006 开销基准
 
 - [ ] **仓库**：测试目录
-- **依赖**：E2E-001、SEQ-002
+- **依赖**：E2E-001
 - **工作/验收**：测 baseline、trace off/on、小/大消息，报告置信区间和内存。
 
 ### E2E-007 诊断质量报告
 
 - [ ] **仓库**：HCCL
-- **依赖**：DEP-002、DEP-015
+- **依赖**：DEP-017
 - **工作/验收**：固定 exact、kind mismatch、unmatched、profiler-only、duplicate 定义和门禁。
 
-### E2E-008 DB 输入与依赖图 golden replay
+### E2E-009 Graph schema v5 与证据 golden
 
 - [ ] **仓库**：HCCL、测试目录
-- **依赖**：DEP-015
-- **工作**：只用 plog + DB 重放 merge、validate、execution/resource graph 和可视化。
-- **验收**：44,008 profiler task、28,502 exact、14,405 FFts exact；伪顺序和默认
-  time-inferred 为 0。
+- **依赖**：DEP-017
+- **工作**：为 evidence 修正更新固定 artifact/gate golden，记录 edge ID/kind/count
+  变化原因。
+- **验收**：相同输入重复导出 hash 一致；golden 明确证明 derived evidence 不增强、
+  operation 不串扰、禁用旧 payload semantic 因果边。
 
 ## 11. 推荐顺序
 
 ```text
 HYG-001 + HYG-002 -> E2E-001 -> E2E-002
 
-CTX-001 -> CTX-002..CTX-005 -> TST-001..TST-005
+CTX-002 -> TST-005
+TST-001 + TST-002 + TST-003 + TST-004
 
-SEM-001 -> SEM-002
-SEM-003 -> SEM-004 + SEM-005
+SEM-006
 
-DEP-001 -> DEP-002 -> DEP-003 + DEP-004
-DEP-001 -> DEP-005 -> DEP-006 + DEP-008
-DEP-002 + DEP-005 -> DEP-007 -> DEP-009（已完成）
-DEP-006 + DEP-009 -> DEP-010
-DEP-003..DEP-010 -> DEP-011 -> DEP-012 -> DEP-013 -> DEP-014 -> DEP-015
+DEP-016 -> DEP-017
+DEP-020 -> DEP-027
+DEP-021 -> DEP-022
+DEP-021 -> DEP-023
+DEP-024
+DEP-022 + DEP-024 -> DEP-025
+DEP-023 + DEP-025 -> DEP-026
 
 COV-001 -> COV-002..COV-007
-DEP-002 + DEP-005 -> MNT-001 -> MNT-002
-MNT-004 -> MNT-005
-MNT-002 + MNT-005 -> MNT-006
+COV-001 + DEP-017 -> COV-008
+MNT-001 -> MNT-002
+MNT-000 + MNT-004 -> MNT-005
+MNT-000 + MNT-002 + MNT-005 -> MNT-006
+
+DEP-017 -> DIA-001 -> DIA-002
+DIA-001 -> DIA-003 -> DIA-004
+COV-008 -> DIA-005
+DIA-002 + MNT-003 + MNT-006 -> MNT-007
+
+DEP-017 -> E2E-009
 ```
