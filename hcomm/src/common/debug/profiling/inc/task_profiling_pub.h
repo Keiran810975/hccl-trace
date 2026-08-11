@@ -336,6 +336,7 @@ public:
 protected:
 private:
     HcclResult Run(const TaskData &taskData, bool isCapture = false);
+    HcclResult ReportCapturedTaskSemantic(const TaskData &taskData, u64 submitTs) const;
     u64 TimestampNanosecond() const;
 
     HcclResult Report(struct ProfReporterData &data);

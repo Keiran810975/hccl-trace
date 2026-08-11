@@ -41,10 +41,16 @@
 
 ### CTX-002 修复提前返回导致 one-shot 丢失
 
-- [ ] **仓库/文件**：HCOMM `task_profiling.cc`
+- [-] **仓库/文件**：HCOMM `task_profiling.cc`
 - **依赖**：无
-- **工作**：为 addition-info、OP_BASE、非 capture 提前返回建立唯一且可验证的语义处理出口。
-- **验收**：覆盖 subscribe、OP_BASE、capture 组合；被捕获语义不会静默丢失。
+- **实现**：
+  - 将已捕获 TaskData 的 semantic 上报收敛到 `ReportCapturedTaskSemantic()`；
+  - OP_BASE、addition-info 未订阅、非 capture 路径在 step trace 开启时先上报 semantic，再跳过
+    msprof addition-info；trace 关闭时保持原快速返回；
+  - 正常 profiling 路径的 semantic 与 msprof addition-info 共用同一个 submit timestamp；
+  - 将容易误读的 `is_subscribe` 状态判断改为显式的 `additionInfoEnabled`。
+- **待验收**：subscribe、OP_BASE、capture 组合回归仍归入 TST-003～005；当前 HCOMM UT
+  尚无 TaskProfiling/semantic 专项 fixture。
 
 ## 4. M1：基础设施测试
 

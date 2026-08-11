@@ -1186,10 +1186,11 @@ PROFILER_TRACE_EX
 
 1. **测试补丁改变生产算法选择。** 两处 `[TEST PATCH]` 会强制 910B 进入 ring 路径，
    必须在发布前撤回或移入独立测试控制面。
-2. **存在提前返回导致语义丢失的窗口。**
-   `TaskData` 构造时可能已消费 one-shot context，但 `TaskProfiling::Run()` 在
-   `GetAddtionInfoState()`、OP_BASE、非 capture 条件下会在语义上报前直接返回。
-   结果是语义被消费却没有日志。
+2. **提前返回导致语义丢失的窗口已修复。**
+   `TaskData` 仍在构造时消费 one-shot context；`TaskProfiling::Run()` 现在通过
+   `ReportCapturedTaskSemantic()` 独立兑现快照。OP_BASE、addition-info 未订阅、非 capture
+   路径仅跳过 msprof addition-info；当 step trace 开启时仍输出 semantic。对应组合的 C++ 定向
+   回归测试尚待 TST-003～005 补齐。
 
 ### P1：正确性与精确关联
 
