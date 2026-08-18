@@ -240,9 +240,12 @@
 
 ### COV-001 建立覆盖矩阵
 
-- [ ] **仓库**：HCCL 文档/测试
+- [x] **仓库**：HCCL 文档/测试
 - **工作**：按 device、algorithm、phase、transport、primitive、task kind 标记支持状态。
 - **验收**：每个 supported 单元有 fixture 或设备测试 ID。
+- **产出**：[`文档/语义追踪覆盖矩阵.md`](../../../文档/语义追踪覆盖矩阵.md)。以
+  `DT-L0-RING-DIRECT-001` 建立当前 8-device Level0 concurrent-direct Ring 基线；所有
+  supported 单元均关联设备测试或 fixture ID，Level1/Level2 明确延期。
 
 ### COV-002 覆盖非 concurrent-direct ring
 
@@ -254,7 +257,9 @@
 
 - [ ] **仓库**：HCOMM
 - **依赖**：COV-001
-- **工作/验收**：覆盖 910B 默认 mesh，撤回 Ring 强制后仍输出可用语义。
+- **工作/验收**：只覆盖 910B normal/atomic Mesh RS/AG 和 Mesh Direct；Mesh RS/AG 的
+  `step` 固定为 0，撤回 Ring 强制后仍输出可用语义。Small-count、Oneshot、Chunk 和 AIV
+  不因 executor 名称含 Mesh 而归入本任务。
 
 ### COV-004 覆盖 hierarchical
 
@@ -289,6 +294,45 @@
   节点；逐类评估 AI Core compute、新 transport primitive 是否消耗待分析资源。
 - **验收**：新增 resource kind 必须有物理语义、fixture/device case 和收缩测试；未知
   kind 不自动进入 resource graph。
+
+### COV-009 覆盖 910B/910C 单机 small-count
+
+- [ ] **仓库**：HCOMM
+- **依赖**：COV-001
+- **工作**：按实际模板覆盖 910B Reduce-Bcast、Doubling/Direct、Local Reduce-Bcast，以及
+  910C（`DEV_TYPE_910_93`）HD Optim；不使用 `AllReduceMeshSmallCountExecutor` 名称掩盖
+  内部算法差异。
+- **验收**：每类模板有 selector fixture 和对应目标设备 golden；phase/step/peer 合同完整，
+  910B 与 910C 分别有设备测试 ID。
+
+### COV-010 覆盖 910B 确定性与 Oneshot
+
+- [ ] **仓库**：HCOMM
+- **依赖**：COV-003、COV-009
+- **工作**：覆盖 Local Reduce、Order Preserved、Mesh Direct Oneshot 和 Chunk Mesh；仅普通/
+  atomic Mesh RS/AG 使用 `step=0`，不得把 Oneshot/Chunk 自动归入同一合同。
+- **验收**：small/medium/huge count 的 selector 叶子均有 fixture；ordered/local/oneshot 合同
+  分离，并至少各有一组 910B 设备 golden。
+
+### COV-011 覆盖 910C 单机 Ring 变体
+
+- [ ] **仓库**：HCOMM
+- **依赖**：COV-002
+- **工作**：覆盖 910C（`DEV_TYPE_910_93`）Single Ring、Fast Double Ring 和 Zero-copy
+  Ring；复用公共 event 封装，但分别描述 ring 数、slice/rank order、stream 和 buffer path。
+- **验收**：三类 selector 叶子分别有 fixture/device case；Double Ring 每个物理 ring 的
+  phase/step/slice/peer 可区分，Zero-copy 有用户内存路径证据。
+
+### COV-012 覆盖 single-rank 与单机 fallback
+
+- [ ] **仓库**：HCOMM 文档/测试
+- **依赖**：COV-001
+- **工作**：为 `AllReduceSingleExecutor` 定义 local copy/no-op 语义；审计 910B/910C
+  `AllReduceComm` 在 `serverNum=1` 时的可达条件和实际通信 plane，特别检查 Level0 NULL/common
+  加显式 Level1=NHR 时的 `COMM_COMBINE/COMM_COMBINE_ORDER` NHR/NHR-Oneshot 路径。
+- **验收**：single-rank input/output 同址与异址行为均明确；fallback 要么有选择器 fixture 和
+  设备 golden，要么以不可达证明记录在覆盖矩阵中；单机 NHR 与多机 hierarchical NHR 使用
+  不同覆盖声明。
 
 ## 8. M6：多节点与高级诊断
 
@@ -464,6 +508,10 @@ DEP-023 + DEP-025 -> DEP-026
 
 COV-001 -> COV-002..COV-007
 COV-001 + DEP-017 -> COV-008
+COV-001 -> COV-009
+COV-003 + COV-009 -> COV-010
+COV-002 -> COV-011
+COV-001 -> COV-012
 MNT-001 -> MNT-002
 MNT-000 + MNT-004 -> MNT-005
 MNT-000 + MNT-002 + MNT-005 -> MNT-006
