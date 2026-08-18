@@ -257,7 +257,9 @@
   `tx_data_signal_start`、`rx_data_signal_start`、`rx_payload_copy_start`。AllReduce
   executor 的 user/CCL buffer 边界搬运统一使用 `algorithm/phase=allreduce_executor`、
   `event=copy_start`，semantic 区分 `user_to_ccl_copy` 与 `ccl_to_user_copy`。尚待设备
-  回归，预期 operation scope 内 SDMA 覆盖率为 100%，因此暂不勾选完成。
+  回归，预期 operation scope 内 SDMA 覆盖率为 100%。`single_ring_direct` 中真实跨越
+  user/CCL buffer 的 copy 已统一使用同一组方向 semantic；user→user、CCL→CCL 和
+  单 rank 本地 copy 仍保留 `hccl_local_copy`，因此暂不勾选完成。
 
 ### COV-003 覆盖 mesh
 

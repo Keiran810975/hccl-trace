@@ -107,6 +107,7 @@ HcclResult AllGatherRingConcurrentDirect::OneRankMemcpy()
         const Slice &srcSlice = slices_[sliceIdx];
         const Slice &dstSlice = userMemOutputSlices_[sliceIdx];
         DeviceMem    src;
+        const char *copySemantic = "ccl_to_user_copy";
         DeviceMem    dst = DeviceMem::create(static_cast<u8 *>(opInfo_->outputAddr) + dstSlice.offset, dstSlice.size);
         if (opInfo_->inputAddr != nullptr) {
             // opInfo_->inputAddr != nullptr指示要从user input获取输入
@@ -114,6 +115,7 @@ HcclResult AllGatherRingConcurrentDirect::OneRankMemcpy()
             HCCL_DEBUG("Memcpy operation: stream[main], rank[%u] starts to copy offset[%llu], size[%llu] at userInput",
                 userRank_, stepOffset, srcSlice.size);
             src = DeviceMem::create(static_cast<u8 *>(opInfo_->inputAddr) + stepOffset, srcSlice.size);
+            copySemantic = "hccl_local_copy";
         } else {
             // opInfo_->inputAddr == nullptr指示要从CCL buffer获取输入
             HCCL_DEBUG("Memcpy operation: stream[main], rank[%u] starts to copy offset[%llu], size[%llu] at inputMem_",
@@ -121,7 +123,7 @@ HcclResult AllGatherRingConcurrentDirect::OneRankMemcpy()
             src = inputMem_.range(srcSlice.offset, srcSlice.size);
         }
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo("allgather_direct", 0, userRank_, 1,
-            sliceIdx, "copy_start", "hccl_local_copy"));
+            sliceIdx, "copy_start", copySemantic));
         CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dst, src, stream_));
         HCCL_DEBUG("[AllGatherRingConcurrentDirect][OneRankMemcpy]sliceIdx[%u] for Memcpy success", sliceIdx);
     }
@@ -181,6 +183,8 @@ HcclResult AllGatherRingConcurrentDirect::RunInitStep(const u32 rank, const u32 
     u32 initSliceIdx = rank;
     u32 sliceSize = slices_.size() / rankSize;
     bool traceInitCopy = true;
+    const char *initCopySemantic =
+        (opInfo_->inputAddr != nullptr) ? "user_to_ccl_copy" : "hccl_local_copy";
     for (u32 sliceIdx = 0; sliceIdx < sliceSize; sliceIdx++) {
         Slice initSlice = slices_[initSliceIdx * sliceSize + sliceIdx];
         // 需要+userMemIn_的offset
@@ -199,7 +203,7 @@ HcclResult AllGatherRingConcurrentDirect::RunInitStep(const u32 rank, const u32 
         if (srcInit != dstInit) {
             if (traceInitCopy) {
                 TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo("allgather_direct", 0, userRank_,
-                    rankSize, initSliceIdx, "copy_start", "hccl_local_copy", INVALID_VALUE_RANKID,
+                    rankSize, initSliceIdx, "copy_start", initCopySemantic, INVALID_VALUE_RANKID,
                     "single_ring_direct", rank));
                 CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dstInit, srcInit, stream_));
                 traceInitCopy = false;
@@ -265,7 +269,7 @@ HcclResult AllGatherRingConcurrentDirect::RunAllGather(const u32 rank, const u32
                 txSliceVector[sliceIdx].offset, txSliceVector[sliceIdx].size);
             if (traceSubCopy) {
                 TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo("allgather_direct", step, userRank_,
-                    rankSize, txSliceIdx, "copy_start", "hccl_local_copy", INVALID_VALUE_RANKID,
+                    rankSize, txSliceIdx, "copy_start", "ccl_to_user_copy", INVALID_VALUE_RANKID,
                     "single_ring_direct", rank));
                 CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dst, src, subStreams_[0]));
                 traceSubCopy = false;
@@ -374,7 +378,7 @@ HcclResult AllGatherRingConcurrentDirect::RunAllGather(const u32 rank, const u32
         for (u32 vecIdx = 0; vecIdx < finalSrc.size(); vecIdx++) {
             if (traceFinalCopy) {
                 TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo("allgather_direct", rankSize - 1,
-                    userRank_, rankSize, rank, "copy_start", "hccl_local_copy", INVALID_VALUE_RANKID,
+                    userRank_, rankSize, rank, "copy_start", "ccl_to_user_copy", INVALID_VALUE_RANKID,
                     "single_ring_direct", rank));
                 CHK_RET(HcclD2DMemcpyAsync(dispatcher_, finalDst[vecIdx], finalSrc[vecIdx], stream_));
                 traceFinalCopy = false;
