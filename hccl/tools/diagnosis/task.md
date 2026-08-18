@@ -252,11 +252,12 @@
 - [-] **仓库**：HCOMM
 - **依赖**：COV-001
 - **工作/验收**：只覆盖标准 ring RS/AG；golden phase/step/peer 完整且无算法强制。
-- **实现**：候选实现位于分支 `feat-standard-ring`，当前 head `d444e8b`。已覆盖
+- **实现**：候选实现位于分支 `feat-standard-ring`，当前 head `85717df`。已覆盖
   `ReduceScatterRing`/`AllGatherRing` 的 ACK、payload、reduce/copy 和单 rank copy；
   RS/AG 使用算法 round 作为 `step`，算法标识为 `ring`。
-- **已验证**：已根据 `test/out/Ring` 构建日志修复通用模板误用未声明 `userRank_` 的问题；
-  静态合同断言、`git diff --check`、诊断工具 `compileall` 和 62 项 Python 单元测试通过。
+- **已验证**：已根据 `test/out/Ring` 修复通用模板误用未声明 `userRank_` 的编译问题，以及
+  FFTS `DispatcherGraph` 在未订阅 addition-info 时不触发语义 callback、导致强制 Ring 路径
+  语义为 0 的问题；静态合同断言、`git diff --check` 和 62 项 Python 单元测试通过。
 - **待验收**：HCOMM Linux 构建、910B selector 证据和设备 golden；完成前不标记为 `[x]`。
 
 ### COV-003 覆盖 mesh
@@ -266,11 +267,11 @@
 - **工作/验收**：只覆盖 910B normal/atomic Mesh RS/AG 和 Mesh Direct；Mesh RS/AG 的
   `step` 固定为 0，撤回 Ring 强制后仍输出可用语义。Small-count、Oneshot、Chunk 和 AIV
   不因 executor 名称含 Mesh 而归入本任务。
-- **实现**：候选实现位于分支 `feat-mesh`，当前 head `b0d3ea7`。已覆盖 normal/atomic
+- **实现**：候选实现位于分支 `feat-mesh`，当前 head `8a1d867`。已覆盖 normal/atomic
   Mesh RS/AG 和 `TEMPLATE_ALL_REDUCE_MESH_DIRECT`，算法标识分别为 `mesh`、
   `mesh_atomic`、`mesh_direct`；37 个新增语义上下文的 `step` 均为 0。
-- **已验证**：已修复 `ReduceScatterMesh` 误用未声明 `userRank_` 的同类编译问题；静态合同断言、
-  `git diff --check`、诊断工具 `compileall` 和 62 项 Python 单元测试通过。
+- **已验证**：已修复 `ReduceScatterMesh` 的 rank 编译问题，并根据 `test/out/Mesh` 的强制路径
+  0 语义结果补齐 FFTS task callback；静态合同断言、`git diff --check` 和 62 项 Python 单元测试通过。
 - **待验收**：HCOMM Linux 构建，以及 910B atomic、normal、Mesh Direct 三组 selector/device
   golden；完成前不标记为 `[x]`。
 
@@ -285,11 +286,12 @@
 - [-] **仓库**：HCOMM
 - **依赖**：COV-001
 - **工作/验收**：输出每 hop 的 src/dst/protocol sequence；本任务不构图。
-- **实现**：候选实现位于分支 `feat-NHR`，当前 head `3acb7df`。已覆盖普通 NHR
+- **实现**：候选实现位于分支 `feat-NHR`，当前 head `02b0c37`。已覆盖普通 NHR
   ReduceScatter/AllGather 与 NHR-Oneshot Reduce/Broadcast 的 SDMA、RDMA、barrier 和单 rank copy；
   `step` 为模板 hop 序号，算法标签分别为 `nhr`、`nhr_oneshot`。
-- **已验证**：已修复通用 NHR 模板误用未声明 `userRank_` 的同类编译问题；63 个新增语义上下文
-  静态合同检查、`git diff --check`、诊断工具 `compileall` 和 62 项 Python 单元测试通过。
+- **已验证**：已修复通用 NHR 模板的 rank 编译问题，并根据 `test/out/NHR` 的 normal/oneshot
+  0 语义结果补齐 FFTS task callback；63 个新增语义上下文静态合同检查、`git diff --check`
+  和 62 项 Python 单元测试通过。
 - **待验收**：使用显式 `HCCL_ALGO=level0:ring;level1:NHR` 完成 910B/910C selector
   证据、普通/Oneshot 两组设备 golden 和 HCOMM Linux 构建；多机 Level1 context、rank 域与跨节点
   protocol identity 延期，不因本分支而声明已覆盖。
@@ -354,7 +356,7 @@
 - **验收**：single-rank input/output 同址与异址行为均明确；fallback 要么有选择器 fixture 和
   设备 golden，要么以不可达证明记录在覆盖矩阵中；单机 NHR 与多机 hierarchical NHR 使用
   不同覆盖声明。
-- **进展**：`feat-NHR@3acb7df` 已提供 combine-plane NHR/NHR-Oneshot 候选插桩；仍需设备
+- **进展**：`feat-NHR@02b0c37` 已提供 combine-plane NHR/NHR-Oneshot 候选插桩；仍需设备
   selector 证据才能关闭本任务，`AllReduceSingleExecutor` 也尚未覆盖。
 
 ## 8. M6：多节点与高级诊断
