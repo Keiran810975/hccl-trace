@@ -18,7 +18,6 @@
 #include "mem_name_repository_pub.h"
 #include "adapter_rts.h"
 #include "device_capacity.h"
-#include "task_semantic_trace.h"
 
 namespace hccl {
 std::array<DeviceMem, MAX_MODULE_DEVICE_NUM> TransportP2p::notifyValueMem_;
@@ -1139,16 +1138,12 @@ HcclResult TransportP2p::TxAsync(UserMemType dstMemType, u64 dstOffset, const vo
         /* 增加hccl 数据传输时数据地址和size记录 */
         HCCL_DEBUG("HCCL_KEY_INFO: srcAddr=[%p],srcSize=[%llu],dstAddr=[%p],dstSize=[%llu]", srcDevMem.ptr(),
             srcDevMem.size(), dstDevMem.ptr(), dstDevMem.size());
-        TaskSemanticEventScope semanticScope("tx_payload_start", "link_tx_payload");
         CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dstDevMem, srcDevMem, stream, machinePara_.remoteWorldRank,
             transportAttr_.linkType));
     }
 
     /* 发起send_ready_signal事件 */
-    {
-        TaskSemanticEventScope semanticScope("tx_data_signal_start", "link_tx_data_signal");
-        ret = SignalRecord(remoteSendReadyNotify_, remoteSendReadyAddress_, remoteSendReadyOffset_, stream);
-    }
+    ret = SignalRecord(remoteSendReadyNotify_, remoteSendReadyAddress_, remoteSendReadyOffset_, stream);
     CHK_PRT_RET(ret != HCCL_SUCCESS,
         HCCL_ERROR("[TransportP2p][TxAsync]errNo[0x%016llx]In tx async, signal record failed.",
             HCCL_ERROR_CODE(ret)), ret);
@@ -1168,7 +1163,6 @@ HcclResult TransportP2p::TxData(UserMemType dstMemType, u64 dstOffset, const voi
         /* 增加hccl 数据传输时数据地址和size记录 */
         HCCL_DEBUG("HCCL_KEY_INFO: srcAddr=[%p],srcSize=[%llu],dstAddr=[%p],dstSize=[%llu]", srcDevMem.ptr(),
             srcDevMem.size(), dstDevMem.ptr(), dstDevMem.size());
-        TaskSemanticEventScope semanticScope("tx_payload_start", "link_tx_payload");
         CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dstDevMem, srcDevMem, stream, machinePara_.remoteWorldRank,
             transportAttr_.linkType));
     }
@@ -1186,7 +1180,6 @@ HcclResult TransportP2p::RxData(UserMemType srcMemType, u64 srcOffset, void *dst
 
         DeviceMem srcDevMem(static_cast<s8 *>(srcMemPtr) + srcOffset, len);
         DeviceMem dstDevMem(static_cast<s8 *>(dst), len);
-        TaskSemanticEventScope semanticScope("rx_payload_copy_start", "link_rx_payload_copy");
         CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dstDevMem, srcDevMem, stream, machinePara_.remoteWorldRank,
             transportAttr_.linkType));
     }
@@ -1209,17 +1202,13 @@ HcclResult TransportP2p::TxAsync(std::vector<TxMemoryInfo>& txMems, Stream &stre
             /* 增加hccl 数据传输时数据地址和size记录 */
             HCCL_DEBUG("HCCL_KEY_INFO: srcAddr=[%p],srcSize=[%llu],dstAddr=[%p],dstSize=[%llu]", srcDevMem.ptr(),
                 srcDevMem.size(), dstDevMem.ptr(), dstDevMem.size());
-            TaskSemanticEventScope semanticScope("tx_payload_start", "link_tx_payload");
             CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dstDevMem, srcDevMem, stream, machinePara_.remoteWorldRank,
                 transportAttr_.linkType));
         }
     }
 
     /* 发起send_ready_signal事件 */
-    {
-        TaskSemanticEventScope semanticScope("tx_data_signal_start", "link_tx_data_signal");
-        ret = SignalRecord(remoteSendReadyNotify_, remoteSendReadyAddress_, remoteSendReadyOffset_, stream);
-    }
+    ret = SignalRecord(remoteSendReadyNotify_, remoteSendReadyAddress_, remoteSendReadyOffset_, stream);
     CHK_PRT_RET(ret != HCCL_SUCCESS,
         HCCL_ERROR("[TransportP2p][TxAsync]errNo[0x%016llx]In tx async, signal record failed.",
             HCCL_ERROR_CODE(ret)), ret);
@@ -1230,11 +1219,8 @@ HcclResult TransportP2p::TxAsync(std::vector<TxMemoryInfo>& txMems, Stream &stre
 HcclResult TransportP2p::RxAsync(UserMemType srcMemType, u64 srcOffset, void *dst, u64 len, Stream &stream)
 {
     /* 等待send_ready_signal事件 */
-    {
-        TaskSemanticEventScope semanticScope("rx_data_signal_start", "link_rx_data_signal");
-        CHK_RET(dispatcher_->SignalWait(localSendReadyNotify_->ptr(), stream, machinePara_.localUserrank,
-            machinePara_.remoteWorldRank, INVALID_VALUE_STAGE, false, localSendReadyNotify_->notifyId_));
-    }
+    CHK_RET(dispatcher_->SignalWait(localSendReadyNotify_->ptr(), stream, machinePara_.localUserrank,
+        machinePara_.remoteWorldRank, INVALID_VALUE_STAGE, false, localSendReadyNotify_->notifyId_));
 
     /* 目的端发起数据传输 */
     if ((machinePara_.linkAttribute & 0x2) && (dst != nullptr)) {  // 支持目的端发起
@@ -1243,7 +1229,6 @@ HcclResult TransportP2p::RxAsync(UserMemType srcMemType, u64 srcOffset, void *ds
 
         DeviceMem srcDevMem(static_cast<s8 *>(srcMemPtr) + srcOffset, len);
         DeviceMem dstDevMem(static_cast<s8 *>(dst), len);
-        TaskSemanticEventScope semanticScope("rx_payload_copy_start", "link_rx_payload_copy");
         CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dstDevMem, srcDevMem, stream, machinePara_.remoteWorldRank,
             transportAttr_.linkType));
     }
@@ -1254,11 +1239,8 @@ HcclResult TransportP2p::RxAsync(UserMemType srcMemType, u64 srcOffset, void *ds
 HcclResult TransportP2p::RxAsync(std::vector<RxMemoryInfo>& rxMems, Stream &stream)
 {
     /* 等待send_ready_signal事件 */
-    {
-        TaskSemanticEventScope semanticScope("rx_data_signal_start", "link_rx_data_signal");
-        CHK_RET(dispatcher_->SignalWait(localSendReadyNotify_->ptr(), stream, machinePara_.localUserrank,
-            machinePara_.remoteWorldRank, INVALID_VALUE_STAGE, false, localSendReadyNotify_->notifyId_));
-    }
+    CHK_RET(dispatcher_->SignalWait(localSendReadyNotify_->ptr(), stream, machinePara_.localUserrank,
+        machinePara_.remoteWorldRank, INVALID_VALUE_STAGE, false, localSendReadyNotify_->notifyId_));
 
     /* 目的端发起数据传输 */
     if ((machinePara_.linkAttribute & 0x2) != 0) {  // 支持目的端发起
@@ -1269,7 +1251,6 @@ HcclResult TransportP2p::RxAsync(std::vector<RxMemoryInfo>& rxMems, Stream &stre
 
             DeviceMem srcDevMem(static_cast<s8 *>(srcMemPtr) + mem.srcOffset, mem.len);
             DeviceMem dstDevMem(static_cast<s8 *>(mem.dst), mem.len);
-            TaskSemanticEventScope semanticScope("rx_payload_copy_start", "link_rx_payload_copy");
             CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dstDevMem, srcDevMem, stream, machinePara_.remoteWorldRank,
                 transportAttr_.linkType));
         }

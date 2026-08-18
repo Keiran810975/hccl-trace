@@ -14,8 +14,9 @@
 scope 包住了复合 `TxVector/RxVector`，而 `TransportP2p::RxAsync` 会先提交 signal wait，
 再提交 SDMA。
 
-本分支将 `TaskSemanticEventScope` 移到 common profiling 层，并在
-`TransportP2p` 的真实物理原语处设置事件：
+本分支不修改公共 `TaskSemanticEventScope` 或 `TransportP2p`。只在
+`AllGatherRing::TxVector/RxVector` 内对单机 inline P2P 复合调用进行等价拆分，并在
+各次调用外设置 one-shot event：
 
 | 物理原语 | event | semantic |
 |---|---|---|
@@ -24,8 +25,10 @@ scope 包住了复合 `TxVector/RxVector`，而 `TransportP2p::RxAsync` 会先�
 | source-side DMA | `tx_payload_start` | `link_tx_payload` |
 | destination-side DMA | `rx_payload_copy_start` | `link_rx_payload_copy` |
 
-AllGather 仍在算法层提供 `phase/step/slice/peer` context，但不再在复合 transport
-调用外层设置 one-shot event。
+AllGather 在算法层提供 `phase/step/slice/peer` context。HCCS/PCIe/SIO/HCCS-SW 的
+inline 路径使用 `TxData + TxDataSignal` 和 `RxDataSignal + RxData`，使 signal 与 SDMA
+分别消费自己的 event；非 inline/RDMA 路径继续使用原来的 `TxAsync/RxAsync`，留待
+`COV-006` 结合多机结果细化。
 
 AllReduce executor 的边界搬运采用：
 
@@ -57,21 +60,17 @@ phase/step/peer 检查外，增加以下断言：
 
 ## 合并顺序兼容性
 
-计划合并顺序为 `feat-standard-ring -> feat-NHR -> feat-mesh`。scope 调整具备以下性质：
+计划合并顺序为 `feat-standard-ring -> feat-NHR -> feat-mesh`。本次收敛后：
 
-- `TaskSemanticEventScope` 的类名、namespace、构造/析构签名和 one-shot 行为不变，只把
-  声明从算法 component header 移到其原本已包含的 common profiling header，把实现从
-  `task_semantic_scope.cc` 移到 `task_semantic_trace.cc`；不改变 ABI 符号；
-- 两个实现文件都通过 CMake `target_sources` 编入同一个 `hccl_alg` target；
-- `feat-NHR`、`feat-mesh` 均未修改 scope、common profiling 或 P2P transport 文件；
-- NHR/mesh 继续包含 `task_semantic_scope.h`，该 header 仍包含
-  `task_semantic_trace.h`，所以现有 `TaskSemanticEventScope` 调用无需修改；
-- P2P transport 的 event scope 只有在线程上已有算法 `TaskSemanticTraceInfo` 时才激活，
-  未插桩算法和关闭 trace 的执行路径不产生语义，也不改变通信原语。
+- `task_semantic_scope.h/.cc` 与当前 `master` 完全一致，不再移动声明或实现；
+- common profiling 的 `task_semantic_trace.h/.cc` 与当前 `master` 完全一致；
+- `TransportP2p` 与当前 `master` 完全一致，不会让后续 NHR/mesh 自动获得额外事件；
+- standard Ring 的物理事件拆分仅位于 `AllGatherRing::TxVector/RxVector`；
+- NHR 与 standard Ring 对公共 executor 边界 copy 的修改相同，顺序合并只保留一份。
 
-`git merge-tree` 对 standard Ring/NHR、standard Ring/mesh、NHR/mesh 三组分支均未发现
-内容冲突。NHR 与 standard Ring 对公共 executor 边界 copy 的修改相同，顺序合并时只
-保留一份；各分支的 `task.md` 修改位于不同任务段。
+因此，Ring 合并不会改变 NHR/mesh 的 scope 生命周期、one-shot 行为或 transport 提交
+序列。分支间仍可能因 `task.md` 同一区域的进展记录产生文档冲突，应在合并时保留三方
+进展；这不属于 C++ 功能冲突。
 
 本地 Windows 环境缺少项目所需的 Bash/CMake/CANN 构建环境，当前只执行静态 diff
 检查；最终结论以设备重新构建和 msprof 回归为准。

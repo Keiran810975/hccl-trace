@@ -33,19 +33,6 @@ struct TaskSemanticTraceInfo {
     bool oneShot{false};
 };
 
-class TaskSemanticEventScope {
-public:
-    TaskSemanticEventScope(const char *event, const char *semantic);
-    ~TaskSemanticEventScope();
-
-    TaskSemanticEventScope(const TaskSemanticEventScope &) = delete;
-    TaskSemanticEventScope &operator=(const TaskSemanticEventScope &) = delete;
-
-private:
-    TaskSemanticTraceInfo previousInfo_{};
-    bool active_{false};
-};
-
 bool IsTaskSemanticTraceEnabled();
 bool GetTaskSemanticTraceInfo(TaskSemanticTraceInfo &info);
 bool CaptureTaskSemanticTraceInfo(TaskSemanticTraceInfo &info);

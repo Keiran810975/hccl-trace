@@ -30,7 +30,19 @@ HcclResult AllGatherRing::TxVector(const LINK &link, const std::vector<Slice> &t
         txMems.emplace_back(TxMemoryInfo{UserMemType::OUTPUT_MEM, txSlice.offset + baseOffset_,
             srcMem.ptr(), txSlice.size});
     }
-    CHK_RET(link->TxAsync(txMems, stream_));
+    if (!link->IsSpInlineReduce()) {
+        TaskSemanticEventScope semanticScope("tx_payload_start", "link_tx_payload");
+        CHK_RET(link->TxAsync(txMems, stream_));
+        return HCCL_SUCCESS;
+    }
+    for (const TxMemoryInfo &txMem : txMems) {
+        TaskSemanticEventScope semanticScope("tx_payload_start", "link_tx_payload");
+        CHK_RET(link->TxData(txMem.dstMemType, txMem.dstOffset, txMem.src, txMem.len, stream_));
+    }
+    {
+        TaskSemanticEventScope semanticScope("tx_data_signal_start", "link_tx_data_signal");
+        CHK_RET(link->TxDataSignal(stream_));
+    }
     HCCL_DEBUG("[AllGatherRing]TxVector for txMems success");
     return HCCL_SUCCESS;
 }
@@ -45,7 +57,19 @@ HcclResult AllGatherRing::RxVector(const LINK &link, const std::vector<Slice> &r
         rxMems.emplace_back(RxMemoryInfo{UserMemType::OUTPUT_MEM, rxSlice.offset + baseOffset_,
             dstMem.ptr(), rxSlice.size});
     }
-    CHK_RET(link->RxAsync(rxMems, stream_));
+    if (!link->IsSpInlineReduce()) {
+        TaskSemanticEventScope semanticScope("rx_payload_copy_start", "link_rx_payload_copy");
+        CHK_RET(link->RxAsync(rxMems, stream_));
+        return HCCL_SUCCESS;
+    }
+    {
+        TaskSemanticEventScope semanticScope("rx_data_signal_start", "link_rx_data_signal");
+        CHK_RET(link->RxDataSignal(stream_));
+    }
+    for (const RxMemoryInfo &rxMem : rxMems) {
+        TaskSemanticEventScope semanticScope("rx_payload_copy_start", "link_rx_payload_copy");
+        CHK_RET(link->RxData(rxMem.srcMemType, rxMem.srcOffset, rxMem.dst, rxMem.len, stream_));
+    }
     return HCCL_SUCCESS;
 }
 

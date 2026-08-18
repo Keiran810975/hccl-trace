@@ -253,8 +253,9 @@
 - **依赖**：COV-001
 - **工作/验收**：只覆盖标准 ring RS/AG；golden phase/step/peer 完整且无算法强制。
 - **2026-08-18 进展**：已根据设备结果修正 standard Ring AllGather 的复合调用
-  one-shot 错位：P2P transport 在真实 signal/SDMA 原语处分别输出
-  `tx_data_signal_start`、`rx_data_signal_start`、`rx_payload_copy_start`。AllReduce
+  one-shot 错位：仅在 `AllGatherRing::TxVector/RxVector` 内将单机 inline P2P 路径
+  拆为 data/signal 调用，分别输出 `tx_data_signal_start`、`rx_data_signal_start`、
+  `rx_payload_copy_start`；公共 scope、common profiling 与 P2P transport 均保持不变。AllReduce
   executor 的 user/CCL buffer 边界搬运统一使用 `algorithm/phase=allreduce_executor`、
   `event=copy_start`，semantic 区分 `user_to_ccl_copy` 与 `ccl_to_user_copy`。尚待设备
   回归，预期 operation scope 内 SDMA 覆盖率为 100%。`single_ring_direct` 中真实跨越
