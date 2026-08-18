@@ -9,6 +9,7 @@
  */
 
 #include "coll_all_reduce_executor.h"
+#include "task_semantic_scope.h"
 
 namespace hccl {
 
@@ -285,6 +286,10 @@ HcclResult CollAllReduceExecutor::RunLoopInner(OpParam &param, const ReduceType 
         // 如果使用in CCL buffer，需要将user buffer in中的结果拷贝到CCL buffer in
         DeviceMem inMem(execMem.inputPtr, curSize);
         DeviceMem inCommMem = execMem.inputMem.range(0, curSize);
+        TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+            "allreduce_executor", 0, topoAttr_.userRank, topoAttr_.userRankSize, 0,
+            "copy_start", "user_to_ccl_copy", INVALID_VALUE_RANKID, "allreduce_executor",
+            topoAttr_.userRank));
         CHK_RET(HcclD2DMemcpyAsync(dispatcher_, inCommMem, inMem, param.stream));
         HCCL_DEBUG("[CollAllReduceExecutor][RunLoop]copy from user in to ccl in.");
     }
@@ -305,6 +310,10 @@ HcclResult CollAllReduceExecutor::RunLoopInner(OpParam &param, const ReduceType 
         // 如果使用CCL buffer，需要将CCL buffer out中的结果拷贝到user buffer out
         DeviceMem outCommMem = execMem.outputMem.range(0, curSize);
         DeviceMem outMem(execMem.outputPtr, curSize);
+        TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+            "allreduce_executor", 1, topoAttr_.userRank, topoAttr_.userRankSize, 0,
+            "copy_start", "ccl_to_user_copy", INVALID_VALUE_RANKID, "allreduce_executor",
+            topoAttr_.userRank));
         CHK_RET(HcclD2DMemcpyAsync(dispatcher_, outMem, outCommMem, param.stream));
     }
 

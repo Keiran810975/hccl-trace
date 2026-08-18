@@ -283,6 +283,11 @@
 - [ ] **仓库**：HCOMM
 - **依赖**：COV-001
 - **工作/验收**：输出每 hop 的 src/dst/protocol sequence；本任务不构图。
+- **2026-08-18 进展**：设备结果确认 NHR 内部 payload SDMA 已完整命中；剩余每个
+  FFTS graph 首尾 4 条 SDMA 来自公共 AllReduce executor 的 user/CCL buffer 搬运。
+  已按 `allreduce_executor/copy_start` 补点，并以 `user_to_ccl_copy`、
+  `ccl_to_user_copy` 区分方向。尚待设备回归，预期 operation scope 内 profiler-only
+  SDMA 从 1,344 降为 0，因此暂不勾选完成。
 
 ### COV-006 覆盖 RDMA/RoCE
 
