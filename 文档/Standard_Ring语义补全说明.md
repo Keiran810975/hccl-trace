@@ -72,5 +72,10 @@ phase/step/peer 检查外，增加以下断言：
 序列。分支间仍可能因 `task.md` 同一区域的进展记录产生文档冲突，应在合并时保留三方
 进展；这不属于 C++ 功能冲突。
 
+已从当前 `master` 建立 detached worktree 实际演练上述顺序：Ring 可直接快进；NHR 的
+C++ 全部自动合并，仅 `task.md` 的 COV-005 进展记录发生内容冲突；保留双方记录后，Mesh
+的 7 个 C++ 文件全部自动合并。最终审计树中上述 5 个共享文件相对 `master` 仍无差异，
+`git diff --check master..HEAD` 通过。
+
 本地 Windows 环境缺少项目所需的 Bash/CMake/CANN 构建环境，当前只执行静态 diff
 检查；最终结论以设备重新构建和 msprof 回归为准。
