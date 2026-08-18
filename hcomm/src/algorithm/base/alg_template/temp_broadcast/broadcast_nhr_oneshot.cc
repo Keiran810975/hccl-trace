@@ -43,7 +43,7 @@ HcclResult BroadcastNHROneshot::RunAsync(const u32 rank, const u32 rankSize, con
         DeviceMem src = inputMem_.range(localBaseOffset_, totalSize);
         DeviceMem dst = outputMem_.range(localBaseOffset_, totalSize);
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "broadcast", 0, userRank_, rankSize, 0, "copy_start", "hccl_local_copy",
+            "broadcast", 0, rank, rankSize, 0, "copy_start", "hccl_local_copy",
             INVALID_VALUE_RANKID, "nhr_oneshot", rank));
         CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dst, src, stream_));
     }
@@ -90,14 +90,14 @@ HcclResult BroadcastNHROneshot::SdmaRx(LINK &linkLeft, LINK &linkRight, InterSer
 
     if (linkRight != nullptr) {
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "broadcast", stepInfo.step, userRank_, rankSize, 0, "tx_ack_start", "link_tx_ack",
+            "broadcast", stepInfo.step, stepInfo.myRank, rankSize, 0, "tx_ack_start", "link_tx_ack",
             linkRight->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
         CHK_RET(linkRight->TxAck(stream_));
     }
     if (linkLeft != nullptr) {
         {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "broadcast", stepInfo.step, userRank_, rankSize, 0, "rx_ack_start", "link_rx_ack",
+                "broadcast", stepInfo.step, stepInfo.myRank, rankSize, 0, "rx_ack_start", "link_rx_ack",
                 linkLeft->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
             CHK_RET(linkLeft->RxAck(stream_));
         }
@@ -106,7 +106,7 @@ HcclResult BroadcastNHROneshot::SdmaRx(LINK &linkLeft, LINK &linkRight, InterSer
         DeviceMem srcMemLeft(static_cast<s8 *>(srcMemPtr) + baseOffset_, totalSize);
         {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "broadcast", stepInfo.step, userRank_, rankSize, 0, nullptr, nullptr,
+                "broadcast", stepInfo.step, stepInfo.myRank, rankSize, 0, nullptr, nullptr,
                 linkLeft->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
             TaskSemanticEventScope eventScope("rx_payload_copy_start", "link_rx_payload_copy");
             CHK_RET(HcclD2DMemcpyAsync(dispatcher_, srcMem, srcMemLeft, stream_, linkLeft->GetRemoteRank(), // Memecpy
@@ -114,14 +114,14 @@ HcclResult BroadcastNHROneshot::SdmaRx(LINK &linkLeft, LINK &linkRight, InterSer
         }
         {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "broadcast", stepInfo.step, userRank_, rankSize, 0, "tx_data_signal_start", "link_tx_data_signal",
+                "broadcast", stepInfo.step, stepInfo.myRank, rankSize, 0, "tx_data_signal_start", "link_tx_data_signal",
                 linkLeft->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
             CHK_RET(linkLeft->TxDataSignal(stream_));
         }
     }
     if (linkRight != nullptr) {
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "broadcast", stepInfo.step, userRank_, rankSize, 0, "rx_data_signal_start", "link_rx_data_signal",
+            "broadcast", stepInfo.step, stepInfo.myRank, rankSize, 0, "rx_data_signal_start", "link_rx_data_signal",
             linkRight->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
         CHK_RET(linkRight->RxDataSignal(stream_));
     }
@@ -136,7 +136,7 @@ HcclResult BroadcastNHROneshot::RdmaTxRx(LINK &linkLeft, LINK &linkRight, InterS
 
     if (linkLeft != nullptr) {
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "broadcast", stepInfo.step, userRank_, rankSize, 0, "tx_ack_start", "link_tx_ack",
+            "broadcast", stepInfo.step, stepInfo.myRank, rankSize, 0, "tx_ack_start", "link_tx_ack",
             linkLeft->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
         CHK_RET(linkLeft->TxAck(stream_));
     }
@@ -144,20 +144,20 @@ HcclResult BroadcastNHROneshot::RdmaTxRx(LINK &linkLeft, LINK &linkRight, InterS
     if (linkRight != nullptr) {
         {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "broadcast", stepInfo.step, userRank_, rankSize, 0, "rx_ack_start", "link_rx_ack",
+                "broadcast", stepInfo.step, stepInfo.myRank, rankSize, 0, "rx_ack_start", "link_rx_ack",
                 linkRight->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
             CHK_RET(linkRight->RxAck(stream_));
         }
         {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "broadcast", stepInfo.step, userRank_, rankSize, 0, nullptr, nullptr,
+                "broadcast", stepInfo.step, stepInfo.myRank, rankSize, 0, nullptr, nullptr,
                 linkRight->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
             TaskSemanticEventScope eventScope("tx_payload_start", "link_tx_payload");
             CHK_RET(linkRight->TxAsync(UserMemType::OUTPUT_MEM, baseOffset_, srcMem.ptr(), srcMem.size(), stream_));
         }
         {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "broadcast", stepInfo.step, userRank_, rankSize, 0, "rx_data_signal_start", "link_rx_data_signal",
+                "broadcast", stepInfo.step, stepInfo.myRank, rankSize, 0, "rx_data_signal_start", "link_rx_data_signal",
                 linkRight->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
             CHK_RET(linkRight->WaitFinAck(stream_));
         }
@@ -166,14 +166,14 @@ HcclResult BroadcastNHROneshot::RdmaTxRx(LINK &linkLeft, LINK &linkRight, InterS
     if (linkLeft != nullptr) {
         {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "broadcast", stepInfo.step, userRank_, rankSize, 0, nullptr, nullptr,
+                "broadcast", stepInfo.step, stepInfo.myRank, rankSize, 0, nullptr, nullptr,
                 linkLeft->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
             TaskSemanticEventScope eventScope("rx_payload_copy_start", "link_rx_payload_copy");
             CHK_RET(linkLeft->RxAsync(UserMemType::OUTPUT_MEM, baseOffset_, srcMem.ptr(), srcMem.size(), stream_));
         }
         {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "broadcast", stepInfo.step, userRank_, rankSize, 0, "tx_data_signal_start", "link_tx_data_signal",
+                "broadcast", stepInfo.step, stepInfo.myRank, rankSize, 0, "tx_data_signal_start", "link_tx_data_signal",
                 linkLeft->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
             CHK_RET(linkLeft->PostFinAck(stream_));
         }

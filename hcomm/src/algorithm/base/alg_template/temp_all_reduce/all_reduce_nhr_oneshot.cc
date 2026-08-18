@@ -41,7 +41,7 @@ HcclResult AllReduceNHROneshot::RunAsync(const u32 rank, const u32 rankSize, con
     if (rankSize == 1) {
         if (inputMem_ != outputMem_) {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "allreduce_executor", 0, userRank_, rankSize, 0, "copy_start", "hccl_local_copy",
+                "allreduce_executor", 0, rank, rankSize, 0, "copy_start", "hccl_local_copy",
                 INVALID_VALUE_RANKID, "nhr_oneshot", rank));
             ret = HcclD2DMemcpyAsync(dispatcher_, outputMem_, inputMem_, stream_);
             CHK_PRT_RET(ret != HCCL_SUCCESS,

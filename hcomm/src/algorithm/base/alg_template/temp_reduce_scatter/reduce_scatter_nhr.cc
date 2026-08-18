@@ -46,7 +46,7 @@ HcclResult ReduceScatterNHR::RunAsync(const u32 rank, const u32 rankSize, const 
     if (rankSize == 1) {
         if (inputMem_ != outputMem_) {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "reduce_scatter", 0, userRank_, rankSize, 0, "copy_start", "hccl_local_copy",
+                "reduce_scatter", 0, rank, rankSize, 0, "copy_start", "hccl_local_copy",
                 INVALID_VALUE_RANKID, "nhr", rank));
             return HcclD2DMemcpyAsync(dispatcher_, outputMem_, inputMem_, stream_);
         }
@@ -422,51 +422,51 @@ HcclResult ReduceScatterNHR::RunReduceScatterNHR(const u32 rank, const u32 rankS
         if (linkLeft->IsSpInlineReduce() && linkRight->IsSpInlineReduce()) { // SDMA
             {
                 TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                    "reduce_scatter", step, userRank_, rankSize, stepInfo.txSliceIdxs.front(),
+                    "reduce_scatter", step, rank, rankSize, stepInfo.txSliceIdxs.front(),
                     "tx_ack_start", "link_tx_ack", linkRight->GetRemoteRank(), "nhr", rank));
                 CHK_RET(linkRight->TxAck(stream_));
             }
             {
                 TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                    "reduce_scatter", step, userRank_, rankSize, stepInfo.rxSliceIdxs.front(),
+                    "reduce_scatter", step, rank, rankSize, stepInfo.rxSliceIdxs.front(),
                     "rx_ack_start", "link_rx_ack", linkLeft->GetRemoteRank(), "nhr", rank));
                 CHK_RET(linkLeft->RxAck(stream_));
             }
             {
                 TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                    "reduce_scatter", step, userRank_, rankSize, stepInfo.rxSliceIdxs.front(), nullptr, nullptr,
+                    "reduce_scatter", step, rank, rankSize, stepInfo.rxSliceIdxs.front(), nullptr, nullptr,
                     linkLeft->GetRemoteRank(), "nhr", rank));
                 CHK_RET(SdmaReducer(nSteps, linkLeft, stepInfo, inputSlices, outputSlices));
             }
             {
                 TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                    "reduce_scatter", step, userRank_, rankSize, stepInfo.rxSliceIdxs.front(),
+                    "reduce_scatter", step, rank, rankSize, stepInfo.rxSliceIdxs.front(),
                     "tx_data_signal_start", "link_tx_data_signal", linkLeft->GetRemoteRank(), "nhr", rank));
                 CHK_RET(linkLeft->TxDataSignal(stream_)); // 告知left我读完了
             }
             {
                 TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                    "reduce_scatter", step, userRank_, rankSize, stepInfo.txSliceIdxs.front(),
+                    "reduce_scatter", step, rank, rankSize, stepInfo.txSliceIdxs.front(),
                     "rx_data_signal_start", "link_rx_data_signal", linkRight->GetRemoteRank(), "nhr", rank));
                 CHK_RET(linkRight->RxDataSignal(stream_)); // 等right读完
             }
         } else { // RDMA
             {
                 TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                    "reduce_scatter", step, userRank_, rankSize, stepInfo.rxSliceIdxs.front(),
+                    "reduce_scatter", step, rank, rankSize, stepInfo.rxSliceIdxs.front(),
                     "tx_ack_start", "link_tx_ack", linkLeft->GetRemoteRank(), "nhr", rank));
                 CHK_RET(linkLeft->TxAck(stream_));
             }
             {
                 TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                    "reduce_scatter", step, userRank_, rankSize, stepInfo.txSliceIdxs.front(),
+                    "reduce_scatter", step, rank, rankSize, stepInfo.txSliceIdxs.front(),
                     "rx_ack_start", "link_rx_ack", linkRight->GetRemoteRank(), "nhr", rank));
                 CHK_RET(linkRight->RxAck(stream_));
             }
             // tx
             {
                 TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                    "reduce_scatter", step, userRank_, rankSize, stepInfo.txSliceIdxs.front(), nullptr, nullptr,
+                    "reduce_scatter", step, rank, rankSize, stepInfo.txSliceIdxs.front(), nullptr, nullptr,
                     linkRight->GetRemoteRank(), "nhr", rank));
                 ret = RunSourceSender(linkRight, stepInfo, inputSlices, outputSlices);
             }
@@ -475,7 +475,7 @@ HcclResult ReduceScatterNHR::RunReduceScatterNHR(const u32 rank, const u32 rankS
             // rx
             {
                 TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                    "reduce_scatter", step, userRank_, rankSize, stepInfo.rxSliceIdxs.front(), nullptr, nullptr,
+                    "reduce_scatter", step, rank, rankSize, stepInfo.rxSliceIdxs.front(), nullptr, nullptr,
                     linkLeft->GetRemoteRank(), "nhr", rank));
                 if (step == (nSteps - 1)) {
                     ret = RunDestReducerLastStep(linkLeft, stepInfo, inputSlices, outputSlices);
@@ -487,7 +487,7 @@ HcclResult ReduceScatterNHR::RunReduceScatterNHR(const u32 rank, const u32 rankS
             CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[ReduceScatterNHR][RunReduceScatterNHR] Rx failed"), ret);
             {
                 TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                    "reduce_scatter", step, userRank_, rankSize, stepInfo.rxSliceIdxs.front(),
+                    "reduce_scatter", step, rank, rankSize, stepInfo.rxSliceIdxs.front(),
                     "tx_data_signal_start", "link_tx_data_signal", linkLeft->GetRemoteRank(), "nhr", rank));
                 ret = linkLeft->PostFinAck(stream_);
             }
@@ -495,7 +495,7 @@ HcclResult ReduceScatterNHR::RunReduceScatterNHR(const u32 rank, const u32 rankS
 
             {
                 TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                    "reduce_scatter", step, userRank_, rankSize, stepInfo.txSliceIdxs.front(),
+                    "reduce_scatter", step, rank, rankSize, stepInfo.txSliceIdxs.front(),
                     "rx_data_signal_start", "link_rx_data_signal", linkRight->GetRemoteRank(), "nhr", rank));
                 ret = linkRight->WaitFinAck(stream_);
             }
@@ -504,37 +504,37 @@ HcclResult ReduceScatterNHR::RunReduceScatterNHR(const u32 rank, const u32 rankS
             if (barrierSwitchOn_) {
                 {
                     TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                        "reduce_scatter", step, userRank_, rankSize, stepInfo.rxSliceIdxs.front(),
+                        "reduce_scatter", step, rank, rankSize, stepInfo.rxSliceIdxs.front(),
                         "tx_ack_start", "link_tx_ack", linkLeft->GetRemoteRank(), "nhr", rank));
                     CHK_RET(linkLeft->TxAck(stream_));
                 }
                 {
                     TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                        "reduce_scatter", step, userRank_, rankSize, stepInfo.txSliceIdxs.front(),
+                        "reduce_scatter", step, rank, rankSize, stepInfo.txSliceIdxs.front(),
                         "rx_ack_start", "link_rx_ack", linkRight->GetRemoteRank(), "nhr", rank));
                     CHK_RET(linkRight->RxAck(stream_));
                 }
                 {
                     TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                        "reduce_scatter", step, userRank_, rankSize, stepInfo.txSliceIdxs.front(),
+                        "reduce_scatter", step, rank, rankSize, stepInfo.txSliceIdxs.front(),
                         "tx_data_signal_start", "link_tx_data_signal", linkRight->GetRemoteRank(), "nhr", rank));
                     CHK_RET(linkRight->TxDataSignal(stream_));
                 }
                 {
                     TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                        "reduce_scatter", step, userRank_, rankSize, stepInfo.rxSliceIdxs.front(),
+                        "reduce_scatter", step, rank, rankSize, stepInfo.rxSliceIdxs.front(),
                         "rx_data_signal_start", "link_rx_data_signal", linkLeft->GetRemoteRank(), "nhr", rank));
                     CHK_RET(linkLeft->RxDataSignal(stream_));
                 }
                 {
                     TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                        "reduce_scatter", step, userRank_, rankSize, stepInfo.rxSliceIdxs.front(),
+                        "reduce_scatter", step, rank, rankSize, stepInfo.rxSliceIdxs.front(),
                         "tx_data_signal_start", "link_tx_data_signal", linkLeft->GetRemoteRank(), "nhr", rank));
                     CHK_RET(linkLeft->PostFinAck(stream_));
                 }
                 {
                     TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                        "reduce_scatter", step, userRank_, rankSize, stepInfo.txSliceIdxs.front(),
+                        "reduce_scatter", step, rank, rankSize, stepInfo.txSliceIdxs.front(),
                         "rx_data_signal_start", "link_rx_data_signal", linkRight->GetRemoteRank(), "nhr", rank));
                     CHK_RET(linkRight->WaitFinAck(stream_));
                 }

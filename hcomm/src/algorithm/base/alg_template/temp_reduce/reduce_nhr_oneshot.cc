@@ -43,7 +43,7 @@ HcclResult ReduceNHROneshot::RunAsync(const u32 rank, const u32 rankSize, const 
     if (rankSize == 1) {
         if (inputMem_ != outputMem_) {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "reduce", 0, userRank_, rankSize, 0, "copy_start", "hccl_local_copy",
+                "reduce", 0, rank, rankSize, 0, "copy_start", "hccl_local_copy",
                 INVALID_VALUE_RANKID, "nhr_oneshot", rank));
             return HcclD2DMemcpyAsync(dispatcher_, outputMem_, inputMem_, stream_);
         }
@@ -91,7 +91,7 @@ HcclResult ReduceNHROneshot::SdmaRx(LINK &linkLeft, LINK &linkRight, InterServer
 
     if (linkRight != nullptr) {
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "reduce", stepInfo.step, userRank_, rankSize, 0, "tx_ack_start", "link_tx_ack",
+            "reduce", stepInfo.step, stepInfo.myRank, rankSize, 0, "tx_ack_start", "link_tx_ack",
             linkRight->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
         CHK_RET(linkRight->TxAck(stream_));
     }
@@ -99,7 +99,7 @@ HcclResult ReduceNHROneshot::SdmaRx(LINK &linkLeft, LINK &linkRight, InterServer
     if (linkLeft != nullptr) {
         {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "reduce", stepInfo.step, userRank_, rankSize, 0, "rx_ack_start", "link_rx_ack",
+                "reduce", stepInfo.step, stepInfo.myRank, rankSize, 0, "rx_ack_start", "link_rx_ack",
                 linkLeft->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
             CHK_RET(linkLeft->RxAck(stream_));
         }
@@ -107,7 +107,7 @@ HcclResult ReduceNHROneshot::SdmaRx(LINK &linkLeft, LINK &linkRight, InterServer
         CHK_RET(linkLeft->GetRemoteMem(UserMemType::INPUT_MEM, &remoteMem));
         if ((INLINE_REDUCE_BITMASK & reduceAttr_) == 1) { // inlineReduce
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "reduce", stepInfo.step, userRank_, rankSize, 0, nullptr, nullptr,
+                "reduce", stepInfo.step, stepInfo.myRank, rankSize, 0, nullptr, nullptr,
                 linkLeft->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
             TaskSemanticEventScope eventScope("rx_payload_reduce_start", "link_rx_payload_reduce");
             CHK_RET(HcclReduceAsync(dispatcher_, static_cast<s8 *>(remoteMem) + baseOffset_,
@@ -117,7 +117,7 @@ HcclResult ReduceNHROneshot::SdmaRx(LINK &linkLeft, LINK &linkRight, InterServer
             DeviceMem srcMemLeft(static_cast<s8 *>(remoteMem) + baseOffset_, totalSize);
             {
                 TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                    "reduce", stepInfo.step, userRank_, rankSize, 0, nullptr, nullptr,
+                    "reduce", stepInfo.step, stepInfo.myRank, rankSize, 0, nullptr, nullptr,
                     linkLeft->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
                 TaskSemanticEventScope eventScope("rx_payload_copy_start", "link_rx_payload_copy");
                 CHK_RET(HcclD2DMemcpyAsync(dispatcher_, tempMem, srcMemLeft, stream_, linkLeft->GetRemoteRank(), // left的inputMem拷到本端的scratchMem
@@ -126,7 +126,7 @@ HcclResult ReduceNHROneshot::SdmaRx(LINK &linkLeft, LINK &linkRight, InterServer
             u64 dataCount = srcMem.size() / SIZE_TABLE[dataType_];
             {
                 TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                    "reduce", stepInfo.step, userRank_, rankSize, 0, nullptr, nullptr,
+                    "reduce", stepInfo.step, stepInfo.myRank, rankSize, 0, nullptr, nullptr,
                     linkLeft->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
                 TaskSemanticEventScope eventScope("rx_payload_reduce_start", "link_rx_payload_reduce");
                 ret = HcclReduceAsync(dispatcher_, tempMem.ptr(), dataCount, dataType_, reductionOp_, stream_, srcMem.ptr(),
@@ -135,14 +135,14 @@ HcclResult ReduceNHROneshot::SdmaRx(LINK &linkLeft, LINK &linkRight, InterServer
         }
         {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "reduce", stepInfo.step, userRank_, rankSize, 0, "tx_data_signal_start", "link_tx_data_signal",
+                "reduce", stepInfo.step, stepInfo.myRank, rankSize, 0, "tx_data_signal_start", "link_tx_data_signal",
                 linkLeft->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
             CHK_RET(linkLeft->TxDataSignal(stream_));
         }
     }
     if (linkRight != nullptr) {
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "reduce", stepInfo.step, userRank_, rankSize, 0, "rx_data_signal_start", "link_rx_data_signal",
+            "reduce", stepInfo.step, stepInfo.myRank, rankSize, 0, "rx_data_signal_start", "link_rx_data_signal",
             linkRight->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
         CHK_RET(linkRight->RxDataSignal(stream_));
     }
@@ -159,7 +159,7 @@ HcclResult ReduceNHROneshot::RdmaTxRx(LINK &linkLeft, LINK &linkRight, InterServ
 
     if (linkLeft != nullptr) {
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "reduce", stepInfo.step, userRank_, rankSize, 0, "tx_ack_start", "link_tx_ack",
+            "reduce", stepInfo.step, stepInfo.myRank, rankSize, 0, "tx_ack_start", "link_tx_ack",
             linkLeft->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
         ret = linkLeft->TxAck(stream_);
         CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[ReduceNHROneshot][RunReduceNHROneshot] TxAck failed"), ret);
@@ -168,14 +168,14 @@ HcclResult ReduceNHROneshot::RdmaTxRx(LINK &linkLeft, LINK &linkRight, InterServ
     if (linkRight != nullptr) {
         {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "reduce", stepInfo.step, userRank_, rankSize, 0, "rx_ack_start", "link_rx_ack",
+                "reduce", stepInfo.step, stepInfo.myRank, rankSize, 0, "rx_ack_start", "link_rx_ack",
                 linkRight->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
             ret = linkRight->RxAck(stream_);
         }
         CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[ReduceNHROneshot][RunReduceNHROneshot] RxAck failed"), ret);
         {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "reduce", stepInfo.step, userRank_, rankSize, 0, nullptr, nullptr,
+                "reduce", stepInfo.step, stepInfo.myRank, rankSize, 0, nullptr, nullptr,
                 linkRight->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
             ret = senderInfo_->run(linkRight, baseOffset_, srcMem, stream_);
         }
@@ -184,7 +184,7 @@ HcclResult ReduceNHROneshot::RdmaTxRx(LINK &linkLeft, LINK &linkRight, InterServ
 
     if (linkLeft != nullptr) {
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "reduce", stepInfo.step, userRank_, rankSize, 0, nullptr, nullptr,
+            "reduce", stepInfo.step, stepInfo.myRank, rankSize, 0, nullptr, nullptr,
             linkLeft->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
         ret = reducerInfo_->run(dispatcher_, linkLeft, baseOffset_, srcMem, srcMem, tempMem, stream_);
         CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[ReduceNHROneshot][RunReduceNHROneshot] Rx failed"), ret);
@@ -273,20 +273,20 @@ HcclResult ReduceNHROneshot::ExecuteBarrier(const std::shared_ptr<Transport> &pr
 {
     if (preLink != nullptr) {
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "reduce", stepInfo.step, userRank_, rankSize, 0, "tx_ack_start", "link_tx_ack",
+            "reduce", stepInfo.step, stepInfo.myRank, rankSize, 0, "tx_ack_start", "link_tx_ack",
             preLink->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
         CHK_RET(preLink->TxAck(stream_));
     }
     if (aftLink != nullptr) {
         {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "reduce", stepInfo.step, userRank_, rankSize, 0, "rx_ack_start", "link_rx_ack",
+                "reduce", stepInfo.step, stepInfo.myRank, rankSize, 0, "rx_ack_start", "link_rx_ack",
                 aftLink->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
             CHK_RET(aftLink->RxAck(stream_));
         }
         {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "reduce", stepInfo.step, userRank_, rankSize, 0, "tx_data_signal_start", "link_tx_data_signal",
+                "reduce", stepInfo.step, stepInfo.myRank, rankSize, 0, "tx_data_signal_start", "link_tx_data_signal",
                 aftLink->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
             CHK_RET(aftLink->TxDataSignal(stream_));
         }
@@ -294,20 +294,20 @@ HcclResult ReduceNHROneshot::ExecuteBarrier(const std::shared_ptr<Transport> &pr
     if (preLink != nullptr) {
         {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "reduce", stepInfo.step, userRank_, rankSize, 0, "rx_data_signal_start", "link_rx_data_signal",
+                "reduce", stepInfo.step, stepInfo.myRank, rankSize, 0, "rx_data_signal_start", "link_rx_data_signal",
                 preLink->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
             CHK_RET(preLink->RxDataSignal(stream_));
         }
         {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "reduce", stepInfo.step, userRank_, rankSize, 0, "tx_data_signal_start", "link_tx_data_signal",
+                "reduce", stepInfo.step, stepInfo.myRank, rankSize, 0, "tx_data_signal_start", "link_tx_data_signal",
                 preLink->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
             CHK_RET(preLink->PostFinAck(stream_));
         }
     }
     if (aftLink != nullptr) {
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "reduce", stepInfo.step, userRank_, rankSize, 0, "rx_data_signal_start", "link_rx_data_signal",
+            "reduce", stepInfo.step, stepInfo.myRank, rankSize, 0, "rx_data_signal_start", "link_rx_data_signal",
             aftLink->GetRemoteRank(), "nhr_oneshot", stepInfo.myRank));
         CHK_RET(aftLink->WaitFinAck(stream_));
     }

@@ -44,7 +44,7 @@ HcclResult AllGatherNHR::RunAsync(const u32 rank, const u32 rankSize, const std:
     if (rankSize == 1) {
         if (inputMem_ != outputMem_) {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "allgather", 0, userRank_, rankSize, 0, "copy_start", "hccl_local_copy",
+                "allgather", 0, rank, rankSize, 0, "copy_start", "hccl_local_copy",
                 INVALID_VALUE_RANKID, "nhr", rank));
             CHK_RET(HcclD2DMemcpyAsync(dispatcher_, outputMem_, inputMem_, stream_));
         }
@@ -83,7 +83,7 @@ HcclResult AllGatherNHR::RunAsync(const u32 rank, const u32 rankSize, const std:
         DeviceMem dst = outputMem_.range(slices_[targetIdx].offset, slices_[targetIdx].size);
         DeviceMem src = inputMem_.range(inputSlices[targetIdx].offset, inputSlices[targetIdx].size);
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "allgather", 0, userRank_, rankSize, targetIdx, "copy_start", "hccl_local_copy",
+            "allgather", 0, rank, rankSize, targetIdx, "copy_start", "hccl_local_copy",
             INVALID_VALUE_RANKID, "nhr", rank));
         CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dst, src, stream_));
     }
@@ -100,13 +100,13 @@ HcclResult AllGatherNHR::SdmaRx(const LINK &linkLeft, const LINK &linkRight, Int
 {
     {
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "allgather", stepInfo.step, userRank_, rankSize, stepInfo.txSliceIdxs.front(),
+            "allgather", stepInfo.step, stepInfo.myRank, rankSize, stepInfo.txSliceIdxs.front(),
             "tx_ack_start", "link_tx_ack", linkRight->GetRemoteRank(), "nhr", stepInfo.myRank));
         CHK_RET(linkRight->TxAck(stream_)); // 告知right可以从我这读了
     }
     {
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "allgather", stepInfo.step, userRank_, rankSize, stepInfo.rxSliceIdxs.front(),
+            "allgather", stepInfo.step, stepInfo.myRank, rankSize, stepInfo.rxSliceIdxs.front(),
             "rx_ack_start", "link_rx_ack", linkLeft->GetRemoteRank(), "nhr", stepInfo.myRank));
         CHK_RET(linkLeft->RxAck(stream_)); // 等left告知可以从他那读了
     }
@@ -118,7 +118,7 @@ HcclResult AllGatherNHR::SdmaRx(const LINK &linkLeft, const LINK &linkRight, Int
         HCCL_DEBUG("[AllGatherNHR] rx dstMem[%p] range[%llu], size[%llu] ",  dstMem.ptr(),
             rxSlice.offset, rxSlice.size);
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "allgather", stepInfo.step, userRank_, rankSize, stepInfo.rxSliceIdxs.front(), nullptr, nullptr,
+            "allgather", stepInfo.step, stepInfo.myRank, rankSize, stepInfo.rxSliceIdxs.front(), nullptr, nullptr,
             linkLeft->GetRemoteRank(), "nhr", stepInfo.myRank));
         TaskSemanticEventScope eventScope("rx_payload_copy_start", "link_rx_payload_copy");
         CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dstMem, srcMem, stream_, linkLeft->GetRemoteRank(), // Memecpy
@@ -126,13 +126,13 @@ HcclResult AllGatherNHR::SdmaRx(const LINK &linkLeft, const LINK &linkRight, Int
     }
     {
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "allgather", stepInfo.step, userRank_, rankSize, stepInfo.rxSliceIdxs.front(),
+            "allgather", stepInfo.step, stepInfo.myRank, rankSize, stepInfo.rxSliceIdxs.front(),
             "tx_data_signal_start", "link_tx_data_signal", linkLeft->GetRemoteRank(), "nhr", stepInfo.myRank));
         CHK_RET(linkLeft->TxDataSignal(stream_)); // 告知left我读完了
     }
     {
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "allgather", stepInfo.step, userRank_, rankSize, stepInfo.txSliceIdxs.front(),
+            "allgather", stepInfo.step, stepInfo.myRank, rankSize, stepInfo.txSliceIdxs.front(),
             "rx_data_signal_start", "link_rx_data_signal", linkRight->GetRemoteRank(), "nhr", stepInfo.myRank));
         CHK_RET(linkRight->RxDataSignal(stream_)); // 等right读完
     }
@@ -146,19 +146,19 @@ HcclResult AllGatherNHR::RdmaTxRx(const LINK &linkLeft, const LINK &linkRight, I
     HcclResult ret = HCCL_SUCCESS;
     {
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "allgather", stepInfo.step, userRank_, rankSize, stepInfo.rxSliceIdxs.front(),
+            "allgather", stepInfo.step, stepInfo.myRank, rankSize, stepInfo.rxSliceIdxs.front(),
             "tx_ack_start", "link_tx_ack", linkLeft->GetRemoteRank(), "nhr", stepInfo.myRank));
         CHK_RET(linkLeft->TxAck(stream_));
     }
     {
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "allgather", stepInfo.step, userRank_, rankSize, stepInfo.txSliceIdxs.front(),
+            "allgather", stepInfo.step, stepInfo.myRank, rankSize, stepInfo.txSliceIdxs.front(),
             "rx_ack_start", "link_rx_ack", linkRight->GetRemoteRank(), "nhr", stepInfo.myRank));
         CHK_RET(linkRight->RxAck(stream_));
     }
     {
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "allgather", stepInfo.step, userRank_, rankSize, stepInfo.txSliceIdxs.front(), nullptr, nullptr,
+            "allgather", stepInfo.step, stepInfo.myRank, rankSize, stepInfo.txSliceIdxs.front(), nullptr, nullptr,
             linkRight->GetRemoteRank(), "nhr", stepInfo.myRank));
         TaskSemanticEventScope eventScope("tx_payload_start", "link_tx_payload");
         ret = Tx(linkRight, txSlices);
@@ -167,7 +167,7 @@ HcclResult AllGatherNHR::RdmaTxRx(const LINK &linkLeft, const LINK &linkRight, I
         "tx %u slices failed", stepInfo.myRank, stepInfo.step, stepInfo.nSlices), ret);
     {
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "allgather", stepInfo.step, userRank_, rankSize, stepInfo.rxSliceIdxs.front(), nullptr, nullptr,
+            "allgather", stepInfo.step, stepInfo.myRank, rankSize, stepInfo.rxSliceIdxs.front(), nullptr, nullptr,
             linkLeft->GetRemoteRank(), "nhr", stepInfo.myRank));
         TaskSemanticEventScope eventScope("rx_payload_copy_start", "link_rx_payload_copy");
         ret = Rx(linkLeft, rxSlices);
@@ -177,14 +177,14 @@ HcclResult AllGatherNHR::RdmaTxRx(const LINK &linkLeft, const LINK &linkRight, I
         
     {
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "allgather", stepInfo.step, userRank_, rankSize, stepInfo.rxSliceIdxs.front(),
+            "allgather", stepInfo.step, stepInfo.myRank, rankSize, stepInfo.rxSliceIdxs.front(),
             "tx_data_signal_start", "link_tx_data_signal", linkLeft->GetRemoteRank(), "nhr", stepInfo.myRank));
         ret = linkLeft->PostFinAck(stream_);
     }
     CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[AllGatherNHR][RunAllGather] PostFinAck failed"), ret);
     {
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "allgather", stepInfo.step, userRank_, rankSize, stepInfo.txSliceIdxs.front(),
+            "allgather", stepInfo.step, stepInfo.myRank, rankSize, stepInfo.txSliceIdxs.front(),
             "rx_data_signal_start", "link_rx_data_signal", linkRight->GetRemoteRank(), "nhr", stepInfo.myRank));
         ret = linkRight->WaitFinAck(stream_);
     }
