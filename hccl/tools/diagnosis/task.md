@@ -249,17 +249,28 @@
 
 ### COV-002 覆盖非 concurrent-direct ring
 
-- [ ] **仓库**：HCOMM
+- [-] **仓库**：HCOMM
 - **依赖**：COV-001
 - **工作/验收**：只覆盖标准 ring RS/AG；golden phase/step/peer 完整且无算法强制。
+- **实现**：候选实现位于分支 `feat-standard-ring`，commit `d03f838`。已覆盖
+  `ReduceScatterRing`/`AllGatherRing` 的 ACK、payload、reduce/copy 和单 rank copy；
+  RS/AG 使用算法 round 作为 `step`，算法标识为 `ring`。
+- **已验证**：静态合同断言、`git diff --check` 和 62 项诊断侧 Python 单元测试通过。
+- **待验收**：HCOMM Linux 构建、910B selector 证据和设备 golden；完成前不标记为 `[x]`。
 
 ### COV-003 覆盖 mesh
 
-- [ ] **仓库**：HCOMM
+- [-] **仓库**：HCOMM
 - **依赖**：COV-001
 - **工作/验收**：只覆盖 910B normal/atomic Mesh RS/AG 和 Mesh Direct；Mesh RS/AG 的
   `step` 固定为 0，撤回 Ring 强制后仍输出可用语义。Small-count、Oneshot、Chunk 和 AIV
   不因 executor 名称含 Mesh 而归入本任务。
+- **实现**：候选实现位于分支 `feat-mesh`，commit `90dbf90`。已覆盖 normal/atomic
+  Mesh RS/AG 和 `TEMPLATE_ALL_REDUCE_MESH_DIRECT`，算法标识分别为 `mesh`、
+  `mesh_atomic`、`mesh_direct`；37 个新增语义上下文的 `step` 均为 0。
+- **已验证**：静态合同断言、`git diff --check` 和 62 项诊断侧 Python 单元测试通过。
+- **待验收**：HCOMM Linux 构建，以及 910B atomic、normal、Mesh Direct 三组 selector/device
+  golden；完成前不标记为 `[x]`。
 
 ### COV-004 覆盖 hierarchical
 
