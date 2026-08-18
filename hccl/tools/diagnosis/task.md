@@ -280,9 +280,17 @@
 
 ### COV-005 覆盖 NHR
 
-- [ ] **仓库**：HCOMM
+- [-] **仓库**：HCOMM
 - **依赖**：COV-001
 - **工作/验收**：输出每 hop 的 src/dst/protocol sequence；本任务不构图。
+- **实现**：候选实现位于分支 `feat-NHR`，commit `cd4abd7`。已覆盖普通 NHR
+  ReduceScatter/AllGather 与 NHR-Oneshot Reduce/Broadcast 的 SDMA、RDMA、barrier 和单 rank copy；
+  `step` 为模板 hop 序号，算法标签分别为 `nhr`、`nhr_oneshot`。
+- **已验证**：63 个新增语义上下文静态合同检查、`git diff --check` 和 62 项诊断侧 Python
+  单元测试通过。
+- **待验收**：使用显式 `HCCL_ALGO=level0:ring;level1:NHR` 完成 910B/910C selector
+  证据、普通/Oneshot 两组设备 golden 和 HCOMM Linux 构建；多机 Level1 context、rank 域与跨节点
+  protocol identity 延期，不因本分支而声明已覆盖。
 
 ### COV-006 覆盖 RDMA/RoCE
 
@@ -344,6 +352,8 @@
 - **验收**：single-rank input/output 同址与异址行为均明确；fallback 要么有选择器 fixture 和
   设备 golden，要么以不可达证明记录在覆盖矩阵中；单机 NHR 与多机 hierarchical NHR 使用
   不同覆盖声明。
+- **进展**：`feat-NHR@cd4abd7` 已提供 combine-plane NHR/NHR-Oneshot 候选插桩；仍需设备
+  selector 证据才能关闭本任务，`AllReduceSingleExecutor` 也尚未覆盖。
 
 ## 8. M6：多节点与高级诊断
 
