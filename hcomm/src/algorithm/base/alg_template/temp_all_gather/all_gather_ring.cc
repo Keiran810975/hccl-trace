@@ -194,7 +194,6 @@ HcclResult AllGatherRing::RunAllGather(u32 rank, u32 rankSize, const std::vector
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
                 "allgather", i, rank, rankSize, txSliceIndex, nullptr, nullptr,
                 linkRight_->GetRemoteRank(), "ring", rank));
-            TaskSemanticEventScope eventScope("tx_payload_start", "link_tx_payload");
             ret = TxVector(linkRight_, txSegsSlice);
         }
         CHK_PRT_RET(ret != HCCL_SUCCESS,
@@ -208,7 +207,6 @@ HcclResult AllGatherRing::RunAllGather(u32 rank, u32 rankSize, const std::vector
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
                 "allgather", i, rank, rankSize, rxSliceIndex, nullptr, nullptr,
                 linkLeft_->GetRemoteRank(), "ring", rank));
-            TaskSemanticEventScope eventScope("rx_payload_copy_start", "link_rx_payload_copy");
             ret = RxVector(linkLeft_, rxSegsSlice);
         }
         CHK_PRT_RET(ret != HCCL_SUCCESS,
