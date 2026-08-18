@@ -21,6 +21,11 @@ public:
     ~AllGatherMeshAtomic() override;
 
 protected:
+    const char *TaskSemanticAlgorithm() const override
+    {
+        return "mesh_atomic";
+    }
+
     HcclResult RunAllGather(const std::vector<LINK> &links,
                                 const std::vector<Slice> &outputSlices,
                                 const std::vector<Slice> &inputSlices) override;

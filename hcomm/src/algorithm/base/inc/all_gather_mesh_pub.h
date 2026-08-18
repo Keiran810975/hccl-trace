@@ -28,6 +28,11 @@ public:
     HcclResult RunAsync(const u32 rank, const u32 rankSize, const std::vector<LINK> &links) override;
 
 protected:
+    virtual const char *TaskSemanticAlgorithm() const
+    {
+        return "mesh";
+    }
+
     // 获取向该rank往前的第i个rank
     inline u32 BackwardRank(u32 rank, u32 rankSize, u32 step) const
     {
