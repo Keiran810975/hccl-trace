@@ -16,6 +16,7 @@
 #include "hccl_tbe_task.h"
 #include "graph_ctx_mgr_common.h"
 #include "config_plf_log.h"
+#include "task_semantic_trace.h"
 
 constexpr u32 UB_BLOCK_SIZE = 32;
 constexpr u64 TBE_REDUCE_MAX_COUNT = INT32_MAX;
@@ -24,6 +25,13 @@ __attribute__((weak)) HcclResult GraphAddRecordTaskWithSignalAddr(void *fftsPubI
     void *signal, bool inchip, u64 signalAddr, uint32_t *ctxIdx);
 
 namespace hccl {
+namespace {
+bool ShouldSaveProfilingTaskInfo()
+{
+    return DispatcherPub::IsProfSubscribeAdditionInfo() || IsTaskSemanticTraceEnabled();
+}
+} // namespace
+
 DispatcherGraph::DispatcherGraph(const s32 deviceLogicId)
     : DispatcherPub(deviceLogicId), fftsCtxsPtr(nullptr), disableFfts_(true), multiQpMode_(false)
 {}
@@ -125,7 +133,7 @@ HcclResult DispatcherGraph::GetNotifyDfxInfo(HcclRtNotify signal, u32 userRank, 
 HcclResult DispatcherGraph::SignalTaskParaSave(HcclRtNotify signal, Stream &stream, u32 userRank, u32 remoteUserRank,
     u64 offset, s32 stage, TaskType taskType, uint64_t beginTime, u32 ctxIdx)
 {
-    if (DispatcherPub::IsProfSubscribeAdditionInfo() && callback_ != nullptr) {
+    if (ShouldSaveProfilingTaskInfo() && callback_ != nullptr) {
         u64 notifyID;
         CHK_RET(GetNotifyDfxInfo(signal, userRank, offset, remoteUserRank, notifyID));
         // 调用回调来保存task信息
@@ -235,7 +243,7 @@ HcclResult DispatcherGraph::MemcpyAsync(hccl::DeviceMem &dst, const hccl::Device
     u32 ctxIdx;
     CHK_RET(GraphAddMemcpyTask(fftsPubInfo_, fftsCtxsPtr, stream.id(), dst.ptr(), src.ptr(), src.size(), &ctxIdx));
     // 调用回调来保存task信息
-    if (DispatcherPub::IsProfSubscribeAdditionInfo() && callback_ != nullptr) {
+    if (ShouldSaveProfilingTaskInfo() && callback_ != nullptr) {
         hccl::TaskParaDMA para(src.ptr(), dst.ptr(), src.size(), inLinkType, remoteUserRank,
             hccl::RdmaType::RDMA_TYPE_RESERVED, (ctxIdx - 1));
         struct TaskPara taskPara;
@@ -286,7 +294,7 @@ HcclResult DispatcherGraph::ReduceAsync(const void *src, void *dst, u64 dataCoun
     CHK_RET(GraphAddReduceTask(fftsPubInfo_, fftsCtxsPtr, stream.id(), dst, src, dataCount, datatype,
         redOp, &ctxIdx));
     // 调用回调来保存 task 信息
-    if (DispatcherPub::IsProfSubscribeAdditionInfo() && callback_ != nullptr) {
+    if (ShouldSaveProfilingTaskInfo() && callback_ != nullptr) {
         hccl::TaskParaReduce para(src, dst, dataCount * SIZE_TABLE[datatype], redOp, datatype,
             LinkType::LINK_ONCHIP, INVALID_VALUE_RANKID, (ctxIdx - 1));
         struct TaskPara taskPara;
@@ -334,7 +342,7 @@ HcclResult DispatcherGraph::InlineReduceAsync(const void *src, u64 dataCount, co
         redOp, &ctxIdx));
 
     // 调用回调来保存 task 信息
-    if (DispatcherPub::IsProfSubscribeAdditionInfo() && callback_ != nullptr) {
+    if (ShouldSaveProfilingTaskInfo() && callback_ != nullptr) {
         hccl::TaskParaReduce para(src, dst, dataCount * SIZE_TABLE[datatype], redOp, datatype, inLinkType,
             remoteUserRank, (ctxIdx - 1));
         struct TaskPara taskPara;
@@ -380,7 +388,7 @@ HcclResult DispatcherGraph::RdmaSend(u32 dbindex, u64 dbinfo, const struct SendW
     u32 ctxIdx = 0;
     CHK_RET(GraphAddRdmaSendTask(fftsPubInfo_, fftsCtxsPtr, stream.id(), dbindex, dbinfo, isCapture, &ctxIdx));
     // 调用回调来保存task信息
-    if (DispatcherPub::IsProfSubscribeAdditionInfo() && callback_ != nullptr) {
+    if (ShouldSaveProfilingTaskInfo() && callback_ != nullptr) {
         // 0x00000000FFFFFFFF usrrank位于notifyID的高32位
         hccl::TaskParaDMA para(reinterpret_cast<void *>(static_cast<uintptr_t>(wr.bufList[0].addr)),
                             reinterpret_cast<void *>(static_cast<uintptr_t>(wr.dstAddr)),
@@ -431,7 +439,7 @@ HcclResult DispatcherGraph::RdmaSend(u32 dbindex, u64 dbinfo, const struct SendW
     u32 ctxIdx = 0;
     CHK_RET(GraphAddRdmaSendTask(fftsPubInfo_, fftsCtxsPtr, stream.id(), dbindex, dbinfo, isCapture, &ctxIdx));
     // 调用回调来保存task信息
-     if (DispatcherPub::IsProfSubscribeAdditionInfo() && callback_ != nullptr) {
+    if (ShouldSaveProfilingTaskInfo() && callback_ != nullptr) {
         // 0x00000000FFFFFFFF usrrank位于notifyID的高32位
         hccl::TaskParaDMA para(reinterpret_cast<void *>(static_cast<uintptr_t>(wr.bufList[0].addr)),
                             reinterpret_cast<void *>(static_cast<uintptr_t>(wr.dstAddr)),
@@ -533,7 +541,7 @@ HcclResult DispatcherGraph::SetGraphTailVectorReduceDescSdma(void *devMem, const
     CHK_RET(GraphAddTailVectorReduceTask(fftsPubInfo_, fftsCtxsPtr, stream.id(), devMem, tailSrc, count, &ctxIdx));
 
     // 调用回调来保存 task 信息
-    if (DispatcherPub::IsProfSubscribeAdditionInfo() && callback_ != nullptr) {
+    if (ShouldSaveProfilingTaskInfo() && callback_ != nullptr) {
         hccl::TaskParaDMA para(tailSrc, devMem, count, LinkType::LINK_ONCHIP, INVALID_VALUE_RANKID,
             hccl::RdmaType::RDMA_TYPE_RESERVED, (ctxIdx - 1));
         struct TaskPara taskPara;
@@ -572,7 +580,7 @@ HcclResult DispatcherGraph::SetGraphDescVectorReduce(const void *src, const void
         funcAddr, blockDim, &ctxIdx));
 
     // 调用回调来保存 task 信息
-    if (DispatcherPub::IsProfSubscribeAdditionInfo() && callback_ != nullptr) {
+    if (ShouldSaveProfilingTaskInfo() && callback_ != nullptr) {
         hccl::TaskParaReduce para(src, dst, count * SIZE_TABLE[dataType], redOp, dataType,
             LinkType::LINK_ONCHIP, INVALID_VALUE_RANKID, (ctxIdx - 1));
         struct TaskPara taskPara;
