@@ -11,6 +11,7 @@
 #include "all_gather_nhr.h"
 #include <cmath>
 #include "alg_template_register.h"
+#include "task_semantic_scope.h"
 
 namespace hccl {
 AllGatherNHR::AllGatherNHR(const HcclDispatcher dispatcher) : NHRBase(dispatcher)
@@ -42,6 +43,9 @@ HcclResult AllGatherNHR::RunAsync(const u32 rank, const u32 rankSize, const std:
 
     if (rankSize == 1) {
         if (inputMem_ != outputMem_) {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "allgather", 0, userRank_, rankSize, 0, "copy_start", "hccl_local_copy",
+                INVALID_VALUE_RANKID, "nhr", rank));
             CHK_RET(HcclD2DMemcpyAsync(dispatcher_, outputMem_, inputMem_, stream_));
         }
         return HCCL_SUCCESS;
@@ -78,20 +82,34 @@ HcclResult AllGatherNHR::RunAsync(const u32 rank, const u32 rankSize, const std:
         u32 targetIdx = sliceMap_[rank];
         DeviceMem dst = outputMem_.range(slices_[targetIdx].offset, slices_[targetIdx].size);
         DeviceMem src = inputMem_.range(inputSlices[targetIdx].offset, inputSlices[targetIdx].size);
+        TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+            "allgather", 0, userRank_, rankSize, targetIdx, "copy_start", "hccl_local_copy",
+            INVALID_VALUE_RANKID, "nhr", rank));
         CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dst, src, stream_));
     }
 
-    // 运行all-gather, ring算法
+    // 运行all-gather, NHR算法
     CHK_RET(RunAllGather(rank, rankSize, slices_, links));
 
     HCCL_INFO("[AllGatherNHR][RunAsync] AllGatherNHR finished: rank[%u] end", rank);
     return HCCL_SUCCESS;
 }
 
-HcclResult AllGatherNHR::SdmaRx(const LINK &linkLeft, const LINK &linkRight, std::vector<Slice> &rxSlices)
+HcclResult AllGatherNHR::SdmaRx(const LINK &linkLeft, const LINK &linkRight, InterServerAlgoStep &stepInfo,
+    u32 rankSize, std::vector<Slice> &rxSlices)
 {
-    CHK_RET(linkRight->TxAck(stream_)); // 告知right可以从我这读了
-    CHK_RET(linkLeft->RxAck(stream_)); // 等left告知可以从他那读了
+    {
+        TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+            "allgather", stepInfo.step, userRank_, rankSize, stepInfo.txSliceIdxs.front(),
+            "tx_ack_start", "link_tx_ack", linkRight->GetRemoteRank(), "nhr", stepInfo.myRank));
+        CHK_RET(linkRight->TxAck(stream_)); // 告知right可以从我这读了
+    }
+    {
+        TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+            "allgather", stepInfo.step, userRank_, rankSize, stepInfo.rxSliceIdxs.front(),
+            "rx_ack_start", "link_rx_ack", linkLeft->GetRemoteRank(), "nhr", stepInfo.myRank));
+        CHK_RET(linkLeft->RxAck(stream_)); // 等left告知可以从他那读了
+    }
     void *srcMemPtr = nullptr;
     CHK_RET(linkLeft->GetRemoteMem(UserMemType::OUTPUT_MEM, &srcMemPtr));
     for (const Slice &rxSlice : rxSlices) {
@@ -99,31 +117,77 @@ HcclResult AllGatherNHR::SdmaRx(const LINK &linkLeft, const LINK &linkRight, std
         DeviceMem srcMem(static_cast<s8 *>(srcMemPtr) + baseOffset_ + rxSlice.offset, rxSlice.size);
         HCCL_DEBUG("[AllGatherNHR] rx dstMem[%p] range[%llu], size[%llu] ",  dstMem.ptr(),
             rxSlice.offset, rxSlice.size);
+        TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+            "allgather", stepInfo.step, userRank_, rankSize, stepInfo.rxSliceIdxs.front(), nullptr, nullptr,
+            linkLeft->GetRemoteRank(), "nhr", stepInfo.myRank));
+        TaskSemanticEventScope eventScope("rx_payload_copy_start", "link_rx_payload_copy");
         CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dstMem, srcMem, stream_, linkLeft->GetRemoteRank(), // Memecpy
                 linkLeft->GetLinkType()));
     }
-    CHK_RET(linkLeft->TxDataSignal(stream_)); // 告知left我读完了
-    CHK_RET(linkRight->RxDataSignal(stream_)); // 等right读完
+    {
+        TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+            "allgather", stepInfo.step, userRank_, rankSize, stepInfo.rxSliceIdxs.front(),
+            "tx_data_signal_start", "link_tx_data_signal", linkLeft->GetRemoteRank(), "nhr", stepInfo.myRank));
+        CHK_RET(linkLeft->TxDataSignal(stream_)); // 告知left我读完了
+    }
+    {
+        TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+            "allgather", stepInfo.step, userRank_, rankSize, stepInfo.txSliceIdxs.front(),
+            "rx_data_signal_start", "link_rx_data_signal", linkRight->GetRemoteRank(), "nhr", stepInfo.myRank));
+        CHK_RET(linkRight->RxDataSignal(stream_)); // 等right读完
+    }
 
     return HCCL_SUCCESS;
 }
 
 HcclResult AllGatherNHR::RdmaTxRx(const LINK &linkLeft, const LINK &linkRight, InterServerAlgoStep &stepInfo, 
-    std::vector<Slice> &txSlices, std::vector<Slice> &rxSlices)
+    u32 rankSize, std::vector<Slice> &txSlices, std::vector<Slice> &rxSlices)
 {
     HcclResult ret = HCCL_SUCCESS;
-    CHK_RET(linkLeft->TxAck(stream_));
-    CHK_RET(linkRight->RxAck(stream_));
-    ret = Tx(linkRight, txSlices);
+    {
+        TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+            "allgather", stepInfo.step, userRank_, rankSize, stepInfo.rxSliceIdxs.front(),
+            "tx_ack_start", "link_tx_ack", linkLeft->GetRemoteRank(), "nhr", stepInfo.myRank));
+        CHK_RET(linkLeft->TxAck(stream_));
+    }
+    {
+        TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+            "allgather", stepInfo.step, userRank_, rankSize, stepInfo.txSliceIdxs.front(),
+            "rx_ack_start", "link_rx_ack", linkRight->GetRemoteRank(), "nhr", stepInfo.myRank));
+        CHK_RET(linkRight->RxAck(stream_));
+    }
+    {
+        TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+            "allgather", stepInfo.step, userRank_, rankSize, stepInfo.txSliceIdxs.front(), nullptr, nullptr,
+            linkRight->GetRemoteRank(), "nhr", stepInfo.myRank));
+        TaskSemanticEventScope eventScope("tx_payload_start", "link_tx_payload");
+        ret = Tx(linkRight, txSlices);
+    }
     CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[AllGatherNHR][RunAllGather] rank[%u] round[%u] "
         "tx %u slices failed", stepInfo.myRank, stepInfo.step, stepInfo.nSlices), ret);
-    ret = Rx(linkLeft, rxSlices);
+    {
+        TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+            "allgather", stepInfo.step, userRank_, rankSize, stepInfo.rxSliceIdxs.front(), nullptr, nullptr,
+            linkLeft->GetRemoteRank(), "nhr", stepInfo.myRank));
+        TaskSemanticEventScope eventScope("rx_payload_copy_start", "link_rx_payload_copy");
+        ret = Rx(linkLeft, rxSlices);
+    }
     CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[AllGatherNHR][RunAllGather] rank[%u] round[%u] "
         "rx %u slices failed", stepInfo.myRank, stepInfo.step, stepInfo.nSlices), ret);
         
-    ret = linkLeft->PostFinAck(stream_);
+    {
+        TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+            "allgather", stepInfo.step, userRank_, rankSize, stepInfo.rxSliceIdxs.front(),
+            "tx_data_signal_start", "link_tx_data_signal", linkLeft->GetRemoteRank(), "nhr", stepInfo.myRank));
+        ret = linkLeft->PostFinAck(stream_);
+    }
     CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[AllGatherNHR][RunAllGather] PostFinAck failed"), ret);
-    ret = linkRight->WaitFinAck(stream_);
+    {
+        TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+            "allgather", stepInfo.step, userRank_, rankSize, stepInfo.txSliceIdxs.front(),
+            "rx_data_signal_start", "link_rx_data_signal", linkRight->GetRemoteRank(), "nhr", stepInfo.myRank));
+        ret = linkRight->WaitFinAck(stream_);
+    }
     CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[AllGatherNHR][RunAllGather] WaitFinAck failed"), ret);
     return HCCL_SUCCESS;
 }
@@ -170,9 +234,9 @@ HcclResult AllGatherNHR::RunAllGather(u32 rank, u32 rankSize, const std::vector<
         MergeSlices(txSlices); 
 
         if (linkLeft->IsSpInlineReduce() && linkRight->IsSpInlineReduce()) {
-            ret = SdmaRx(linkLeft, linkRight, rxSlices);
+            ret = SdmaRx(linkLeft, linkRight, stepInfo, rankSize, rxSlices);
         } else {
-            ret = RdmaTxRx(linkLeft, linkRight, stepInfo, txSlices, rxSlices);
+            ret = RdmaTxRx(linkLeft, linkRight, stepInfo, rankSize, txSlices, rxSlices);
         }
         CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[AllGatherNHR][RunAllGather] RunAllGather failed"), ret);
     }
