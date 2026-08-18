@@ -102,7 +102,7 @@ HcclResult ReduceScatterRing::RunAsync(const u32 rank, const u32 rankSize, const
     if (rankSize == 1) {
         if (inputMem_ != outputMem_) {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "reduce_scatter", 0, userRank_, rankSize, 0, "copy_start", "hccl_local_copy",
+                "reduce_scatter", 0, rank, rankSize, 0, "copy_start", "hccl_local_copy",
                 INVALID_VALUE_RANKID, "ring", rank));
             return HcclD2DMemcpyAsync(dispatcher_, outputMem_, inputMem_, stream_);
         }
@@ -207,7 +207,7 @@ HcclResult ReduceScatterRing::RunReduceScatter(const u32 rank, const u32 rankSiz
 
     {
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "reduce_scatter", 0, userRank_, rankSize, rxSliceIndex, "tx_ack_start", "link_tx_ack",
+            "reduce_scatter", 0, rank, rankSize, rxSliceIndex, "tx_ack_start", "link_tx_ack",
             linkLeft_->GetRemoteRank(), "ring", rank));
         CHK_RET(linkLeft_->TxAck(stream_)); // NotifyRecord
     }
@@ -218,7 +218,7 @@ HcclResult ReduceScatterRing::RunReduceScatter(const u32 rank, const u32 rankSiz
 
     {
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "reduce_scatter", 0, userRank_, rankSize, txSliceIndex, "rx_ack_start", "link_rx_ack",
+            "reduce_scatter", 0, rank, rankSize, txSliceIndex, "rx_ack_start", "link_rx_ack",
             linkRight_->GetRemoteRank(), "ring", rank));
         CHK_RET(linkRight_->RxAck(stream_)); // NotifyWait
     }
@@ -231,7 +231,7 @@ HcclResult ReduceScatterRing::RunReduceScatter(const u32 rank, const u32 rankSiz
     }
     {
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "reduce_scatter", 0, userRank_, rankSize, txSliceIndex, nullptr, nullptr,
+            "reduce_scatter", 0, rank, rankSize, txSliceIndex, nullptr, nullptr,
             linkRight_->GetRemoteRank(), "ring", rank));
         ret = RunVectorSourceReducer(linkRight_, txInputSegsSlice, txOutputSegsSlice); // NotifyRecord
     }
@@ -255,7 +255,7 @@ HcclResult ReduceScatterRing::RunReduceScatter(const u32 rank, const u32 rankSiz
         }
         {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "reduce_scatter", i, userRank_, rankSize, rxSliceIndex, nullptr, nullptr,
+                "reduce_scatter", i, rank, rankSize, rxSliceIndex, nullptr, nullptr,
                 linkLeft_->GetRemoteRank(), "ring", rank));
             ret = RunVectorDestRducer(linkLeft_, rxInputSegsSlice, rxOutputSegsSlice);
         }
@@ -276,7 +276,7 @@ HcclResult ReduceScatterRing::RunReduceScatter(const u32 rank, const u32 rankSiz
         HCCL_DEBUG("rank[%u] round[%u] outputslice[%u] will tx_ack ", rank, i, rxSliceIndex);
         {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "reduce_scatter", i + 1, userRank_, rankSize, rxSliceIndex, "tx_ack_start",
+                "reduce_scatter", i + 1, rank, rankSize, rxSliceIndex, "tx_ack_start",
                 "link_tx_ack", linkLeft_->GetRemoteRank(), "ring", rank));
             ret = linkLeft_->TxAck(stream_);
         }
@@ -288,7 +288,7 @@ HcclResult ReduceScatterRing::RunReduceScatter(const u32 rank, const u32 rankSiz
         HCCL_DEBUG("rank[%u] round[%u] use sliceindex[%u] rx ack ", rank, i, txSliceIndex);
         {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "reduce_scatter", i + 1, userRank_, rankSize, txSliceIndex, "rx_ack_start",
+                "reduce_scatter", i + 1, rank, rankSize, txSliceIndex, "rx_ack_start",
                 "link_rx_ack", linkRight_->GetRemoteRank(), "ring", rank));
             ret = linkRight_->RxAck(stream_);
         }
@@ -303,7 +303,7 @@ HcclResult ReduceScatterRing::RunReduceScatter(const u32 rank, const u32 rankSiz
         }
         {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "reduce_scatter", i + 1, userRank_, rankSize, txSliceIndex, nullptr, nullptr,
+                "reduce_scatter", i + 1, rank, rankSize, txSliceIndex, nullptr, nullptr,
                 linkRight_->GetRemoteRank(), "ring", rank));
             ret = RunVectorSourceReducer(linkRight_, txInputSegsSlice, txOutputSegsSlice);
         }
@@ -330,7 +330,7 @@ HcclResult ReduceScatterRing::RunReduceScatter(const u32 rank, const u32 rankSiz
     }
     {
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "reduce_scatter", rankSize - 2, userRank_, rankSize, rank, nullptr, nullptr,
+            "reduce_scatter", rankSize - 2, rank, rankSize, rank, nullptr, nullptr,
             linkLeft_->GetRemoteRank(), "ring", rank));
         CHK_RET(reducerInfo_->run(dispatcher_, linkLeft_, rxReduceMems, stream_));
     }

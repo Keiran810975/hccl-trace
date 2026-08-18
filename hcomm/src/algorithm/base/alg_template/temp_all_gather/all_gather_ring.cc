@@ -77,7 +77,7 @@ HcclResult AllGatherRing::RunAsync(const u32 rank, const u32 rankSize, const std
     if (rankSize == 1) {
         if (inputMem_ != outputMem_) {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "allgather", 0, userRank_, rankSize, 0, "copy_start", "hccl_local_copy",
+                "allgather", 0, rank, rankSize, 0, "copy_start", "hccl_local_copy",
                 INVALID_VALUE_RANKID, "ring", rank));
             CHK_RET(HcclD2DMemcpyAsync(dispatcher_, outputMem_, inputMem_, stream_));
         }
@@ -126,7 +126,7 @@ HCCL_DEBUG("[AllGatherRing][RunAsync] AllGather Ring begins");
         DeviceMem dst = outputMem_.range(slices_[rank].offset, slices_[rank].size);
         DeviceMem src = inputMem_.range(inputSlices[rank].offset, inputSlices[rank].size);
         TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-            "allgather", 0, userRank_, rankSize, rank, "copy_start", "hccl_local_copy",
+            "allgather", 0, rank, rankSize, rank, "copy_start", "hccl_local_copy",
             INVALID_VALUE_RANKID, "ring", rank));
         CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dst, src, stream_));
     }
@@ -169,7 +169,7 @@ HcclResult AllGatherRing::RunAllGather(u32 rank, u32 rankSize, const std::vector
             rank, i, rxSliceIndex, outputSlices[rxSliceIndex].offset, outputSlices[rxSliceIndex].size);
         {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "allgather", i, userRank_, rankSize, rxSliceIndex, "tx_ack_start", "link_tx_ack",
+                "allgather", i, rank, rankSize, rxSliceIndex, "tx_ack_start", "link_tx_ack",
                 linkLeft_->GetRemoteRank(), "ring", rank));
             CHK_RET(linkLeft_->TxAck(stream_));
         }
@@ -179,7 +179,7 @@ HcclResult AllGatherRing::RunAllGather(u32 rank, u32 rankSize, const std::vector
             i, txSliceIndex, outputSlices[txSliceIndex].size);
         {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "allgather", i, userRank_, rankSize, txSliceIndex, "rx_ack_start", "link_rx_ack",
+                "allgather", i, rank, rankSize, txSliceIndex, "rx_ack_start", "link_rx_ack",
                 linkRight_->GetRemoteRank(), "ring", rank));
             CHK_RET(linkRight_->RxAck(stream_));
         }
@@ -192,7 +192,7 @@ HcclResult AllGatherRing::RunAllGather(u32 rank, u32 rankSize, const std::vector
         }
         {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "allgather", i, userRank_, rankSize, txSliceIndex, nullptr, nullptr,
+                "allgather", i, rank, rankSize, txSliceIndex, nullptr, nullptr,
                 linkRight_->GetRemoteRank(), "ring", rank));
             TaskSemanticEventScope eventScope("tx_payload_start", "link_tx_payload");
             ret = TxVector(linkRight_, txSegsSlice);
@@ -206,7 +206,7 @@ HcclResult AllGatherRing::RunAllGather(u32 rank, u32 rankSize, const std::vector
             rank, i, rxSliceIndex, outputSlices[rxSliceIndex].offset, outputSlices[rxSliceIndex].size);
         {
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
-                "allgather", i, userRank_, rankSize, rxSliceIndex, nullptr, nullptr,
+                "allgather", i, rank, rankSize, rxSliceIndex, nullptr, nullptr,
                 linkLeft_->GetRemoteRank(), "ring", rank));
             TaskSemanticEventScope eventScope("rx_payload_copy_start", "link_rx_payload_copy");
             ret = RxVector(linkLeft_, rxSegsSlice);
