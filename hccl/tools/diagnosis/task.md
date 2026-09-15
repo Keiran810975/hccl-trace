@@ -24,7 +24,7 @@
 | `origin/master@d0d2904` | 已同步，合并提交 `2f26033` |
 | `feat-standard-ring@7dadcea` | 已合入，合并提交 `360d650` |
 | `feat-NHR@29ab3cd` | 已合入，合并提交 `638e94c` |
-| `feat-mesh@d870111` | 在 `codex/fix-mesh-semantic` 修复 normal Rx one-shot 错位；修复后另行批准合入 |
+| `feat-mesh@d870111` | normal Tx/Rx 错位已在 `codex/fix-mesh-semantic@286ef99` 修复；待构建、针对性设备验证与合入批准 |
 | `feat-RHD@e3e368f` | 用户决定弃用；保留历史，不合入、不安排验证 |
 
 本次已按批准顺序同步 master→standard Ring→NHR；文档冲突保留简洁计划和分支实施记录。
@@ -125,7 +125,7 @@ NEXT-002 -> NEXT-005 ------------> NEXT-006（定位验证）
 - **FFts 完整 DAG 与 direct 边界**：当前 graph 缺失和声明序局限继续显式保留；目标异常
   定位被其阻塞时再获取真实 arc/barrier，禁止按 context 编号或时间补完整硬件依赖。
 - **critical path**：Top Wait 与异常定位有效后再做，先用手算小图固定计费，避免重复计算 wait。
-- **更多算法与资源类型**：已有 standard Ring、Mesh、NHR、RHD 先做集成和验证；double ring、
+- **更多算法与资源类型**：优先使用已集成 standard Ring/NHR 和修复后的 Mesh；double ring、
   AIV、replay/retry、新 Scatter 按实际样例扩展，不把“接口存在”记为已支持。NHR 视图复用共享图。
 - **开销**：修改热路径后在代表性 workload 比较 trace off/on；不因文档或离线展示变更重跑设备性能矩阵。
 
