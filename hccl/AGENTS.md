@@ -36,8 +36,11 @@ child status before editing or committing; preserve existing changes.
 Also inspect remote heads and relevant branch records. The root remote has
 standard Ring, Mesh, NHR and RHD implementations, and its master includes the
 captured-semantic early-return fix. Do not classify them as unimplemented based
-on this old checkout. List exact merge candidates and wait for user approval.
-The user confirms NHR/Mesh/standard Ring were tested and corrects RHD to untested.
+on this old checkout. The approved remote master, standard Ring and NHR merges
+are now integrated into the root master (`2f26033`, `360d650`, `638e94c`).
+Mesh is being fixed separately; its merge still needs approval. RHD is abandoned
+by user decision; retain its history but exclude it from development plans.
+The user confirms NHR/Mesh/standard Ring were tested.
 Parent-directory HTML captures add
 partial evidence; preserve that confirmation and record missing provenance
 separately instead of requiring all device tests to be repeated.

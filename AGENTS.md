@@ -7,9 +7,9 @@ phase/step/rank 语义关联，沿依赖解释等待与慢任务，并用异常�
 
 本地旧主线已完成 **8 卡 single-ring concurrent-direct AllReduce RS/AG** 的数据验证、
 精确合并、execution/resource 两层图和交互视图。远端另有 standard Ring、Mesh、NHR、
-RHD 实现，Ring/NHR 已有设备问题定位记录；后续必须结合各分支及最终提交的验证状态，
+RHD 实现记录；RHD 已由用户决定弃用，不纳入后续集成与开发计划。后续结合各分支及最终提交的验证状态，
 不能把旧本地覆盖当作项目全部进展。多机依赖、自动等待诊断和异常闭环仍待推进。
-用户已确认 NHR/Mesh/standard Ring 经过测试，并更正 RHD 尚未测试。上级目录留有
+用户已确认 NHR/Mesh/standard Ring 经过测试。上级目录留有
 NHR/Mesh/Ring HTML；可复核内容和
 未留存的版本信息分别记录，不因原始 DB 暂缺就撤销已有测试结论或要求重跑全矩阵。
 
@@ -38,7 +38,9 @@ NHR/Mesh/Ring HTML；可复核内容和
 2026-09-15 核对时，根仓为 `master@94a1ab3`、工作树干净；子仓均为 `dev-innerDia`，
 HCCL HEAD 为 `4600cb6`、HCOMM HEAD 为 `7db54477`，后续实现相对子仓 HEAD 为未提交修改。
 这是整理开始时的本地记录。随后 fetch 确认远端 `master@d0d2904` 领先 7 个提交，另有
-`feat-standard-ring`、`feat-mesh`、`feat-NHR`、`feat-RHD`；源码尚未合并。
+`feat-standard-ring`、`feat-mesh`、`feat-NHR`、`feat-RHD`。用户批准后，本地 master 已依次
+合入远端 master、standard Ring、NHR（合并提交 `2f26033`、`360d650`、`638e94c`）。
+Mesh 在独立修复分支处理，合入仍需批准；RHD 弃用并保留历史引用。没有推送远端。
 
 - 修改前检查三个仓的分支、状态和相关 diff，保留已有改动；根仓干净不代表子仓干净。
 - 调查进展时同时检查远端 heads/跟踪引用及相关分支记录，不仅检查当前 checkout。
@@ -119,8 +121,8 @@ msprof consolidated DB --------------------------------+-> merged.csv
   不以 HCCL 构建代替；注意 host/device 多目标。
 - 测试围绕改动及真实失败模式：小 fixture 验证规则，代表性设备样例验证路径。纯文档修改
   检查事实、链接与 diff 即可；不要求每次重复跑全算法、构建、性能矩阵。
-- 旧本地仍有两处 Ring `[TEST PATCH]` 和 `Run()` 提前返回窗口；远端 master 已通过
-  `ReportCapturedTaskSemantic()` 修复后者，待同步与针对性回归，禁止重复开发。FFTS
+- 当前仍有两处 Ring `[TEST PATCH]`；`Run()` 提前返回修复已随远端 master 集成，
+  直接复用 `ReportCapturedTaskSemantic()` 并补针对性回归，禁止重复开发。FFTS
   callback 的正式采集仍需 msprof addition-info 订阅，不能混淆两种门控。
 
 从工作空间根目录运行：

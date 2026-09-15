@@ -12,22 +12,23 @@
 - 已有样例：28,502 条 semantic 全部 exact，44,008 个 execution；62 项 Python 单测通过。
   这是已有单机样例的结论，不代表当前生产端已重新构建采集或多机已支持。
 - 已知边界：28 个 FFts single、8 个 local Notify resource boundary；保留解释，不补猜测边。
-- 远端已有：master 的提前返回语义修复、覆盖矩阵，以及 standard Ring/Mesh/NHR/RHD
-  分支实现。用户确认 NHR/Mesh/standard Ring 已测试，RHD 尚未测试；上级目录留存
+- 已集成：远端 master 的提前返回语义修复、覆盖矩阵，以及 standard Ring/NHR 插桩。
+  用户确认 NHR/Mesh/standard Ring 已测试；RHD 已弃用。上级目录留存
   NHR/Mesh/Ring resource HTML，已核对并记录其覆盖边界，未提供的测试版本信息保持未回填。
 - 当前缺口：分支成果集成、Ring 测试强制、resource 证据增强、多机输入与关系、自动诊断、异常测试。
 
-### 先处理分支集成（等用户批准）
+### 分支集成状态
 
 | 对象 | 当前动作 |
 |---|---|
-| `origin/master@d0d2904` | 建议同步已有 7 个提交，保留并整合本轮文档 |
-| `feat-standard-ring@7dadcea`、`feat-NHR@29ab3cd` | 建议批准后集成已测试算法插桩；保留具体覆盖和版本信息未回填项 |
-| `feat-mesh@d870111` | 保留已有实现；normal Rx one-shot 错位先处理，分别记录各变体结果 |
-| `feat-RHD@e3e368f` | 已实现、未测试；复用现有插桩做针对性设备验证后再评估合入 |
+| `origin/master@d0d2904` | 已同步，合并提交 `2f26033` |
+| `feat-standard-ring@7dadcea` | 已合入，合并提交 `360d650` |
+| `feat-NHR@29ab3cd` | 已合入，合并提交 `638e94c` |
+| `feat-mesh@d870111` | 在 `codex/fix-mesh-semantic` 修复 normal Rx one-shot 错位；修复后另行批准合入 |
+| `feat-RHD@e3e368f` | 用户决定弃用；保留历史，不合入、不安排验证 |
 
-Ring/NHR 仅 task.md 有合并冲突；用户批准后保留双方进展。优先顺序为同步
-master→standard Ring→NHR；缺少原始 DB 不要求重跑完整矩阵，HTML 中未覆盖项继续保留。
+本次已按批准顺序同步 master→standard Ring→NHR；文档冲突保留简洁计划和分支实施记录。
+缺少原始 DB 不要求重跑完整矩阵，HTML 中未覆盖项继续保留。
 语义配对的最终验证与 Git 无冲突是两个结论，不能互相替代。
 
 ## 2. 实施约定
@@ -44,7 +45,7 @@ master→standard Ring→NHR；缺少原始 DB 不要求重跑完整矩阵，HTM
 ### NEXT-001 收尾生产端单机问题
 
 - [ ] **位置**：HCOMM 算法选择、`task_profiling.cc`；`test/`。
-- **工作**：撤回两处 Ring `[TEST PATCH]`；直接复用远端 master 已实现的
+- **工作**：撤回两处 Ring `[TEST PATCH]`；直接复用已集成的
   `ReportCapturedTaskSemantic()`，只补尚缺的捕获/提前返回回归，不重复修复。
   Ring 验证需要的路径选择留在明确的测试控制中，不改变生产默认算法。
 - **完成**：HCOMM 自身构建通过；相关捕获/提前返回小测试通过；短设备运行确认 trace
@@ -62,7 +63,7 @@ master→standard Ring→NHR；缺少原始 DB 不要求重跑完整矩阵，HTM
 ### NEXT-003 采集一个双机正常样例
 
 - [ ] **位置**：HCOMM 实际 executor/template/transport；`test/`。
-- **工作**：优先双机 AllReduce，先复用已有 Ring/Mesh/NHR/RHD 分支，按设备实际选出的
+- **工作**：优先双机 AllReduce，先复用已有 Ring/NHR 与修复后的 Mesh，按设备实际选出的
   机内/机间路径只补 rank 域、phase/peer 和 RDMA/RoCE 关联缺口；先固定一种消息规模并连续运行少量 operation。
   用一份简单输入清单记录 run、每个 node 的 plog/DB 路径和 user/comm rank 到 node/device
   的映射，同时记录构建、Toolkit/driver/msprof 版本与命令。
