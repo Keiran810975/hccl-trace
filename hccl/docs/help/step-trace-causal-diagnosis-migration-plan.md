@@ -1,5 +1,10 @@
 # 集合通信步骤级打点与因果诊断迁移方案
 
+> 历史迁移方案：保留最初的目标与设计讨论，不作为当前开发清单。
+> DB 输入、schema v4 和 operation scope 等已替代文中的早期建议；当前工作见
+> [task.md](../../tools/diagnosis/task.md)、[spec.md](../../tools/diagnosis/spec.md) 和
+> [阶段归档](../../tools/diagnosis/arch-94a1ab31c3ee.md)。
+
 ## 1. 目标
 
 在当前 HCCL/HCOMM 代码体系中建立可维护的步骤级观测能力，使一次集合

@@ -1,5 +1,9 @@
 # HCCL fine-grained trace diagnosis
 
+开发入口：[活动任务](task.md)、[实现规格](spec.md)、[阶段归档](arch-94a1ab31c3ee.md)。
+本地真实验证基线是 8 卡 single-ring direct RS/AG；其他算法分支已有实现和部分设备记录，
+详见 [分支调查](branch-review-2026-09-15.md)。多机与异常定位仍在计划中。
+
 诊断链只接受两个事实源：HCOMM `[HcclTaskSemantic]` plog 与 msprof consolidated
 `msprof_*.db`。Chrome-trace `msprof_*.json` 和 `task_time.csv` 已不再作为生产输入。
 
@@ -147,7 +151,8 @@ DEP-008 已删除默认 connection/time Notify 推断。旧 JSON 的 3,016 条�
 `heuristic`，不能混入默认 artifact。
 
 旧实现中的“右邻居上一 payload”“上一 step”等算法规则不再作为默认边；它们不是 profiler
-观测事实。多节点精确边仍需要共享 protocol token、统一时钟或单独的时钟校准 artifact。
+观测事实。多节点关系需先确认跨端共享身份，现有 DB 字段不足时再增加 protocol token。
+拓扑配对不依赖跨节点时间比较；跨时钟差值和全局路径累计才需要统一时间基或校准 artifact。
 
 ## 交互可视化
 

@@ -1,327 +1,145 @@
 # AGENTS.md — HCCL Trace 项目 Agent 指南
 
-## 项目概述
+## 1. 目标与当前阶段
 
-`hccl-trace` 是一个多仓库工作空间，围绕**华为集合通信库 (HCCL)** 的**步骤级语义追踪与离线诊断**能力构建。核心目标：从 C++ 运行时插桩产生 `[HcclTaskSemantic]` 日志，到 Python 离线工具完成解析、合并、校验与可视化，形成端到端的通信问题诊断流水线。
+在配套 HCCL/HCOMM 8.5 基线上实现**依赖关系感知的离线诊断**：把真实通信任务与
+phase/step/rank 语义关联，沿依赖解释等待与慢任务，并用异常样例验证定位结果。
 
-### 仓库组成
+本地旧主线已完成 **8 卡 single-ring concurrent-direct AllReduce RS/AG** 的数据验证、
+精确合并、execution/resource 两层图和交互视图。远端另有 standard Ring、Mesh、NHR、
+RHD 实现，Ring/NHR 已有设备问题定位记录；后续必须结合各分支及最终提交的验证状态，
+不能把旧本地覆盖当作项目全部进展。多机依赖、自动等待诊断和异常闭环仍待推进。
+用户已确认 NHR/Mesh/standard Ring 经过测试，并更正 RHD 尚未测试。上级目录留有
+NHR/Mesh/Ring HTML；可复核内容和
+未留存的版本信息分别记录，不因原始 DB 暂缺就撤销已有测试结论或要求重跑全矩阵。
 
-| 目录 | 角色 | 语言 | 说明 |
-|------|------|------|------|
-| `hcomm/` | **主要编辑仓库** — 通信基础库 | C++ | 包含 profiler 插桩、算法层、平台层、HCCP 协议栈。语义 trace 的生产端在此。 |
-| `hccl/` | **主要编辑仓库** — 算子库 + 诊断工具 | C++ / Python | HCCL 算子实现和 `tools/diagnosis/` 下的 Python 离线诊断工具链。 |
-| `../cann-hccl/` | **只读参考** — 旧版原型 | C++ / Python | 旧版 step-trace 诊断与 SVG 可视化脚本。仅供查阅，**不要修改**。 |
-| `test/` | 测试脚本与数据 | Bash / Python | 功能测试入口、开销测试 wrapper、测试 plog 与预期输出。 |
-| `deploy/` | 部署产物 | 二进制 | 编译后的 `.so` 部署包，不参与编辑。 |
-| `审查报告/` | 提交审查文档 | Markdown | 6 份 commit review 报告，记录设计决策与已知问题。 |
+优先阅读：
 
-### 工作空间规则
+1. [task.md](hccl/tools/diagnosis/task.md)：唯一活动计划与完成条件。
+2. [spec.md](hccl/tools/diagnosis/spec.md)：实现合同及已知限制。
+3. [阶段归档](hccl/tools/diagnosis/arch-94a1ab31c3ee.md)：分支、提交、验证证据和历史入口。
+4. [诊断 README](hccl/tools/diagnosis/README.md)、[依赖关系说明](文档/依赖关系的定义与构建.md)：工具用法与构图规则。
+5. [分支调查与待批合入清单](hccl/tools/diagnosis/branch-review-2026-09-15.md)：远端实现、验证边界及合并建议。
 
-- `hcomm/` 和 `hccl/` 是本工作空间的可编辑仓库。
-- `../cann-hccl/` 是只读参考，除非用户明确要求，否则不要修改。
-- 跨仓库任务时，明确说明每个变更属于哪个仓库。
-- **不要在 `hcomm/` 下生成 `claude.md` 或 `AGENTS.md`**（已在 `.gitignore` 中忽略）。
+`arch-*.md`、`archive/` 和早期迁移方案是历史材料，其中的任务、边类型、统计和设计建议
+不自动成为当前要求。完成记录归档，活动计划只保留下一步。
 
----
+## 2. 工作空间与 Git
 
-## 架构总览
+| 目录 | 职责 |
+|---|---|
+| `hcomm/` | 传统集合通信算法、平台与 trace 生产端；主要 C++ 修改位置 |
+| `hccl/` | 新算子架构与 `tools/diagnosis/` Python 消费端 |
+| `test/` | 采集、回放、开销脚本；`test/out/` 保存本地原始数据与生成物 |
+| `文档/` | 当前依赖关系说明 |
+| `../cann-hccl/` | 旧版原型，只读参考，除非用户明确要求不得修改 |
 
-### HCOMM 三层架构（C++ 生产端）
+根目录、`hccl/`、`hcomm/` **各有独立 Git 元数据**，且根仓库直接跟踪两目录源码。
+2026-09-15 核对时，根仓为 `master@94a1ab3`、工作树干净；子仓均为 `dev-innerDia`，
+HCCL HEAD 为 `4600cb6`、HCOMM HEAD 为 `7db54477`，后续实现相对子仓 HEAD 为未提交修改。
+这是整理开始时的本地记录。随后 fetch 确认远端 `master@d0d2904` 领先 7 个提交，另有
+`feat-standard-ring`、`feat-mesh`、`feat-NHR`、`feat-RHD`；源码尚未合并。
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  framework/  — 通信框架层（控制面）                       │
-│  编排通信生命周期：hcclComm → HcclCommunicator → HcclAlg │
-│  管理 communicator、心跳、异常检测、算子重试、NSLBDP      │
-├─────────────────────────────────────────────────────────┤
-│  algorithm/  — 通信算法层（数据面核心）                    │
-│  算法选择 (SelectAlg) → 资源计算 (CalcResRequest)         │
-│  → 算子编排 (Orchestrate)                                │
-│  包含 ring/mesh/hierarchical 等算法模板                   │
-├─────────────────────────────────────────────────────────┤
-│  platform/   — 通信平台层（硬件抽象）                      │
-│  DispatcherPub 下发 Memcpy/Reduce/RDMA/Signal 等原语     │
-│  HCCP 协议栈、RDMA、Transport、资源管理                   │
-└─────────────────────────────────────────────────────────┘
-```
+- 修改前检查三个仓的分支、状态和相关 diff，保留已有改动；根仓干净不代表子仓干净。
+- 调查进展时同时检查远端 heads/跟踪引用及相关分支记录，不仅检查当前 checkout。
+  区分“当前主线已集成”“分支已实现”“指定提交已验证”；先列合入对象，用户批准后再合并。
+- 提交/交付说明区分 HCOMM 生产端、HCCL 消费端和工作空间文档；不要把子仓 HEAD
+  当作全部当前实现。设备复现记录工作区提交及必要的子仓差异。
+- 不自动切分支、重置、清理或提交已有工作。不得在 `hcomm/` 下生成 `AGENTS.md` 或 `claude.md`。
+- `deploy/`、构建产物和原始采集数据不作为源码编辑对象。
 
-### 语义 Trace 数据流
+## 3. 当前数据流与入口
 
-```
-[生产端 C++]                              [消费端 Python]
-                                            
-TaskProfiling::Run()                      parse_plog.py ──→ semantic CSV
-  └─ ReportTaskSemanticTrace()               │
-       └─ plog [HcclTaskSemantic] ──────────→┤
-                                              ├─→ merge_timeline.py ──→ merged CSV
-msprof msprof_*.json ───────────────────────→┘         │
-                                                        ├─→ validate_trace.py (质量门禁)
-                                                        ├─→ visualize_timeline.py (SVG)
-                                                        └─→ visualize_dependency_graph.py (SVG)
-```
-
-### 关键 C++ 文件（trace 生产端）
-
-| 文件 | 角色 |
-|------|------|
-| `hcomm/src/common/debug/profiling/inc/task_semantic_trace.h` | `TaskSemanticTraceInfo` 结构体 + 上报 API 声明 |
-| `hcomm/src/common/debug/profiling/task_semantic_trace.cc` | plog `[HcclTaskSemantic]` 格式化输出 |
-| `hcomm/src/common/debug/profiling/task_profiling.cc` | `TaskProfiling::Run()` — 从 `deviceLogicId_` 传入真实 `device_id` |
-| `hcomm/src/algorithm/base/alg_template/component/task_semantic_scope.cc` | `TaskSemanticEventScope` — RAII 作用域，设置 `oneShot = true` |
-
-### 关键 Python 文件（trace 消费端）
-
-所有诊断工具位于 `hccl/tools/diagnosis/`，**仅使用 Python 标准库，不引入外部依赖**：
-
-| 文件 | CLI 入口 | 职责 |
-|------|----------|------|
-| `schema.py` | — | 共享数据模型：`SemanticRecord`、`ProfilerTask`、`MERGED_FIELDS`、`merge_key` |
-| `parse_plog.py` | `python -m tools.diagnosis.parse_plog` | 解析 plog 中的 `[HcclTaskSemantic]` 行 |
-| `parse_msprof_json.py` | `python -m tools.diagnosis.parse_msprof_json` | 解析 msprof JSON 物理 task/subtask |
-| `merge_timeline.py` | `python -m tools.diagnosis.merge_timeline` | 按 `(node_id, device_id, stream_id, task_id)` 合并语义与 profiler 数据 |
-| `validate_trace.py` | `python -m tools.diagnosis.validate_trace` | 校验匹配合并率 ≥ 阈值，检测 duplicate key |
-| `visualize_timeline.py` | `python -m tools.diagnosis.visualize_timeline` | 渲染 SVG 时间线（默认逻辑布局，支持 `--layout time`） |
-| `visualize_dependency_graph.py` | `python -m tools.diagnosis.visualize_dependency_graph` | 渲染 SVG 依赖图（ack/signal/payload 边） |
-| `visualize_html.py` | `python -m tools.diagnosis.visualize_html` | 渲染交互式 HTML canvas 页面 |
-| `test_diagnosis.py` | `python -m unittest hccl.tools.diagnosis.test_diagnosis` | 单元测试 |
-
----
-
-## 核心概念与数据模型
-
-### 身份体系（容易混淆）
-
-| 概念 | 含义 | 来源 |
-|------|------|------|
-| `device_id` | 芯片物理 ID | 生产端 `deviceLogicId_`，与 msprof `Device_id` 对齐 |
-| `user_rank` | 用户在通信域中的 rank | `[HcclTaskSemantic]` 的 `user_rank[N]` |
-| `comm_rank` | 通信算法内部的 rank 编号 | `[HcclTaskSemantic]` 的 `comm_rank[N]` |
-| `peer_rank` | 对端 rank | `[HcclTaskSemantic]` 的 `peer_rank[N]` |
-| `rank_size` | 通信域总 rank 数 | `[HcclTaskSemantic]` 的 `rank_size[N]` |
-| profiler device | msprof PROF 目录对应的物理卡 | 唯一 `device_N` 目录 |
-
-**关键规则**：不要从 rank 推断 `device_id`。语义侧由生产端显式注入，JSON 侧由唯一 `device_N` 目录推断。
-
-### Merge Key
-
-语义记录与 profiler 任务的匹配键：
-
-```
-(node_id, device_id, stream_id, task_id)
+```text
+HCOMM scope -> TaskData 语义快照 -> semantic plog + graph correlation
+                                                       |
+msprof consolidated DB --------------------------------+-> merged.csv
+                                                           -> execution graph
+                                                           -> resource graph
+                                                           -> CSV / HTML / SVG
 ```
 
-两端的 dataclass（`SemanticRecord`、`ProfilerTask`）均提供 `merge_key` property。
+| 位置 | 职责 |
+|---|---|
+| `hcomm/src/common/debug/profiling/` | 语义开关、捕获、上报及 FFts graph correlation |
+| `hcomm/src/algorithm/base/alg_template/component/` | RAII scope、Sender/Reducer 事件 |
+| `hcomm/src/algorithm/base/alg_template/temp_reduce_scatter/`、`temp_all_gather/` | 当前 concurrent-direct RS/AG 插桩 |
+| `hccl/tools/diagnosis/schema.py`、`parse_plog.py`、`parse_msprof_db.py` | 数据模型及事实源解析 |
+| `hccl/tools/diagnosis/merge_timeline.py`、`validate_trace.py` | 精确关联、语义质量检查 |
+| `hccl/tools/diagnosis/dependency_model.py`、`visualize_dependency_graph.py` | 稳定身份、execution graph 与双层 artifact 导出 |
+| `hccl/tools/diagnosis/resource_dependency_graph.py` | 控制链收缩、等待指标 |
+| `hccl/tools/diagnosis/validate_dependency_graph.py`、`visualize_html.py` | 图门禁、artifact 驱动视图 |
 
-### 语义字段
+## 4. 必须保持的合同
 
-`SEMANTIC_FIELDS`（25 列）在原 phase/step/rank/task 字段之外，包含 `submit_ts`、`notify_id`、`notify_stage`、`notify_remote_rank`、`notify_ctx_id`、`node_id`、`pid`。
+### 输入与身份
 
-### 事件体系
+- 唯一生产 profiler 输入是 consolidated `msprof_*.db`，当前支持 DB schema `1.2.0`，
+  SQLite 只读打开。JSON、`task_time.csv` 和旧 marker 路径已退出生产链。
+- semantic 生产 schema 为 v4，消费兼容 v2/v3/v4；拒绝 v1、无版本和旧 token 格式。
+  graph correlation 独立使用 v1；merged CSV 当前 42 列，graph artifact 当前 v4。
+- `device_id` 来自生产端 `deviceLogicId_` / DB 物理设备字段，绝不从 rank 推断。
+  `user_rank`、`comm_rank`、`peer_rank`、node/device 分别处理。
+- direct 按 `(node_id, device_id, stream_id, task_id)` 和兼容 task kind 精确匹配。
+  FFts 先用 `(node, device, pid, graph_instance_id)` 找 parent，再用 parent stream/task
+  与 `ffts_ctx_id` 匹配 DB context。禁止 task-id 偏移、本地序号或时间最近补配。
+- execution identity 为 `(node, device, physical stream, task, subtask, connection)`。
+  operation 使用同一次采集内 DB `(group_name, op_name)` 生成的 scope；本地 `opId`、
+  进程内 graph 序号不能冒充跨节点/跨采集的全局身份。
+- DB 时间内部保持整数纳秒；CSV 使用精确十进制微秒，Notify 宽整数 ID 不经 `float`。
+  `submit_ts` 是 Host-cycle 提交时间，不能计算设备 task duration。
 
-常见事件及其在 AllReduce 中的含义：
+### 生产与依赖
 
-| 事件 | 含义 |
-|------|------|
-| `tx_payload_start` | 发送数据载荷 |
-| `rx_payload_reduce_start` | 接收并 Reduce |
-| `rx_payload_copy_start` | 接收并拷贝 |
-| `copy_start` | 本地拷贝 |
-| `tx_ack_start` | 发送 ACK 信号 |
-| `rx_ack_start` | 接收 ACK 信号 |
-| `tx_data_signal_start` | 发送数据就绪信号 |
-| `rx_data_signal_start` | 接收数据就绪信号 |
-| `allreduce_start` | AllReduce 开始 |
+- `TaskSemanticEventScope` 设置 one-shot；首个成功构造的 `TaskData` 捕获并消费 TLS，
+  `Run()` 读取任务快照，scope 析构恢复父上下文。不要恢复上报时读取当前 TLS 的旧行为。
+- trace 默认关闭，`HCCL_STEP_TRACE=1` 开启，兼容 `HCCL_TASK_SEMANTIC_TRACE=1`；
+  不新增用于打点的设备任务，不恢复 `aclprofMarkEx`。
+- direct stream 顺序为 `observed`；FFts 同 logical stream 的 context 声明序为
+  `semantic`，不能当作完整硬件 DAG。
+- direct 跨 rank 和 device-local Notify 在完整 channel 内按两端各自本地 stream
+  ordinal 配对为 `exact`；须单 stream、等数量、顺序唯一。FFts 完整 relation 的唯一
+  配对为 `observed`。仅 `notify_id` 相同不足以建同步边。
+- 不恢复 connection/time、邻居/上一 step 或已删除的 payload semantic 因果边。
+  缺证据保留 single、ambiguity 或 boundary；不伪造端点。
+- resource graph 从 execution artifact 派生，视图不重新构边。派生边应取路径最弱证据；
+  **当前 FFts/mixed resource order 错标 observed 仍待修复**，不能沿用为新功能合同。
+- `wait_span_ns` 是本地 wait duration；remote/post 分解是观测值，不是硬件内部精确延迟。
+  无校准时可报告跨节点拓扑与本地时长，不做跨节点绝对时间相减或全局关键路径累计。
 
-### Phase 类型
+## 5. 开发方式与验证
 
-`reduce_scatter_direct`、`reduce_scatter`、`allgather_direct`、`allgather`、`allreduce_executor`
+- 一个改动解决一个具体问题，复用现有 parser、CSV 和图模型；分析层只消费 artifact。
+  先跑通一个实际多机路径，再按样例扩展算法与 transport。
+- 仅在真实数据证明现有字段不足时增加 schema、协议字段或抽象；不预建通用框架、
+  重复 operation 状态、全量覆盖矩阵或多套相同统计。
+- Python 仅用标准库，保留 `from __future__ import annotations`、模块/脚本双入口和
+  现有 frozen dataclass 风格。CSV 用 DictReader/DictWriter，写 UTF-8、读兼容 BOM。
+- C++ 延续 C++14、版权头、`CHK_RET` 和现有 CMake 目标组织。HCOMM 修改在自身构建验证，
+  不以 HCCL 构建代替；注意 host/device 多目标。
+- 测试围绕改动及真实失败模式：小 fixture 验证规则，代表性设备样例验证路径。纯文档修改
+  检查事实、链接与 diff 即可；不要求每次重复跑全算法、构建、性能矩阵。
+- 旧本地仍有两处 Ring `[TEST PATCH]` 和 `Run()` 提前返回窗口；远端 master 已通过
+  `ReportCapturedTaskSemantic()` 修复后者，待同步与针对性回归，禁止重复开发。FFTS
+  callback 的正式采集仍需 msprof addition-info 订阅，不能混淆两种门控。
 
-### Task Kind
-
-`sdma`、`rdma`、`reduce_inline`、`reduce_tbe`、`notify_record`、`notify_wait`
-
----
-
-## 重要规则与边界条件
-
-### Schema 与匹配
-
-1. **只使用 msprof JSON 物理执行事件** — 仅解析 `ph=X` 且具有 `Physic Stream Id`/`Task Id` 的事件；flow 仅作为关联元数据。
-2. **`AI_CORE` kernel type** — 不匹配任何语义记录，但被明确排除在 `unmatched_profiler` 噪声之外（`IGNORED_UNMATCHED_PROFILER_KERNEL_TYPES`）。
-3. **`submit_ts` 不可用于 task duration** — 它是 host-cycle 提交时间，只能辅助候选窗口；duration 从 JSON `ts`/`dur` 获取。
-4. **Duplicate key 是硬错误** — `validate_trace.py` 在 `duplicate_semantic_rows > 0` 或 `duplicate_profiler_rows > 0` 时返回失败。
-5. **`oneShot` 机制** — 生产端 `TaskSemanticEventScope` 在析构时设置 `oneShot = true`，`ReportTaskSemanticTrace` 在输出完整记录后立即将 `g_taskSemanticValid` 置为 false，防止同一 scope 覆盖多个 task 导致 duplicate merge key。
-
-### plog 解析
-
-- 支持三种格式：`field=value` 键值对（新版标准）、旧版空格分隔 token、跨行 legacy 格式。
-- 自动从 `HCCL(pid,process):` 前缀提取 PID。
-- CSV 写入统一使用 `utf-8` 编码，读取时兼容 `utf-8-sig`（BOM 头）。
-
-### msprof 解析
-
-- 保留 `Task Id`、`Subtask Id`、`connection_id`、物理 stream、硬件事件名和真实起止时间。
-- 每个 PROF 目录必须能唯一推断一个 `device_N`；`node_id` 在输入边界统一补齐。
-
----
-
-## 构建与测试
-
-### 构建
+从工作空间根目录运行：
 
 ```bash
-# 构建 HCOMM（通信基础库，包含 trace 生产端）
-cd hcomm && bash build.sh --pkg
+python -m unittest hccl.tools.diagnosis.test_diagnosis
 
-# 构建 HCCL（算子库 + 诊断工具）
-cd hccl && bash build.sh --pkg
-```
-
-HCOMM 变更需要在 `hcomm` 仓库自身验证，不要只构建 `hccl`。构建产物通过 `LD_LIBRARY_PATH` 或安装目录指向新动态库。
-
-### 功能测试
-
-```bash
-# 完整流程：运行 workload + merge + validate + visualize
+# 对已有数据回放；新采集的命令接在 -- 后
 bash test/run_step_trace_function_test.sh \
-  --plog <plog> \
-  --msprof-json-dir <msprof_dir> \
-  --node-id node0 \
-  --min-match-rate 95 \
-  -- \
-  <your_allreduce_test_command>
+  --plog-dir test/out/plog --msprof-db-dir test/out/function/msprof \
+  --out-dir test/out/replay --node-id node0 --min-match-rate 95
 
-# 仅 merge/validate（不运行 workload）
-bash test/run_step_trace_function_test.sh \
-  --plog <plog> \
-  --msprof-json-dir <msprof_dir>
+python -m hccl.tools.diagnosis.validate_trace test/out/function/merged.csv --min-match-rate 95
+python -m hccl.tools.diagnosis.validate_dependency_graph test/out/function/dep_graph --max-boundary-nodes 8
 ```
 
-功能通过标准：
-- 脚本退出码 0
-- `semantic_total > 0`
-- `match_rate_percent >= 95`
-- `duplicate_semantic_rows == 0` 且 `duplicate_profiler_rows == 0`
-- `timeline.svg` 使用逻辑 phase/step/event 列展示（默认）
+最后一行的 8 是当前样例已解释的 boundary 数，不是所有数据集的通用阈值。
+功能测试入口见 [test/README.md](test/README.md)。Linux/CANN 下进入相应目录运行
+`bash build.sh --pkg`；Windows 离线检查不能算设备构建或新采集验收。
 
-### 开销测试
-
-```bash
-python3 test/measure_step_trace_overhead.py \
-  --repeat 20 --warmup 3 \
-  --output test/out/overhead/overhead.csv \
-  -- \
-  <your_allreduce_test_command>
-```
-
-输出对比 baseline（`HCCL_STEP_TRACE=0`）和 trace（`HCCL_STEP_TRACE=1`）的 wall time。
-
-### Python 单元测试
-
-```bash
-# 编译检查
-python3 -m py_compile hccl/tools/diagnosis/*.py
-
-# 运行单元测试
-python3 -m unittest hccl.tools.diagnosis.test_diagnosis
-```
-
----
-
-## 可视化约定
-
-### 时间线 (Timeline)
-
-- **默认布局：逻辑列** — phase/step/event 分组列，而非真实时间缩放。这保证了密集 task 的可读性。
-- 使用 `--layout time` 可切换到 raw msprof 时间轴。
-- 每个 rank/stream 为一个 lane，事件按 `EVENT_COLOR` 配色。
-
-### 依赖图 (Dependency Graph)
-
-- 默认依赖边按证据分层：同物理 stream 顺序为 `observed`；相同 `notify_id` 的 record→wait 为 `observed`；旧数据的 connection/time notify 边为 `inferred`；显式 peer 语义边为 `semantic`。
-- 不再默认生成 right-neighbor/previous-step/phase-bridge 等纯算法假设边。
-- 多节点精确依赖仍需要 op instance、protocol sequence 和时钟校准。
-
----
-
-## 工作约定
-
-### Python 代码规范
-
-- **仅使用标准库** — 诊断工具不引入任何第三方 pip 依赖。如需新依赖，需显式说明理由。
-- 所有 `.py` 文件包含 `from __future__ import annotations`。
-- 使用 `if __package__ in (None, ""): sys.path.insert(...)` 模式支持既可作为模块运行也可作为脚本运行。
-- 数据模型使用 `@dataclass(frozen=True)` 保证不可变性。
-- CSV 写入使用 `csv.DictWriter`，读取使用 `csv.DictReader`。
-
-### C++ 代码规范
-
-- Trace 相关代码集中在 `hcomm/src/common/debug/profiling/` 和 `hcomm/src/algorithm/base/alg_template/component/`。
-- 使用 `CHK_RET` 宏进行错误检查和返回。
-- 环境变量 `HCCL_STEP_TRACE=1` 控制 trace 开关。
-- `device_id` 从 `deviceLogicId_` 成员获取，与 msprof `Device_id` 对齐。
-
-### 跨仓库协作
-
-- HCCL 和 HCOMM 有各自的构建系统和版本号。
-- 一个完整的 trace 功能可能需要同时修改两个仓库（例如：HCOMM 加插桩 + HCCL 加解析）。
-- 提交时说明每个仓库的变更。
-
----
-
-## 已知问题与未来方向
-
-当前 `hccl-trace` 工具链相比旧版 `cann-hccl/tools` 尚未实现：
-
-- **Wait interval CSV 产出** — 无 `hccl_wait_relation_graph.py` 等价物
-- **NHR 依赖图** — 无 `hccl_nhr_dependency_graph.py` 等价物
-- **多节点时钟对齐** — 无 `hccl_clock_alignment_check.py` / `hccl_calibrate_intranode_offsets.py` 等价物
-- **流顺序重排** — 无 `hccl_flow_order_table.py` 等价物
-
-这些属于未来增量，需要先在消费端产出对应的中间 CSV artifact。
-
----
-
-## Windows / PowerShell 注意事项
-
-此工作空间经常从 Windows PowerShell 访问。
-
-- 优先使用 `rg`（ripgrep）进行搜索。
-- `apply_patch` 可能因 Windows 沙箱 helper 错误间歇性失败；失败时使用小型 PowerShell 文本替换或 UTF-8 no-BOM 写入。
-- 避免在包含 `$`、反引号或嵌套引号的字符串中使用复杂内联 PowerShell 引用。对多行内容使用单引号 here-string。
-- 写入文本时使用 UTF-8 without BOM：
-  ```powershell
-  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-  [System.IO.File]::WriteAllText((Resolve-Path $path), $text, $utf8NoBom)
-  ```
-- 本地 Python 启动器可能指向 WindowsApps 占位符。如果 `python`、`python3`、`py -3` 都无法启动，报告测试无法在本地运行，而非声称 Python 验证通过。
-- `git diff --check` 在此机器上可能只报告 LF/CRLF 警告——这些是换行符警告，不是空格错误。
-
----
-
-## 常用命令速查
-
-```bash
-# 运行完整诊断流水线
-PYTHONPATH=hccl python3 -m tools.diagnosis.merge_timeline \
-  --plog <plog> --msprof-json <msprof.json> \
-  -o merged.csv --summary summary.csv --node-id node0
-
-# 校验合并结果
-PYTHONPATH=hccl python3 -m tools.diagnosis.validate_trace merged.csv --min-match-rate 95
-
-# 渲染时间线（逻辑布局）
-PYTHONPATH=hccl python3 -m tools.diagnosis.visualize_timeline merged.csv -o timeline.svg
-
-# 渲染依赖图
-PYTHONPATH=hccl python3 -m tools.diagnosis.visualize_dependency_graph merged.csv -o dependency
-
-# 渲染交互式 HTML
-PYTHONPATH=hccl python3 -m tools.diagnosis.visualize_html merged.csv --view dependency -o dependency.html
-
-# 编译检查所有诊断工具
-python3 -m py_compile hccl/tools/diagnosis/*.py
-
-# 运行单元测试
-python3 -m unittest hccl.tools.diagnosis.test_diagnosis -v
-```
+Windows 优先用 `rg`；写文本用 UTF-8 无 BOM。`apply_patch` 失败可用小型 PowerShell
+替换。Python 启动失败应如实报告；Git LF/CRLF 提示与实际空白错误分开处理。

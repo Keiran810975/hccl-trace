@@ -1,5 +1,8 @@
 # HCCL step trace single-node test runbook
 
+当前单机证据见 [阶段归档](../hccl/tools/diagnosis/arch-94a1ab31c3ee.md)。多机采集与异常
+测试按 [task.md](../hccl/tools/diagnosis/task.md) 推进；本文不表示这些场景已验证。
+
 本文档说明如何在单机昇腾环境验证当前 step trace 迁移，包括功能正确性和开销。脚本假设从 `hccl-trace` 仓库根目录执行；如需在设备机器上运行，可以整体同步本目录、`hccl/tools/diagnosis` 以及已编译安装的 HCCL/HCOMM 产物。
 
 ## 1. 测试目标
@@ -9,7 +12,7 @@
 - `HCCL_STEP_TRACE=1` 时，运行 single-ring AllReduce 能在 plog 中产生 `[HcclTaskSemantic]` 记录。
 - 仅与 msprof consolidated DB 聚合，保留 FFts 展开的 SDMA、Write Value、Notify Wait 和 context id。
 - `validate_trace` 的匹配率达到阈值，建议先用 `--min-match-rate 95`。
-- 输出中覆盖 `allreduce_executor`、`reduce_scatter_direct`、`allgather_direct`，以及 `tx_payload_start`、`rx_payload_copy_start`、`rx_payload_reduce_start`、`copy_start` 等事件。
+- 输出中覆盖 `reduce_scatter_direct`、`allgather_direct`，以及 `tx_payload_start`、`rx_payload_copy_start`、`rx_payload_reduce_start`、`copy_start` 等事件。宽泛的 `allreduce_executor` scope 已撤回，不作为验收条件。
 
 开销测试要证明：
 
@@ -94,7 +97,7 @@ bash test/run_step_trace_function_test.sh \
 
 - 脚本退出码为 0。
 - `semantic_total > 0`。
-- `match_rate_percent >= 95`，同时单独检查 `exact_match_rate_percent` 和 `heuristic_matched`；总匹配率不能证明 AI_CORE 子任务的一对一因果关系。
+- `exact_match_rate_percent >= 95`；质量门禁只接受 exact，direct 使用物理 task 身份，FFts 使用 parent/context 身份；已删除 heuristic 匹配。
 - `duplicate_semantic_rows == 0` 且 `duplicate_profiler_rows == 0`。
 - `test/out/function/merged.csv` 中 `match_status` 主要为 `matched`。
 - 默认生成逻辑 `timeline.svg`、物理依赖 `dependency.html` 和可筛选的 `timeline_time.html`。
@@ -146,7 +149,7 @@ python3 test/measure_step_trace_overhead.py \
 
 每轮测试保留：
 
-- 被测 commit：`git -C hcomm rev-parse HEAD` 和 `git -C hccl rev-parse HEAD`。
+- 被测源码：根仓 `git rev-parse HEAD`、两个子仓 HEAD 及相关工作树差异；当前实现不能仅由子仓 HEAD 复现。
 - 构建日志和运行命令。
 - plog 原始文件。
 - msprof 原始 consolidated `msprof_*.db`。

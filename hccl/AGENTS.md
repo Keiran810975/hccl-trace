@@ -1,142 +1,112 @@
 # Repository Guide
 
-## Scope
+## Scope And References
 
-This repository is the open HCCL operator repository. In the current tree, the
-new operator architecture is implemented mainly under `src/ops`, with Scatter
-as the complete reference operator. Most mature collective implementations,
-including the legacy Ascend 910 AllReduce paths, are provided by the sibling
-HCOMM repository rather than this repository.
+This is the HCCL operator repository for the matching 8.5 HCCL/HCOMM workspace.
+`src/ops` contains the new operator architecture, with Scatter as the complete
+reference. Traditional AllReduce algorithms and trace production live in
+`../hcomm/src/algorithm` and `../hcomm/src/common/debug/profiling`.
 
-Relevant repositories used by this workspace:
+Follow the workspace [AGENTS.md](../AGENTS.md). The diagnosis objective is to
+explain waits and slow communication tasks through dependency evidence, then
+validate the result with multi-node and abnormal workloads.
 
-- `../hcomm`: matching HCOMM 8.5 source. Mature collective algorithms live
-  under `src/algorithm`.
-- `../../cann-hccl`: older HCCL source and the prototype implementation of
-  step-level semantic tracing and causal diagnosis.
+Read these documents before changing diagnosis behavior:
 
-Do not edit a sibling repository unless the user explicitly asks for changes
-there. When a task crosses repositories, state which repository owns each
-change.
+- [task.md](tools/diagnosis/task.md): the only active development plan.
+- [spec.md](tools/diagnosis/spec.md): current implementation contracts.
+- [Stage archive](tools/diagnosis/arch-94a1ab31c3ee.md): branch state, implemented work and validation limits.
+- [Branch review](tools/diagnosis/branch-review-2026-09-15.md): remote implementations, evidence and approval candidates.
+- [Diagnosis README](tools/diagnosis/README.md): CLI and artifact usage.
 
-## Layout
+`arch-*.md`, `archive/`, and the early plans in `docs/help` are historical
+records. Their proposed schemas and task lists do not override the active plan.
+`../../cann-hccl` is read-only reference unless the user explicitly requests edits.
+Changes in HCOMM must remain within the user's authorized task; identify which
+repository owns each change.
 
-- `src/ops`: operator framework, registries, channels, topology, and Scatter.
-- `src/common`: logging, environment configuration, ACL adapters, and helpers.
-- `include`: public HCCL APIs.
-- `test`: unit and system tests for this repository.
-- `docs`: public documentation.
-- `docs/help`: investigation notes and implementation plans maintained for the
-  tracing and diagnosis migration.
+## Git And Layout
 
-For mature collective algorithms in HCOMM, the corresponding locations are:
+The workspace root and both source directories have independent Git metadata.
+The root also tracks source files directly. As of the 2026-09-15 review, this
+repository is on `dev-innerDia@4600cb6`, with later implementation present as
+working-tree changes and untracked files relative to that HEAD. Check root and
+child status before editing or committing; preserve existing changes.
 
-- `../hcomm/src/algorithm`
-- `../hcomm/src/framework`
-- `../hcomm/src/common/debug/profiling`
-- `../hcomm/src/platform`
+Also inspect remote heads and relevant branch records. The root remote has
+standard Ring, Mesh, NHR and RHD implementations, and its master includes the
+captured-semantic early-return fix. Do not classify them as unimplemented based
+on this old checkout. List exact merge candidates and wait for user approval.
+The user confirms NHR/Mesh/standard Ring were tested and corrects RHD to untested.
+Parent-directory HTML captures add
+partial evidence; preserve that confirmation and record missing provenance
+separately instead of requiring all device tests to be repeated.
 
-## Build And Test
+- `src/ops`: operator framework, registry, channels, topology and Scatter.
+- `src/common`, `include`: shared helpers and public APIs.
+- `tools/diagnosis`: standard-library Python parsing, merge, graphs and views.
+- `test`: HCCL unit/system tests; workspace `../test`: trace data and runbooks.
+- `docs/help`: historical migration and repository investigation notes.
 
-The supported Linux build entry point is:
+## Trace And Dependency Contracts
+
+- Production inputs are HCOMM semantic/graph-correlation plog and consolidated
+  `msprof_*.db` (DB schema 1.2.0, read-only SQLite). Do not restore JSON,
+  `task_time.csv`, `aclprofMarkEx`, or task-sequence heuristics.
+- Semantic output is v4; the reader accepts v2/v3/v4. Graph correlation is v1;
+  merged CSV has 42 columns and graph artifacts currently use v4.
+- Direct matching uses `(node_id, device_id, stream_id, task_id)` plus compatible
+  task kind. FFts matching uses graph-parent correlation plus context ID.
+  Never infer device ID from rank or duration from host `submit_ts`.
+- Keep node/device, user rank, communicator rank, and peer rank distinct.
+  Operation scope comes from DB `(group_name, op_name)` within one profile run;
+  process-local IDs are not shared multi-node identities.
+- TaskData captures a one-shot semantic snapshot before reporting. Scope exit
+  restores its parent. An event named `_start` is not an independent interval
+  marker; task duration comes from DB start/end timestamps.
+- Execution graphs preserve physical/control tasks. Resource graphs derive
+  from execution artifacts and retain source IDs; visualization reads artifacts
+  without reconstructing dependencies.
+- Use only supported stream-order and unique Notify evidence. Keep incomplete
+  relations explicit. Do not restore nearest-time or peer-payload causal edges.
+- Derived confidence must not exceed source confidence. The current FFts/mixed
+  resource-order promotion to observed is a known pending fix, not a precedent.
+- Cross-node topology does not require comparable clocks when shared identity
+  is proven. Cross-node time differences require calibration; local wait
+  durations remain useful without it.
+
+## Implementation And Validation
+
+Preserve C++14 style, copyright headers, logging, `CHK_RET`, and existing CMake
+source lists. Trace is opt-in and must not change algorithm selection or submit
+extra device tasks. Check the actual executor/transport for the target workload;
+do not require every unrelated algorithm to be covered first.
+
+Python tools use only the standard library, future annotations, existing
+module/script entry patterns, frozen data models, and CSV readers/writers.
+Preserve integer nanoseconds and wide Notify IDs; use UTF-8 output and accept
+UTF-8 BOM on CSV input.
+
+Prefer small changes that reuse existing parsers and artifacts. Add fields only
+when a real sample demonstrates a missing fact. Test the changed rule and a
+representative failure case; documentation-only changes need factual/link/diff
+checks, not a fresh build or full device matrix.
+
+From the workspace root:
+
+```bash
+python -m unittest hccl.tools.diagnosis.test_diagnosis
+```
+
+Linux builds require a matching CANN Toolkit:
 
 ```bash
 bash build.sh --pkg
+# Use --ut / --st when relevant to the change.
 ```
 
-Unit and system tests are enabled with:
-
-```bash
-bash build.sh --ut
-bash build.sh --st
-```
-
-The build depends on a matching CANN Toolkit and third-party dependencies.
-Windows is suitable for source investigation and document/tool validation, but
-not for claiming a successful HCCL binary build.
-
-For changes owned by HCOMM, run validation from `../hcomm` with its own
-`build.sh`; do not treat a successful build of this repository as validation
-of HCOMM algorithm changes.
-
-## Change Rules
-
-- Preserve the existing C++14 style, Huawei copyright header, logging macros,
-  `CHK_RET` error propagation, and local CMake source-list patterns.
-- Keep public API changes exceptional. Prefer internal profiling helpers and
-  opt-in environment switches.
-- Add sources to every applicable target. HCOMM code may build into `hccl_alg`,
-  `hcomm`, and/or `ccl_kernel`; host-only code must not leak into device
-  targets.
-- Keep tracing disabled by default and make the disabled path cheap.
-- Do not infer an executed algorithm from a class name alone. Check operator
-  selection, executor overrides, topology, device type, workflow mode, and
-  host/device execution path.
-- Do not rely on log timestamps for device-task duration. Semantic events must
-  be correlated with profiler tasks through device/rank, stream ID, and task
-  ID where available.
-- Treat local rank, user/global rank, sub-communicator rank, and profiler
-  `Device_id` as distinct fields. Record mappings explicitly.
-
-## Trace Migration Conventions
-
-The effective prototype data path in `../../cann-hccl` is:
-
-```text
-algorithm semantic scope
-  -> thread-local semantic context
-  -> HCCL profiling callback for the real task
-  -> stream_id/task_id/task_kind semantic log
-  -> msprof task_time.csv join
-```
-
-Do not migrate `aclprofMarkEx`. The post-processing pipeline does not consume
-its `PROFILER_TRACE_EX` rows and explicitly skips them. A semantic event must
-describe a real HCCL task and be reported when that task's stream ID and task
-ID are available.
-
-The semantic schema should include:
-
-```text
-operation, phase, step, slice, rank, rank_size, peer, semantic, stream_id, task_id
-```
-
-`_start` sets the semantic context for the following real task; `_end` clears
-it. Do not claim that this produces an independent end timestamp. If a pure
-boundary is required, bind it to an existing real notify/copy task or add an
-explicit profiling record with a documented consumer.
-
-New event names should be stable, lower snake case, and paired with
-`_start`/`_end` when they represent an interval. Keep the schema versioned
-rather than teaching post-processing scripts one-off log formats.
-
-Before adding semantic scopes, enumerate all runtime paths that implement the same
-semantic phase, especially base executors and optimized overrides such as
-single ring, fast double ring, aligned double ring, zero-copy, NHR, and AICPU
-paths.
-
-## Validation Expectations
-
-For tracing or diagnosis changes, validation should cover:
-
-- disabled-by-default behavior;
-- environment parsing and malformed values;
-- exact event serialization;
-- context set/clear behavior and nested scopes;
-- task type to semantic-name mapping;
-- operation boundary detection;
-- matching coverage for `(device_id, stream_id, task_id)`;
-- duplicate and unmatched task reporting;
-- single-rank and 8-rank single-ring traces;
-- at least one optimized executor path;
-- multi-node clock/rank mapping before causal claims;
-- no material performance regression when tracing is disabled.
-
-Python post-processing tools should use only the standard library unless a new
-dependency is justified and documented. Validate them with `python -m
-py_compile` and small deterministic fixtures.
-
-## Reference Documents
-
-- `docs/help/repository-differences.md`
-- `docs/help/step-trace-causal-diagnosis-migration-plan.md`
+HCOMM changes must be built in `../hcomm`; a successful HCCL build does not
+validate them. Windows checks and old-data replay are not a new device run.
+The archived local 8-device single-ring sample is not the whole project's
+evidence: Ring/NHR branch notes also report device investigations. Check each
+tested commit and path; multi-node support and abnormal cases remain active work.

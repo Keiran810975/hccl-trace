@@ -1,9 +1,16 @@
-# HCOMM 8.5.0 差异调查与步骤语义 Trace 规格
+# HCOMM 8.5.0 步骤语义与依赖诊断实现规格
+
+> 2026-09-15 整理：本文件保留实现合同；唯一活动计划见 [task.md](task.md)，
+> 分支、当前单机证据与历史入口见 [阶段归档](arch-94a1ab31c3ee.md)。
+> 整理前全文已保存为 [历史快照](archive/2026-09-15/spec.md)。下文各次 replay
+> 数字属于相应实现阶段，不是多机验证或当前生产端重新采集的结论。
+> 补查发现远端 master 与四个算法分支已有后续实现，本文件主体仍描述旧本地源码；
+> 差异及验证状态以 [分支调查](branch-review-2026-09-15.md) 补充，不能据此把分支功能判为未实现。
 
 ## 1. 文档目的
 
-本文记录当前工作区 `hccl-trace/hcomm` 相对相邻 8.5.0 源码仓
-`../hcomm` 的净源码差异，并解释这些改动形成的运行时行为、数据契约、覆盖范围与已知风险。
+本文基于 HCOMM 8.5.0 差异调查，记录当前工作区的语义生产、DB 精确合并、
+execution/resource 依赖图合同、覆盖范围与已知风险。
 
 本文是对当前工作树的静态快照，不代表这些改动已经通过 HCOMM 构建、设备功能测试或性能验收。
 后续实施任务见同目录的 `task.md`。
@@ -21,7 +28,7 @@
 | 当前源码 | `C:\Users\Admin\Desktop\ATC\hccl-trace\hcomm` |
 | 当前分支 | `dev-innerDia` |
 | 当前 HEAD | `7db54477d156efaa45e3caf7f8cd5d0caa195d64` |
-| 当前工作树 | 在 HEAD 之上还有 18 个已跟踪文件的未提交修改 |
+| 当前工作树 | 2026-09-15 核对为 17 个已跟踪文件修改；完整版本状态见阶段归档 |
 
 相邻基线仓的 HEAD 与当前仓内 `8.5.0` ref 指向同一个提交。因此，以下两种比较在源码内容上等价：
 
@@ -48,9 +55,9 @@ git -C hcomm diff HEAD
 
 比较范围为 `hcomm/src` 内源码和源码 CMake 清单；不包含 `.git`、构建产物、部署包或其他生成文件。
 
-### 2.3 总体规模
+### 2.3 原始差异调查规模（历史）
 
-当前工作树相对 `../hcomm` 的净差异为：
+本节保留早期调查时相对 `../hcomm` 的净差异统计，不作为当前 diff 计数：
 
 - 20 个文件；
 - 新增 4 个文件；
@@ -312,10 +319,10 @@ AIV 的专用 `Save()` 当前只调用 probe，不输出完整语义记录。
 `submit_ts` 是 Host-cycle 提交时刻，不是设备执行起止时间。它只能用于顺序校验或缩小候选窗口，
 task duration 必须来自 msprof DB `TASK.startNs/endNs`。
 
-本次数据同时表明 `notify_id` 还不能作为 record/wait 的跨执行精确配对键：
-18,779 条 Notify semantic 按 `(node_id, device_id, notify_id)` 分组后，没有任何一组同时
-包含 record 和 wait，依赖图的 3,016 条本地 Notify 边仍是 connection/time inferred。
-这不影响 task-level 100% exact，但意味着同步依赖仍需独立 identity 设计。
+早期调查表明 `notify_id` 单独不能表示一次同步，跨 device 的 record/wait 也不能按
+`(node, device, notify_id)` 直接分组。该问题现已由 8.8～8.11 的 relation identity 与
+direct/local Notify channel ordinal 处理；旧 3,016 条 connection/time inferred 边已删除。
+task-level exact 与同步关系证据仍是两个不同层次。
 
 ## 7. 算法插桩
 
@@ -625,9 +632,9 @@ communication metadata 都是硬错误。时间在解析和运算阶段保持整
 
 当前 8 卡 `test/out` 对 DB 路径的复算结果为 44,008 个目标 physical task，
 28,502/28,502 semantic exact，其中 FFts 14,405/14,405 parent+ctx exact。
-task-level identity 与旧输入完全一致；但旧 connection/time Notify heuristic 会因纳秒时间
-消除 JSON 舍入并列而从 3,016 条变化为 5,094 条。这一差异进一步证明时间最近关系不是
-稳定因果证据，依赖图迁移必须按 DEP-008 删除该默认推断，不能为保持旧边数而重新舍入时间。
+task-level identity 与旧输入完全一致；旧 connection/time Notify heuristic 曾因纳秒时间
+消除 JSON 舍入并列而从 3,016 条变化为 5,094 条。这一差异说明时间最近关系不是
+稳定因果证据；DEP-008 已删除该默认推断，不能为保持旧边数而重新舍入时间。
 
 ### 8.6 单机依赖图合同（DEP-001）
 
@@ -686,10 +693,15 @@ semantic 可以 exact 匹配 physical task，但 operation scope 仍可能 missi
 
 证据强度从高到低为：
 
-1. `observed`：同一硬件执行域内的直接顺序或唯一、共享同步 token；
-2. `semantic`：生产端显式声明的 peer/phase/protocol 关系；
-3. `inferred`：由受约束元数据唯一推导，但生产端未显式声明；
-4. `heuristic`：时间最近、出现顺序 zip 等研究性猜测。
+1. `exact`：满足完整 channel、单 stream、等数量与唯一 ordinal 合同的 direct/local Notify；
+2. `observed`：可观测 direct stream 顺序或当前完整 FFts Notify relation 的唯一配对；
+3. `semantic`：生产端声明关系，如同 logical stream 的 FFts context 声明序；
+4. `inferred`：受约束元数据推导的关系；当前默认图不包含旧 connection/time 推断；
+5. `heuristic`：时间最近、无完整 channel 合同的出现顺序 zip 等猜测，默认禁用。
+
+派生边应取全部源边的最弱 confidence。当前 resource FFts/mixed order 仍硬编码
+observed，存在证据增强；修复及 Notify 收缩的同类检查见活动任务 NEXT-002。
+当前 graph schema 仍为 v4，本次文档整理未实现该修复或升级 schema。
 
 `heuristic` 永远不能标为 exact/observed，也不能默认进入因果图。多个候选必须输出
 ambiguity（候选及原因），不能通过“最近时间”选一个。DEP-011 已将 edge ID 实现为上述
@@ -1186,10 +1198,10 @@ PROFILER_TRACE_EX
 
 1. **测试补丁改变生产算法选择。** 两处 `[TEST PATCH]` 会强制 910B 进入 ring 路径，
    必须在发布前撤回或移入独立测试控制面。
-2. **存在提前返回导致语义丢失的窗口。**
-   `TaskData` 构造时可能已消费 one-shot context，但 `TaskProfiling::Run()` 在
-   `GetAddtionInfoState()`、OP_BASE、非 capture 条件下会在语义上报前直接返回。
-   结果是语义被消费却没有日志。
+2. **旧本地的提前返回窗口，远端 master 已修复。**
+   本地 `94a1ab3` 中 TaskData 可能已消费 one-shot，而 `Run()` 在 OP_BASE、未订阅、
+   非 capture 路径提前返回。远端 `9eedf27` 已使用 `ReportCapturedTaskSemantic()` 兑现
+   快照；后续同步并补针对性回归，不重复实现。FFTS callback 仍需 msprof 订阅触发。
 
 ### P1：正确性与精确关联
 
@@ -1213,25 +1225,19 @@ PROFILER_TRACE_EX
    并发和提前返回均缺少直接回归测试。
 3. **`profiler_manager_impl.cc` 是无功能格式变更。** 应避免与功能提交混合，降低审查噪声。
 
-## 11. 当前可验证的验收口径
+## 11. 验证边界与后续验收
 
-P0 消费端止错、P1 correlation 和 schema v4 消费代码已经实现，但撤销实例字段后的生产端
-尚未经过 HCOMM 构建和设备侧重新采集，因此当前实现仍应视为 single-ring direct 的实验性
-生产端。设备验收至少需要满足：
+已有单机设备数据证明 direct 与 FFts parent/context 可 exact 关联；本次复核仅运行
+62 项 Python 单测及保存的 CSV/artifact 门禁，没有重新构建 HCOMM 或运行设备 workload。
+撤销实例字段后的 schema v4 生产端验证需关联到实际提交；两处测试强制仍在，提前返回
+修复已经位于远端 master。Ring/NHR 的分支设备记录与最终补丁回归状态见分支调查。
 
-1. HCOMM 自身构建通过；
-2. `HCCL_STEP_TRACE=0` 时无语义日志且功能结果与 8.5.0 一致；
-3. `HCCL_STEP_TRACE=1` 时 `semantic_total > 0`，且 Ring FFts 路径应满足
-   `ffts_semantic_total > 0`、`graph_correlation_total > 0`；
-4. `device_id/stream_id/hccl_task_id` 能与 DB 物理身份对齐；
-5. duplicate semantic/profiler execution/graph correlation key 均为 0；
-6. `ffts_semantic_missing_correlation == 0`、
-   `ffts_ctx_kind_mismatches == 0`，并且
-   `ffts_parent_ctx_matches > 0`；
-7. 普通 task 和新采集 composite task 均必须 exact；工具不再提供 ordinal heuristic；
-8. 测试算法强制逻辑不进入生产默认选择；
-9. 同一 collective invocation 在各 rank/device 上得到相同 `(group_name, op_name)`，
-   连续 AllReduce 的 `op_name` 不同，本地 `opId` 映射无歧义；
-10. 多通信域、graph replay 与 retry 采集验证 operation 名称是否唯一；不唯一时必须
-    输出 missing/ambiguous 或新增明确 execution epoch，不能按时间猜测；
-11. 开销测试覆盖开关关闭与开启两种状态。
+后续按 [task.md](task.md) 的具体任务验收，不把所有算法、graph replay/retry 和性能矩阵
+绑定为每次修改的前置条件。保留三个基础边界：
+
+- 生产端修改在 HCOMM 自身构建，并确认目标 workload 的真实路径、算子结果及 trace off/on 行为。
+- direct/FFts 匹配必须有物理身份和兼容 kind；重复、冲突、缺失不可静默修补。
+- 跨节点关系先证明共享身份；未校准时只报告拓扑与本地 duration，不输出跨时钟差值。
+
+历史任务编号的定义见 [整理前 task 快照](archive/2026-09-15/task.md)；已完成项和保存的
+单机统计见 [阶段归档](arch-94a1ab31c3ee.md)。
