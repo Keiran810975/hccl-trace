@@ -2,7 +2,30 @@
 
 开发入口：[活动任务](task.md)、[实现规格](spec.md)、[阶段归档](arch-94a1ab31c3ee.md)。
 本地真实验证基线是 8 卡 single-ring direct RS/AG；其他算法分支已有实现和部分设备记录，
-详见 [分支调查](branch-review-2026-09-15.md)。多机与异常定位仍在计划中。
+详见 [分支调查](branch-review-2026-09-15.md)。多机离线入口已实现，设备验收与异常定位仍待推进。
+
+## 多机回放
+
+```bash
+# 从工作空间根目录运行；run.json 路径相对清单文件解析
+python -m hccl.tools.diagnosis.multi_node_trace /capture/run.json -o /capture/replay
+```
+
+使用 [输入模板](../../../test/fixtures/multinode-run.example.json)，先逐节点 exact merge，
+再消费显式 operation 绑定及 rank/node/device 映射生成联合 execution/resource artifact。
+输出在 `replay/<run_id>/`；重复回放换输出根目录，不覆盖已有结果。无共享调用证据时
+`operations` 留空，导出 `operations.csv` 与未决原因，不因同名 operation 跨机配对。
+出口 0 要求 merge、graph gate 通过且存在跨机边、远端无未决 channel；失败保留已有输出。
+
+当前支持 rank+offset 编码的 Ibverbs RDMA Notify；direct 重复 channel 要求两端各自单
+stream、等数量、顺序唯一。FFts 仅支持 channel 内各一个 occurrence，重复时保留歧义。
+HTML/SVG 读取该入口的 artifact，节点分别按本地起点展示，不比较未校准的跨机时间。
+实现记录见 [多机设计](multi-node-design.md)，实机验收见
+[测试交接](../../../test/prompts/multinode-device-test.md)。
+
+```bash
+python -m unittest hccl.tools.diagnosis.test_diagnosis hccl.tools.diagnosis.test_multi_node_trace
+```
 
 诊断链只接受两个事实源：HCOMM `[HcclTaskSemantic]` plog 与 msprof consolidated
 `msprof_*.db`。Chrome-trace `msprof_*.json` 和 `task_time.csv` 已不再作为生产输入。

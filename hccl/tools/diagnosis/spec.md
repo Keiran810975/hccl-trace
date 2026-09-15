@@ -9,6 +9,11 @@
 
 ## 1. 文档目的
 
+2026-09-15 多机开发分支增量：见 [NEXT-003/004 实现记录](multi-node-design.md)。
+新增清单入口、显式共享 operation 绑定与跨节点 RDMA Notify 观测边；联合 node identity
+以 run/node 命名空间隔离。merged 42 列、artifact v4 保持，新增 kind 为 additive 扩展。
+以下历史单机实现主体仍保留；多机真实设备验收、重复 FFts occurrence 的共享身份仍待验证。
+
 本文基于 HCOMM 8.5.0 差异调查，记录当前工作区的语义生产、DB 精确合并、
 execution/resource 依赖图合同、覆盖范围与已知风险。
 

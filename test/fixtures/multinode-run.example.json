@@ -1,0 +1,23 @@
+{
+  "run_id": "dual-allreduce-001",
+  "capture": {
+    "source_revision": "填写本分支实际提交及设备测试补丁 diff",
+    "toolkit": "填写版本",
+    "driver": "填写版本",
+    "msprof": "填写版本与导出命令",
+    "command": "填写双机共同 launcher 和各节点采集命令",
+    "workload": "AllReduce，一种固定消息规模，少量连续 operation",
+    "actual_algorithm_transport": "填写各层 executor/template/transport 的实际日志证据"
+  },
+  "nodes": [
+    {"node_id": "node0", "plog_dir": "node0/plog", "msprof_db_dir": "node0/msprof"},
+    {"node_id": "node1", "plog_dir": "node1/plog", "msprof_db_dir": "node1/msprof"}
+  ],
+  "ranks": [
+    {"user_rank": 0, "node_id": "node0", "device_id": 0,
+     "comm_ranks": [{"group_name": "填写实际子通信域", "comm_rank": 0}]},
+    {"user_rank": 1, "node_id": "node1", "device_id": 0,
+     "comm_ranks": [{"group_name": "填写实际子通信域", "comm_rank": 1}]}
+  ],
+  "operations": []
+}

@@ -1,5 +1,8 @@
 # HCCL step trace single-node test runbook
 
+多机开发分支的 NEXT-003/004 使用 [双机设备测试交接](prompts/multinode-device-test.md)
+和 [节点清单模板](fixtures/multinode-run.example.json)。以下保留单机流程。
+
 当前单机证据见 [阶段归档](../hccl/tools/diagnosis/arch-94a1ab31c3ee.md)。多机采集与异常
 测试按 [task.md](../hccl/tools/diagnosis/task.md) 推进；本文不表示这些场景已验证。
 本次 master 集成后的 Mesh 定向验收及 Ring/NHR 小回归，使用 [设备测试交接 prompt](prompts/integrated-master-device-test.md)。

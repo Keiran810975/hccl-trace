@@ -528,10 +528,9 @@ def _merged_row(status: str, semantic: SemanticRecord, profiler: ProfilerTask, d
                 graph_correlation: GraphCorrelation = None,
                 operation_scope: Tuple[str, str] = ("", "")):
     row = semantic.to_row()
-    if profiler and profiler.task_kind in ("notify_record", "notify_wait"):
-        # DB metadata covers profiler-only tasks as well as matched semantic
-        # tasks. Keep one canonical merged representation instead of adding
-        # duplicate profiler_notify/src/dst columns.
+    if profiler and profiler.task_kind in ("notify_record", "notify_wait", "rdma"):
+        # DB metadata also covers unannotated RDMA Notify sends. Keep one
+        # canonical representation instead of duplicate notify/src/dst columns.
         row["task_kind"] = profiler.task_kind
         if profiler.profiler_notify_id >= 0:
             row["notify_id"] = profiler.profiler_notify_id

@@ -97,7 +97,8 @@ def build_timeline_model(rows: List[dict], layout: str) -> dict:
 
 def node_record(row: dict, x: float, y: float, w: float, h: float, fill: str, stroke: str, label: str) -> dict:
     title = (
-        f"rank={row.get('_rank', '')} device={row.get('_device_id', '')} stream={row.get('_stream_id', '')} "
+        f"node={row.get('_node_id', '')} rank={row.get('_user_rank', row.get('_rank', ''))} "
+        f"device={row.get('_device_id', '')} stream={row.get('_stream_id', '')} "
         f"semantic_task={row.get('task_id', row.get('_task_id', ''))} "
         f"profiler_task={row.get('_profiler_task_id', row.get('_task_id', ''))} subtask={row.get('_subtask_id', '')}\n"
         f"phase={row.get('phase', row.get('_phase', ''))} event={row.get('event', row.get('_event', ''))} semantic={row.get('semantic', row.get('_semantic', ''))}\n"
@@ -111,7 +112,8 @@ def node_record(row: dict, x: float, y: float, w: float, h: float, fill: str, st
         "id": row.get("_graph_id", f"n{row.get('_source_row', '')}"),
         "x": round(x, 2), "y": round(y, 2), "w": round(w, 2), "h": round(h, 2),
         "fill": fill, "stroke": stroke, "label": label[:12], "title": title,
-        "rank": row.get("_rank", -1) if row.get("_rank", -1) >= 0 else row.get("_device_id", -1),
+        "rank": row.get("_user_rank", row.get("_rank", -1)),
+        "nodeId": row.get("_node_id", ""),
         "device": row.get("_device_id", -1),
         "stream": row.get("_stream_id", -1), "event": row.get("event", row.get("event_name", "")),
         "taskKind": row.get("profiler_task_kind", ""), "match": row.get("match_confidence", ""),
@@ -140,16 +142,23 @@ def build_execution_dependency_model(rows: List[dict], edges: List[dict]) -> dic
     lanes = sorted({(row["_node_id"], row["_device_id"], row["_stream_id"]) for row in rows})
     lane_index = {key: index for index, key in enumerate(lanes)}
     lane_items = []
+    node_origins = {}
+    for row in rows:
+        node = row["_node_id"]
+        node_origins[node] = min(node_origins.get(node, row["_start"]), row["_start"])
+    multi_node = len(node_origins) > 1
+    if multi_node:
+        left = 300
     for index, key in enumerate(lanes):
         lane_items.append({
             "key": "|".join(str(value) for value in key),
-            "label": f"dev {key[1]} stream {key[2]}",
+            "label": (f"{key[0]} " if multi_node else "") + f"dev {key[1]} stream {key[2]}",
             "y": top + index * 38,
             "height": 30,
             "taskCount": 0,
         })
-    min_start = min(row["_start"] for row in rows)
-    max_stop = max(row["_stop"] for row in rows)
+    min_start = 0 if multi_node else min(row["_start"] for row in rows)
+    max_stop = max(row["_stop"] - (node_origins[row["_node_id"]] if multi_node else 0) for row in rows)
     span = max(1.0, max_stop - min_start)
     scale = max(0.06, min(2.0, 28000.0 / span))
     nodes = []
@@ -166,7 +175,8 @@ def build_execution_dependency_model(rows: List[dict], edges: List[dict]) -> dic
         lane = lane_index[key]
         lane_items[lane]["taskCount"] += 1
         lane_items[lane]["height"] = max(lane_items[lane]["height"], 10 + (slot + 1) * 20)
-        x = left + (row["_start"] - min_start) * scale
+        origin = node_origins[row["_node_id"]] if multi_node else min_start
+        x = left + (row["_start"] - origin) * scale
         y = lane_items[lane]["y"] + 6 + slot * 20
         width = max(4, row["_duration"] * scale)
         fill, stroke = timeline.row_color({
@@ -175,6 +185,7 @@ def build_execution_dependency_model(rows: List[dict], edges: List[dict]) -> dic
         })
         label = row.get("event", "") or row.get("event_name", "") or row.get("profiler_task_kind", "")
         record = node_record(row, x, y, width, node_h, fill, stroke, label)
+        record["localTimeOrigin"] = origin
         nodes.append(record)
         positions[row["_graph_id"]] = record
     y_cursor = top
@@ -224,6 +235,7 @@ def build_execution_dependency_model(rows: List[dict], edges: List[dict]) -> dic
         })
     return {
         "kind": "dependency", "layout": "time", "timeOrigin": min_start,
+        "clockLabel": "Node-local elapsed time; clocks uncalibrated" if multi_node else "dependency",
         "width": left + span * scale + 100, "height": y_cursor + 70,
         "contentLeft": left, "timeScale": scale, "timeMin": min_start, "timeMax": max_stop,
         "lanes": lane_items, "columns": [], "nodes": nodes, "edges": edge_items,
@@ -235,6 +247,7 @@ def write_html(output: Path, title: str, model: dict) -> None:
     payload = json.dumps(model, ensure_ascii=False, separators=(",", ":"))
     template = PERFETTO_DEPENDENCY_TEMPLATE if model.get("kind") == "dependency" else HTML_TEMPLATE
     page = template.replace("__TITLE__", html.escape(title)).replace("__MODEL__", payload)
+    page = page.replace('__CLOCK_LABEL__', html.escape(model.get("clockLabel", "dependency")))
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(page, encoding="utf-8")
 
@@ -253,6 +266,8 @@ def write_dependency_svg(output: Path, title: str, model: dict) -> None:
         ),
         "<title>{}</title>".format(html.escape(title)),
         '<rect width="100%" height="100%" fill="#fff"/>',
+        '<text x="12" y="24" font-family="Arial" font-size="12">{}</text>'.format(
+            html.escape(model.get("clockLabel", "dependency"))),
     ]
     for lane in model.get("lanes", []):
         parts.append(
@@ -318,7 +333,7 @@ PERFETTO_DEPENDENCY_TEMPLATE = r'''<!doctype html>
 #legend{padding:9px 12px;border-top:1px solid var(--border);background:#fafbfc;line-height:1.8}.swatch{display:inline-block;width:9px;height:9px;margin:0 5px 0 9px;border-radius:2px}.swatch:first-child{margin-left:0}
 #overview{height:96px;width:100%;display:block;border-top:1px solid var(--border);cursor:crosshair}.tip{position:fixed;display:none;max-width:520px;white-space:pre-wrap;background:#202124;color:#fff;padding:7px 9px;border-radius:4px;pointer-events:none;font:11px Consolas,monospace;z-index:5;box-shadow:0 2px 8px #0005}
 </style></head><body>
-<div id="toolbar"><strong>HCCL Trace</strong><span class="muted">dependency</span><button id="fit">Fit trace</button><button id="focus">Focus selected</button><button id="clearSelection">Clear selection</button><span class="sep"></span><select id="deviceFilter" title="device"></select><select id="rankFilter" title="rank"></select><select id="streamFilter" title="stream"></select><select id="eventFilter" title="event"></select><select id="edgeFilter" title="dependency kind"></select><input id="search" placeholder="Find task / event"><button id="clearFilters">Reset filters</button></div>
+<div id="toolbar"><strong>HCCL Trace</strong><span class="muted">__CLOCK_LABEL__</span><button id="fit">Fit trace</button><button id="focus">Focus selected</button><button id="clearSelection">Clear selection</button><span class="sep"></span><select id="deviceFilter" title="device"></select><select id="rankFilter" title="rank"></select><select id="streamFilter" title="stream"></select><select id="eventFilter" title="event"></select><select id="edgeFilter" title="dependency kind"></select><input id="search" placeholder="Find task / event"><button id="clearFilters">Reset filters</button></div>
 <div id="stage"><canvas id="trace" tabindex="0"></canvas></div>
 <aside id="side"><h2 id="sideTitle">Task details</h2><div id="details"><div class="empty">Select a task block to inspect its direct predecessors and successors. Dependencies stay hidden until a task is selected.</div></div><canvas id="overview" title="Click to navigate"></canvas><div id="legend"></div></aside><div id="tip" class="tip"></div>
 <script>
@@ -340,7 +355,7 @@ document.getElementById('clearSelection').onclick=()=>setSelected(null);
 function setSelected(id,focus=false,peers=[]){selectedId=id&&nodeById.has(id)?id:null;coincidentIds=selectedId?peers:[];renderDetails();requestDraw();if(focus&&selectedId)focusNode(nodeById.get(selectedId))}
 function text(tag,value,cls){const e=document.createElement(tag);if(cls)e.className=cls;e.textContent=value??'';return e}
 function addKV(box,key,value){box.append(text('div',key,'k'),text('div',String(value??''),'v'))}
-function renderDetails(){details.replaceChildren();const n=nodeById.get(selectedId);if(!n){sideTitle.textContent='Task details';details.append(text('div','Select a task marker or block to inspect its direct predecessors and successors. Dependencies stay hidden until a task is selected.','empty'));return}sideTitle.textContent=`Task ${n.taskId}${n.subtaskId>=0?'.'+n.subtaskId:''}`;const kv=text('div','', 'kv');addKV(kv,'device / rank',`${n.device} / ${n.rank}`);addKV(kv,'stream',n.stream);addKV(kv,'physical task',`${n.taskId}${n.subtaskId>=0?'.'+n.subtaskId:''}`);addKV(kv,'semantic task',n.semanticTaskId>=0?n.semanticTaskId:'—');addKV(kv,'relative time',`+${(n.start-model.timeMin).toFixed(3)} – +${(n.stop-model.timeMin).toFixed(3)} us`);addKV(kv,'absolute start',`${n.start.toFixed(3)} us`);addKV(kv,'duration',`${n.duration.toFixed(3)} us`);addKV(kv,'event',n.event||'—');addKV(kv,'hardware',n.hardware||n.taskKind||'—');addKV(kv,'phase',n.phase||'—');addKV(kv,'semantic',n.semantic||'—');addKV(kv,'match',n.confidence||n.match||'—');details.append(kv);if(coincidentIds.length>1){details.append(text('div',`Candidates at this position (${coincidentIds.length})`,'section'));for(const id of coincidentIds.slice(0,24)){const other=nodeById.get(id),b=text('button',`task ${other.taskId}${other.subtaskId>=0?'.'+other.subtaskId:''} · ${other.event||other.hardware||other.taskKind}`,'dep');b.onclick=()=>setSelected(id,false,coincidentIds);details.append(b)}if(coincidentIds.length>24)details.append(text('div',`${coincidentIds.length-24} more; zoom in or narrow the filters.`, 'empty'))}const edges=(incident.get(n.id)||[]).filter(edgeVisible);for(const direction of ['incoming','outgoing']){const list=edges.filter(e=>direction==='incoming'?e.dst===n.id:e.src===n.id);details.append(text('div',`${direction==='incoming'?'Predecessors':'Successors'} (${list.length})`,'section'));if(!list.length){details.append(text('div','None under current filters','empty'));continue}for(const e of list){const other=nodeById.get(e.src===n.id?e.dst:e.src),b=text('button','',`dep ${direction}`);b.style.setProperty('--edge',e.color||'#777');b.append(text('span',`${e.kind} · task ${other?.taskId??'?'}`));const metrics=[e.waitSpanNs&&`wait=${e.waitSpanNs} ns`,e.remoteBlockNs&&`remote=${e.remoteBlockNs} ns`,e.postSignalNs&&`post=${e.postSignalNs} ns`,e.handoffGapNs&&`handoff=${e.handoffGapNs} ns`].filter(Boolean).join(' · ');b.append(text('small',[e.confidence,e.reason,metrics,e.timingStatus].filter(Boolean).join(' · ')));b.onclick=()=>setSelected(other?.id,true);details.append(b)}}}
+function renderDetails(){details.replaceChildren();const n=nodeById.get(selectedId);if(!n){sideTitle.textContent='Task details';details.append(text('div','Select a task marker or block to inspect its direct predecessors and successors. Dependencies stay hidden until a task is selected.','empty'));return}sideTitle.textContent=`Task ${n.taskId}${n.subtaskId>=0?'.'+n.subtaskId:''}`;const kv=text('div','', 'kv');addKV(kv,'node',n.nodeId||'—');addKV(kv,'device / rank',`${n.device} / ${n.rank}`);addKV(kv,'stream',n.stream);addKV(kv,'physical task',`${n.taskId}${n.subtaskId>=0?'.'+n.subtaskId:''}`);addKV(kv,'semantic task',n.semanticTaskId>=0?n.semanticTaskId:'—');addKV(kv,'relative time',`+${(n.start-(n.localTimeOrigin??model.timeMin)).toFixed(3)} – +${(n.stop-(n.localTimeOrigin??model.timeMin)).toFixed(3)} us`);addKV(kv,'absolute start',`${n.start.toFixed(3)} us`);addKV(kv,'duration',`${n.duration.toFixed(3)} us`);addKV(kv,'event',n.event||'—');addKV(kv,'hardware',n.hardware||n.taskKind||'—');addKV(kv,'phase',n.phase||'—');addKV(kv,'semantic',n.semantic||'—');addKV(kv,'match',n.confidence||n.match||'—');details.append(kv);if(coincidentIds.length>1){details.append(text('div',`Candidates at this position (${coincidentIds.length})`,'section'));for(const id of coincidentIds.slice(0,24)){const other=nodeById.get(id),b=text('button',`task ${other.taskId}${other.subtaskId>=0?'.'+other.subtaskId:''} · ${other.event||other.hardware||other.taskKind}`,'dep');b.onclick=()=>setSelected(id,false,coincidentIds);details.append(b)}if(coincidentIds.length>24)details.append(text('div',`${coincidentIds.length-24} more; zoom in or narrow the filters.`, 'empty'))}const edges=(incident.get(n.id)||[]).filter(edgeVisible);for(const direction of ['incoming','outgoing']){const list=edges.filter(e=>direction==='incoming'?e.dst===n.id:e.src===n.id);details.append(text('div',`${direction==='incoming'?'Predecessors':'Successors'} (${list.length})`,'section'));if(!list.length){details.append(text('div','None under current filters','empty'));continue}for(const e of list){const other=nodeById.get(e.src===n.id?e.dst:e.src),b=text('button','',`dep ${direction}`);b.style.setProperty('--edge',e.color||'#777');b.append(text('span',`${e.kind} · task ${other?.taskId??'?'}`));const metrics=[e.waitSpanNs&&`wait=${e.waitSpanNs} ns`,e.remoteBlockNs&&`remote=${e.remoteBlockNs} ns`,e.postSignalNs&&`post=${e.postSignalNs} ns`,e.handoffGapNs&&`handoff=${e.handoffGapNs} ns`].filter(Boolean).join(' · ');b.append(text('small',[e.confidence,e.reason,metrics,e.timingStatus].filter(Boolean).join(' · ')));b.onclick=()=>setSelected(other?.id,true);details.append(b)}}}
 function relatedSet(){const out=new Set(selectedId?[selectedId]:[]);for(const e of incident.get(selectedId)||[]){if(edgeVisible(e)){out.add(e.src);out.add(e.dst)}}return out}
 function requestDraw(){if(dirty)return;dirty=true;requestAnimationFrame(()=>{dirty=false;draw()})}
 function niceStep(raw){const p=10**Math.floor(Math.log10(Math.max(raw,1e-9))),r=raw/p;return(r<=1?1:r<=2?2:r<=5?5:10)*p}function xToTime(x){return model.timeMin+(x-LABEL)/model.timeScale}function timeToX(t){return LABEL+(t-model.timeMin)*model.timeScale}function timeLabel(us,step){if(Math.abs(us)>=1e6)return(us/1e6).toFixed(step<1e4?4:2)+' s';if(Math.abs(us)>=1e3)return(us/1e3).toFixed(step<10?3:step<100?2:1)+' ms';return us.toFixed(step<1?3:step<10?1:0)+' us'}
@@ -356,7 +371,7 @@ function hitNodes(clientX,clientY){const r=canvas.getBoundingClientRect(),px=cli
 canvas.onmousedown=e=>{canvas.focus();drag={x:e.clientX,y:e.clientY,lastX:e.clientX,lastY:e.clientY,moved:false};canvas.style.cursor='grabbing'};window.onmousemove=e=>{if(drag){const dx=e.clientX-drag.lastX,dy=e.clientY-drag.lastY;if(Math.abs(e.clientX-drag.x)+Math.abs(e.clientY-drag.y)>4)drag.moved=true;viewX-=dx/xScale;yPan+=dy;drag.lastX=e.clientX;drag.lastY=e.clientY;requestDraw();return}hoverPending=e;requestAnimationFrame(()=>{if(!hoverPending)return;const p=hoverPending;hoverPending=null;const ns=hitNodes(p.clientX,p.clientY),n=ns[0];if(n){tip.style.display='block';tip.style.left=Math.min(window.innerWidth-530,p.clientX+12)+'px';tip.style.top=Math.min(window.innerHeight-120,p.clientY+12)+'px';tip.textContent=(ns.length>1?`${ns.length} candidate tasks at this position\n`:'')+n.title}else tip.style.display='none'})};window.onmouseup=e=>{if(!drag)return;const wasMoved=drag.moved;drag=null;canvas.style.cursor='default';if(!wasMoved){const ns=hitNodes(e.clientX,e.clientY);setSelected(ns[0]?.id||null,false,ns.map(n=>n.id))}};canvas.ondblclick=e=>{const ns=hitNodes(e.clientX,e.clientY);if(ns[0])setSelected(ns[0].id,true,ns.map(n=>n.id))};
 canvas.onwheel=e=>{e.preventDefault();const r=canvas.getBoundingClientRect(),mx=e.clientX-r.left;if(e.ctrlKey){const anchor=wx(mx),factor=e.deltaY<0?1.18:.84;xScale=Math.max(.0005,Math.min(24,xScale*factor));viewX=anchor-(mx-LABEL)/xScale}else if(e.shiftKey){viewX+=e.deltaY/xScale}else{viewX+=e.deltaX/xScale;yPan-=e.deltaY}requestDraw()};canvas.onkeydown=e=>{if(e.key==='f'){fit();e.preventDefault()}else if(e.key==='Escape'){setSelected(null)}else if(e.key==='ArrowLeft'){viewX-=80/xScale;requestDraw()}else if(e.key==='ArrowRight'){viewX+=80/xScale;requestDraw()}else if(e.key==='ArrowUp'){yPan+=50;requestDraw()}else if(e.key==='ArrowDown'){yPan-=50;requestDraw()}};
 function drawOverview(){const W=overview.clientWidth,H=overview.clientHeight,[a,b]=bounds(),span=Math.max(1,b-a);octx.clearRect(0,0,W,H);octx.fillStyle='#fafbfc';octx.fillRect(0,0,W,H);const step=Math.max(1,Math.ceil(model.nodes.length/7000));octx.fillStyle='#6584ad88';for(let i=0;i<model.nodes.length;i+=step){const n=model.nodes[i];if(!nodeVisible(n))continue;const x=(n.x-a)/span*W;octx.fillRect(x,10,Math.max(1,n.w/span*W),H-20)}const[v0,v1]=visibleX();octx.strokeStyle='#d93025';octx.lineWidth=2;octx.strokeRect((v0-a)/span*W,2,Math.max(2,(v1-v0)/span*W),H-4)}overview.onmousedown=e=>{const r=overview.getBoundingClientRect(),[a,b]=bounds(),world=a+(e.clientX-r.left)/r.width*(b-a);viewX=world-(canvas.clientWidth-LABEL)/(2*xScale);requestDraw()};
-const colors={direct_stream_order_observed:'#444',ffts_logical_stream_order:'#5c6bc0',ffts_notify_sync_observed:'#2b8a3e',direct_notify_sync_exact:'#7b3fb3',local_notify_sync_exact:'#d9488b',resource_stream_order_observed:'#444',resource_ffts_order_observed:'#5c6bc0',resource_notify_sync_observed:'#2b8a3e',resource_notify_sync_exact:'#7b3fb3',resource_local_notify_sync_exact:'#d9488b'},legend=document.getElementById('legend');for(const k of model.edgeKinds){const s=text('span','', 'swatch');s.style.background=colors[k]||'#777';legend.append(s,text('span',k.replaceAll('_',' ')))}
+const colors={direct_stream_order_observed:'#444',ffts_logical_stream_order:'#5c6bc0',ffts_notify_sync_observed:'#2b8a3e',direct_notify_sync_exact:'#7b3fb3',local_notify_sync_exact:'#d9488b',resource_stream_order_observed:'#444',resource_ffts_order_observed:'#5c6bc0',resource_notify_sync_observed:'#2b8a3e',resource_notify_sync_exact:'#7b3fb3',resource_local_notify_sync_exact:'#d9488b',cross_node_notify_sync_observed:'#007c91',resource_cross_node_notify_sync_observed:'#007c91',resource_cross_node_notify_sync_semantic:'#007c91'},legend=document.getElementById('legend');for(const k of model.edgeKinds){const s=text('span','', 'swatch');s.style.background=colors[k]||'#777';legend.append(s,text('span',k.replaceAll('_',' ')))}
 resize();const initialSelection=decodeURIComponent(location.hash.slice(1));if(initialSelection&&nodeById.has(initialSelection))setSelected(initialSelection,true);else fit();renderDetails();
 </script></body></html>'''
 

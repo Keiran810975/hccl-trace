@@ -44,6 +44,7 @@ SYNC_EDGE_KIND_MAP = {
     "direct_notify_sync_exact": "resource_notify_sync_exact",
     "local_notify_sync_exact": "resource_local_notify_sync_exact",
     "ffts_notify_sync_observed": "resource_notify_sync_observed",
+    "cross_node_notify_sync_observed": "resource_cross_node_notify_sync_observed",
 }
 RESOURCE_EDGE_COLOR = {
     "resource_stream_order_observed": "#444444",
@@ -51,6 +52,8 @@ RESOURCE_EDGE_COLOR = {
     "resource_notify_sync_observed": "#2b8a3e",
     "resource_notify_sync_exact": "#7b3fb3",
     "resource_local_notify_sync_exact": "#d9488b",
+    "resource_cross_node_notify_sync_observed": "#007c91",
+    "resource_cross_node_notify_sync_semantic": "#007c91",
 }
 
 RESOURCE_NODE_FIELDS = [
@@ -525,6 +528,15 @@ def build_resource_graph(
             | set(downstream_path["control_ids"])
         )
         kind = SYNC_EDGE_KIND_MAP[source_edge["kind"]]
+        confidence = source_edge.get("confidence", "")
+        if source_edge["kind"] == "cross_node_notify_sync_observed":
+            # A remote RDMA task is itself a resource frontier. Preserve the
+            # weakest evidence on the receiver's contracted control path.
+            confidence = min(
+                (execution_edges_by_id[edge_id]["confidence"] for edge_id in source_edge_ids),
+                key={"semantic": 0, "observed": 1, "exact": 2}.__getitem__,
+            )
+            kind = "resource_cross_node_notify_sync_" + confidence
         reason = "Notify record/wait control chain contracted between resource tasks"
         add_edge(
             kind,
@@ -535,7 +547,7 @@ def build_resource_graph(
             control_ids,
             reason,
             source_edge.get("evidence", ""),
-            source_edge.get("confidence", ""),
+            confidence,
             source_edge,
         )
     return (

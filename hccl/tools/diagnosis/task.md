@@ -63,7 +63,10 @@
 
 ### NEXT-003 采集一个双机正常样例
 
-- [ ] **位置**：HCOMM 实际 executor/template/transport；`test/`。
+- [-] **位置**：HCOMM 实际 executor/template/transport；`test/`。
+- **实现进度**：`codex/multinode-diagnosis` 已提供节点输入清单、逐节点 exact merge、
+  operation inventory 和[双机测试交接](../../../test/prompts/multinode-device-test.md)。
+  用户确认当前无设备环境，真实双机采集由用户后续执行；不将离线 fixture 计为设备验收。
 - **工作**：优先双机 AllReduce，先复用已有 Ring/NHR 与修复后的 Mesh，按设备实际选出的
   机内/机间路径只补 rank 域、phase/peer 和 RDMA/RoCE 关联缺口；先固定一种消息规模并连续运行少量 operation。
   用一份简单输入清单记录 run、每个 node 的 plog/DB 路径和 user/comm rank 到 node/device
@@ -74,7 +77,11 @@
 
 ### NEXT-004 打通多机依赖图
 
-- [ ] **位置**：HCCL 输入组织、identity 与构图；仅缺事实时修改 HCOMM。
+- [-] **位置**：HCCL 输入组织、identity 与构图；仅缺事实时修改 HCOMM。
+- **实现进度**：清单驱动的 run 隔离、显式 operation 绑定、Ibverbs RDMA Notify channel、
+  双层 artifact 与节点本地时钟视图已实现，79 项离线单测通过。
+  设计及限制见 [多机实现记录](multi-node-design.md)。重复 FFts occurrence 仍保留歧义；
+  下一步用 NEXT-003 实际样例核实 rank 域、共享调用与 channel 字段，按失败证据收尾。
 - **依赖**：NEXT-003。
 - **工作**：消费同一次采集的节点清单，隔离不同 run，显式映射 rank/node/device，复用现有
   merge 和双层图。先核实 DB operation/Notify/channel 事实是否足以唯一配对；不足时再补
