@@ -11,6 +11,7 @@
 #include "reduce_scatter_mesh_atomic.h"
 #include "externalinput_pub.h"
 #include "alg_template_register.h"
+#include "task_semantic_scope.h"
 
 namespace hccl {
 using namespace std;
@@ -54,8 +55,18 @@ HcclResult ReduceScatterMeshAtomic::RunReduceScatter(const std::vector<LINK> &li
         const LINK &dstLink = links[remoteRank];
         Stream &stream = streamVct[streamIndex];
 
-        CHK_RET(dstLink->TxAck(stream));
-        CHK_RET(dstLink->RxAck(stream));
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "reduce_scatter", 0, userRank_, localRankSize_, localRank_, "tx_ack_start", "link_tx_ack",
+                dstLink->GetRemoteRank(), "mesh_atomic", localRank_));
+            CHK_RET(dstLink->TxAck(stream));
+        }
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "reduce_scatter", 0, userRank_, localRankSize_, remoteRank, "rx_ack_start", "link_rx_ack",
+                dstLink->GetRemoteRank(), "mesh_atomic", localRank_));
+            CHK_RET(dstLink->RxAck(stream));
+        }
     }
 
     for (u32 streamIndex = 0; streamIndex < localRankSize_ - 1; streamIndex++) {
@@ -89,12 +100,29 @@ HcclResult ReduceScatterMeshAtomic::RunReduceScatter(const std::vector<LINK> &li
         DeviceMem dstMem = inputMem_.range(rxSlice.offset, rxSlice.size);
         void *remoteMem = nullptr;
         CHK_RET(dstLink->GetRemoteMem(UserMemType::INPUT_MEM, &remoteMem));
-        CHK_RET(HcclReduceAsync(dispatcher_, static_cast<s8 *>(remoteMem) + baseOffset_ + rxSlice.offset,
-            dstMem.size() / SIZE_TABLE[dataType_], dataType_, reductionOp_, stream,
-            dstMem.ptr(), dstLink->GetRemoteRank(), dstLink->GetLinkType(), INLINE_REDUCE_BIT));
-
-        CHK_RET(dstLink->TxDataSignal(stream));
-        CHK_RET(dstLink->RxDataSignal(stream));
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "reduce_scatter", 0, userRank_, localRankSize_, localRank_, nullptr, nullptr,
+                dstLink->GetRemoteRank(), "mesh_atomic", localRank_));
+            TaskSemanticEventScope eventScope("rx_payload_reduce_start", "link_rx_payload_reduce");
+            CHK_RET(HcclReduceAsync(dispatcher_, static_cast<s8 *>(remoteMem) + baseOffset_ + rxSlice.offset,
+                dstMem.size() / SIZE_TABLE[dataType_], dataType_, reductionOp_, stream,
+                dstMem.ptr(), dstLink->GetRemoteRank(), dstLink->GetLinkType(), INLINE_REDUCE_BIT));
+        }
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "reduce_scatter", 0, userRank_, localRankSize_, localRank_, nullptr, nullptr,
+                dstLink->GetRemoteRank(), "mesh_atomic", localRank_));
+            TaskSemanticEventScope eventScope("tx_data_signal_start", "link_tx_data_signal");
+            CHK_RET(dstLink->TxDataSignal(stream));
+        }
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "reduce_scatter", 0, userRank_, localRankSize_, remoteRank, nullptr, nullptr,
+                dstLink->GetRemoteRank(), "mesh_atomic", localRank_));
+            TaskSemanticEventScope eventScope("rx_data_signal_start", "link_rx_data_signal");
+            CHK_RET(dstLink->RxDataSignal(stream));
+        }
     }
     // 添加空task,保证执行时不乱序
     CHK_RET(AlgTemplateBase::ExecEmptyTask(inputMem_, outputMem_, streamVct[0], dispatcher_));
@@ -113,6 +141,9 @@ HcclResult ReduceScatterMeshAtomic::RunAsync(const u32 rank, const u32 rankSize,
 
     if (localRankSize_ == 1) {
         if (inputMem_ != outputMem_) {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "reduce_scatter", 0, userRank_, localRankSize_, 0, "copy_start", "hccl_local_copy",
+                INVALID_VALUE_RANKID, "mesh_atomic", localRank_));
             return HcclD2DMemcpyAsync(dispatcher_, outputMem_, inputMem_, stream_);
         }
         return HCCL_SUCCESS;
@@ -152,6 +183,9 @@ HcclResult ReduceScatterMeshAtomic::RunAsync(const u32 rank, const u32 rankSize,
         DeviceMem src = inputMem_.range(slices_[localRank_].offset, slices_[localRank_].size);
         HCCL_DEBUG("rank[%u] copy result from to output[%p] offset[%llu] size[%llu] ", localRank_, outputMem_.ptr(),
             slices_[localRank_].offset, slices_[localRank_].size);
+        TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+            "reduce_scatter", 0, userRank_, localRankSize_, localRank_, "copy_start", "hccl_local_copy",
+            INVALID_VALUE_RANKID, "mesh_atomic", localRank_));
         HcclResult ret = HcclD2DMemcpyAsync(dispatcher_, outputMem_, src, stream_);
         CHK_PRT_RET(ret != HCCL_SUCCESS,
             HCCL_ERROR("[ReduceScatterMeshAtomic][RunAsync]rank[%u] memcpy async from mem[%p] "

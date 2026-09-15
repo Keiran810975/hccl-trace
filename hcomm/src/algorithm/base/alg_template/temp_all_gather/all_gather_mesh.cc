@@ -11,6 +11,7 @@
 #include "all_gather_mesh.h"
 #include "externalinput_pub.h"
 #include "alg_template_register.h"
+#include "task_semantic_scope.h"
 
 namespace hccl {
 AllGatherMesh::AllGatherMesh(const HcclDispatcher dispatcher)
@@ -75,13 +76,23 @@ HcclResult AllGatherMesh::RunAllGather(const std::vector<LINK> &links, const std
 
         CHK_SMART_PTR_NULL(links[dstRank]);
         HCCL_DEBUG("rank[%u] round[%u] tx ack to srcRank[%u] ", interRank_, round, dstRank);
-        ret = links[dstRank]->TxAck(subStream);
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "allgather", 0, userRank_, interRankSize_, dstRank, "tx_ack_start", "link_tx_ack",
+                links[dstRank]->GetRemoteRank(), TaskSemanticAlgorithm(), interRank_));
+            ret = links[dstRank]->TxAck(subStream);
+        }
         CHK_PRT_RET(ret != HCCL_SUCCESS,
             HCCL_ERROR("[Run][AllGather]rank[%u] tx ack to rank[%u] Failed", interRank_, dstRank), ret);
         CHK_SMART_PTR_NULL(links[dstRank]);
 
         HCCL_DEBUG("rank[%u] round[%u] rx ack from Rank[%u] ", interRank_, round, dstRank);
-        ret = links[dstRank]->RxAck(subStream);
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "allgather", 0, userRank_, interRankSize_, interRank_, "rx_ack_start", "link_rx_ack",
+                links[dstRank]->GetRemoteRank(), TaskSemanticAlgorithm(), interRank_));
+            ret = links[dstRank]->RxAck(subStream);
+        }
         CHK_PRT_RET(ret != HCCL_SUCCESS,
             HCCL_ERROR("[Run][AllGather]rank[%u] rx_ack from rank[%u] Failed", interRank_, dstRank), ret);
 
@@ -90,7 +101,13 @@ HcclResult AllGatherMesh::RunAllGather(const std::vector<LINK> &links, const std
             interRank_, dstRank, inputSlices[interRank_].offset, inputSlices[interRank_].size,
             outputSlices[interRank_].offset, outputSlices[interRank_].size);
 
-        ret = Tx(links[dstRank], inputSlices[interRank_], outputSlices[interRank_], subStream);
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "allgather", 0, userRank_, interRankSize_, interRank_, nullptr, nullptr,
+                links[dstRank]->GetRemoteRank(), TaskSemanticAlgorithm(), interRank_));
+            TaskSemanticEventScope eventScope("tx_payload_start", "link_tx_payload");
+            ret = Tx(links[dstRank], inputSlices[interRank_], outputSlices[interRank_], subStream);
+        }
         CHK_PRT_RET(ret != HCCL_SUCCESS,
             HCCL_ERROR("[Run][AllGather]rank[%u] tx to rank[%u] failed", interRank_, dstRank), ret);
         HCCL_DEBUG("rank[%u] will rcv from rank[%u] inputSlices offset[%llu] size[%llu] outputSlices"
@@ -98,7 +115,13 @@ HcclResult AllGatherMesh::RunAllGather(const std::vector<LINK> &links, const std
             interRank_, dstRank, inputSlices[dstRank].offset, inputSlices[dstRank].size, outputSlices[dstRank].offset,
             outputSlices[dstRank].size);
 
-        ret = Rx(links[dstRank], inputSlices[dstRank], outputSlices[dstRank], subStream);
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "allgather", 0, userRank_, interRankSize_, dstRank, nullptr, nullptr,
+                links[dstRank]->GetRemoteRank(), TaskSemanticAlgorithm(), interRank_));
+            TaskSemanticEventScope eventScope("rx_payload_copy_start", "link_rx_payload_copy");
+            ret = Rx(links[dstRank], inputSlices[dstRank], outputSlices[dstRank], subStream);
+        }
         CHK_PRT_RET(ret != HCCL_SUCCESS,
             HCCL_ERROR("[Run][AllGather]rank[%u] rx from srcRank[%u] run failed", interRank_, dstRank), ret);
         ret = ExecuteBarrier(links[dstRank], subStream);
@@ -130,6 +153,9 @@ HcclResult AllGatherMesh::RunAsync(const u32 rank, const u32 rankSize, const std
     if (interRankSize_ == 1) {
         if (inputMem_ != outputMem_) {
             HCCL_DEBUG("rank[%u] mem copy async from input to output", rank);
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "allgather", 0, userRank_, interRankSize_, 0, "copy_start", "hccl_local_copy",
+                INVALID_VALUE_RANKID, TaskSemanticAlgorithm(), interRank_));
             ret = HcclD2DMemcpyAsync(dispatcher_, outputMem_, inputMem_, stream_);
         }
         return ret;
@@ -188,6 +214,9 @@ HcclResult AllGatherMesh::RunAsync(const u32 rank, const u32 rankSize, const std
             slices_[rank].size);
 
         // 拷贝到自身rank的output_mem
+        TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+            "allgather", 0, userRank_, interRankSize_, rank, "copy_start", "hccl_local_copy",
+            INVALID_VALUE_RANKID, TaskSemanticAlgorithm(), interRank_));
         CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dst, src, stream_));
     }
 

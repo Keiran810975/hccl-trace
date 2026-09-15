@@ -10,6 +10,7 @@
 
 #include "alg_template_register.h"
 #include "all_reduce_mesh_opbase.h"
+#include "task_semantic_scope.h"
 
 namespace hccl {
 AllReduceMeshDirect::AllReduceMeshDirect(const HcclDispatcher dispatcher) : AlgTemplateBase(dispatcher)
@@ -129,6 +130,9 @@ HcclResult AllReduceMeshDirect::RunAsync(const u32 rank, const u32 rankSize, con
         if (opInfo_->inputAddr != opInfo_->outputAddr) {
             DeviceMem userMemIn = DeviceMem::create(opInfo_->inputAddr, count_ * DataUnitSize(dataType_));
             DeviceMem userMemOut = DeviceMem::create(opInfo_->outputAddr, count_ * DataUnitSize(dataType_));
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "allreduce_executor", 0, userRank_, rankSize, 0, "copy_start", "hccl_local_copy",
+                INVALID_VALUE_RANKID, "mesh_direct", rank));
             ret = HcclD2DMemcpyAsync(dispatcher_, userMemOut, userMemIn, stream_);
             CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[AllReduceRing][RunAsync]rank[%u] memcpy async failed", rank),
                 ret);
@@ -178,7 +182,12 @@ HcclResult AllReduceMeshDirect::RunReduceScatter(u32 rank, u32 rankSize, const s
 
     src = DeviceMem::create(static_cast<char *>(opInfo_->inputAddr) + slices_[rank].offset, slices_[rank].size);
     dst = commMemOut.range(0, slices_[rank].size);
-    CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dst, src, stream_));
+    {
+        TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+            "reduce_scatter", 0, userRank_, rankSize, rank, "copy_start", "hccl_local_copy",
+            INVALID_VALUE_RANKID, "mesh_direct", rank));
+        CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dst, src, stream_));
+    }
 
     CHK_RET(MainRecordSub());
     CHK_RET(SubWaitMain());
@@ -186,8 +195,18 @@ HcclResult AllReduceMeshDirect::RunReduceScatter(u32 rank, u32 rankSize, const s
     for (u32 round = 1; round < rankSize; round++) {
         u32 dstRank = (round + rank) % rankSize;
         Stream &subStream = meshStreams_[round - 1];
-        CHK_RET(links[dstRank]->TxAck(subStream));
-        CHK_RET(links[dstRank]->RxAck(subStream));
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "reduce_scatter", 0, userRank_, rankSize, rank, "tx_ack_start", "link_tx_ack",
+                links[dstRank]->GetRemoteRank(), "mesh_direct", rank));
+            CHK_RET(links[dstRank]->TxAck(subStream));
+        }
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "reduce_scatter", 0, userRank_, rankSize, dstRank, "rx_ack_start", "link_rx_ack",
+                links[dstRank]->GetRemoteRank(), "mesh_direct", rank));
+            CHK_RET(links[dstRank]->RxAck(subStream));
+        }
     }
 
     CHK_RET(SubRecordMain());
@@ -207,12 +226,29 @@ HcclResult AllReduceMeshDirect::RunReduceScatter(u32 rank, u32 rankSize, const s
 
         dst = DeviceMem::create(static_cast<char *>(remMemPtr), slices_[dstRank].size);
         src = userMemIn.range(slices_[dstRank].offset, slices_[dstRank].size);
-        CHK_RET(HcclReduceAsync(dispatcher_, static_cast<void *>(src.ptr()), slices_[dstRank].size / unitSize,
-            dataType_, reductionOp_, subStream, static_cast<void *>(dst.ptr()),
-            links[dstRank]->GetRemoteRank(), links[dstRank]->GetLinkType(), INLINE_REDUCE_BIT));
-
-        CHK_RET(links[dstRank]->TxDataSignal(subStream));
-        CHK_RET(links[dstRank]->RxDataSignal(subStream));
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "reduce_scatter", 0, userRank_, rankSize, dstRank, nullptr, nullptr,
+                links[dstRank]->GetRemoteRank(), "mesh_direct", rank));
+            TaskSemanticEventScope eventScope("tx_payload_start", "link_tx_payload_reduce");
+            CHK_RET(HcclReduceAsync(dispatcher_, static_cast<void *>(src.ptr()), slices_[dstRank].size / unitSize,
+                dataType_, reductionOp_, subStream, static_cast<void *>(dst.ptr()),
+                links[dstRank]->GetRemoteRank(), links[dstRank]->GetLinkType(), INLINE_REDUCE_BIT));
+        }
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "reduce_scatter", 0, userRank_, rankSize, dstRank, nullptr, nullptr,
+                links[dstRank]->GetRemoteRank(), "mesh_direct", rank));
+            TaskSemanticEventScope eventScope("tx_data_signal_start", "link_tx_data_signal");
+            CHK_RET(links[dstRank]->TxDataSignal(subStream));
+        }
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "reduce_scatter", 0, userRank_, rankSize, rank, nullptr, nullptr,
+                links[dstRank]->GetRemoteRank(), "mesh_direct", rank));
+            TaskSemanticEventScope eventScope("rx_data_signal_start", "link_rx_data_signal");
+            CHK_RET(links[dstRank]->RxDataSignal(subStream));
+        }
     }
 
     CHK_RET(SubRecordMain());
@@ -234,7 +270,12 @@ HcclResult AllReduceMeshDirect::RunAllGather(u32 rank, u32 rankSize, const std::
 
     src = commMemOut.range(0, slices_[rank].size);
     dst = userMemOut.range(slices_[rank].offset, slices_[rank].size);
-    CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dst, src, stream_));
+    {
+        TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+            "allgather", 0, userRank_, rankSize, rank, "copy_start", "hccl_local_copy",
+            INVALID_VALUE_RANKID, "mesh_direct", rank));
+        CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dst, src, stream_));
+    }
 
     CHK_RET(MainRecordSub());
     CHK_RET(SubWaitMain());
@@ -242,8 +283,18 @@ HcclResult AllReduceMeshDirect::RunAllGather(u32 rank, u32 rankSize, const std::
     for (u32 round = 1; round < rankSize; round++) {
         u32 dstRank = BackwardRank(rank, rankSize, round);
         Stream &subStream = meshStreams_[round - 1];
-        CHK_RET(links[dstRank]->TxAck(subStream));
-        CHK_RET(links[dstRank]->RxAck(subStream));
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "allgather", 0, userRank_, rankSize, dstRank, "tx_ack_start", "link_tx_ack",
+                links[dstRank]->GetRemoteRank(), "mesh_direct", rank));
+            CHK_RET(links[dstRank]->TxAck(subStream));
+        }
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "allgather", 0, userRank_, rankSize, rank, "rx_ack_start", "link_rx_ack",
+                links[dstRank]->GetRemoteRank(), "mesh_direct", rank));
+            CHK_RET(links[dstRank]->RxAck(subStream));
+        }
     }
 
     CHK_RET(SubRecordMain());
@@ -261,10 +312,28 @@ HcclResult AllReduceMeshDirect::RunAllGather(u32 rank, u32 rankSize, const std::
         CHK_RET(links[dstRank]->GetRemoteMem(UserMemType::OUTPUT_MEM, &remMemPtr));
         src = DeviceMem::create(static_cast<char *>(remMemPtr), slices_[dstRank].size);
         dst = userMemOut.range(slices_[dstRank].offset, slices_[dstRank].size);
-        CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dst, src, subStream,
-            links[dstRank]->GetRemoteRank(), links[dstRank]->GetLinkType()));
-        CHK_RET(links[dstRank]->TxDataSignal(subStream));
-        CHK_RET(links[dstRank]->RxDataSignal(subStream));
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "allgather", 0, userRank_, rankSize, dstRank, nullptr, nullptr,
+                links[dstRank]->GetRemoteRank(), "mesh_direct", rank));
+            TaskSemanticEventScope eventScope("rx_payload_copy_start", "link_rx_payload_copy");
+            CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dst, src, subStream,
+                links[dstRank]->GetRemoteRank(), links[dstRank]->GetLinkType()));
+        }
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "allgather", 0, userRank_, rankSize, dstRank, nullptr, nullptr,
+                links[dstRank]->GetRemoteRank(), "mesh_direct", rank));
+            TaskSemanticEventScope eventScope("tx_data_signal_start", "link_tx_data_signal");
+            CHK_RET(links[dstRank]->TxDataSignal(subStream));
+        }
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "allgather", 0, userRank_, rankSize, rank, nullptr, nullptr,
+                links[dstRank]->GetRemoteRank(), "mesh_direct", rank));
+            TaskSemanticEventScope eventScope("rx_data_signal_start", "link_rx_data_signal");
+            CHK_RET(links[dstRank]->RxDataSignal(subStream));
+        }
     }
 
     CHK_RET(SubRecordMain());

@@ -10,6 +10,7 @@
 
 #include "reduce_scatter_mesh.h"
 #include "alg_template_register.h"
+#include "task_semantic_scope.h"
 
 namespace hccl {
 ReduceScatterMesh::ReduceScatterMesh(const HcclDispatcher dispatcher)
@@ -76,13 +77,23 @@ HcclResult ReduceScatterMesh::RunReduceScatter(const std::vector<LINK> &links,
         s32 dstRank = txRankOpOrder[orderIndex];
         CHK_SMART_PTR_NULL(links[srcRank]);
         HCCL_INFO("rank[%u] will tx_ack to rank[%u]", interRank_, srcRank);
-        ret = links[srcRank]->TxAck(stream_);
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "reduce_scatter", 0, interRank_, interRankSize_, interRank_, "tx_ack_start", "link_tx_ack",
+                links[srcRank]->GetRemoteRank(), "mesh", interRank_));
+            ret = links[srcRank]->TxAck(stream_);
+        }
         CHK_PRT_RET(ret != HCCL_SUCCESS,
             HCCL_ERROR("[Run][ReduceScatter]rank[%u] tx ack to rank[%u] failed", interRank_, srcRank), ret);
         CHK_SMART_PTR_NULL(links[dstRank]);
         HCCL_INFO("rank[%u] will rx_ack from rank[%d]", interRank_, dstRank);
 
-        ret = links[dstRank]->RxAck(stream_);
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "reduce_scatter", 0, interRank_, interRankSize_, dstRank, "rx_ack_start", "link_rx_ack",
+                links[dstRank]->GetRemoteRank(), "mesh", interRank_));
+            ret = links[dstRank]->RxAck(stream_);
+        }
         CHK_PRT_RET(ret != HCCL_SUCCESS,
             HCCL_ERROR("[Run][ReduceScatter]rank[%u] rx ack from rank[%d] failed", interRank_, dstRank), ret);
         HCCL_INFO("rank:%u round[%u] send to rank:[%d], inputSlices offset[%llu]"
@@ -90,7 +101,12 @@ HcclResult ReduceScatterMesh::RunReduceScatter(const std::vector<LINK> &links,
             interRank_, round, dstRank, inputSlices[dstRank].offset, inputSlices[dstRank].size,
             scratchSlices[dstRank].offset, scratchSlices[dstRank].size);
         // 发送数据
-        ret = RunSourceReducer(links[dstRank], inputSlices[dstRank], scratchSlices[dstRank]);
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "reduce_scatter", 0, interRank_, interRankSize_, dstRank, nullptr, nullptr,
+                links[dstRank]->GetRemoteRank(), "mesh", interRank_));
+            ret = RunSourceReducer(links[dstRank], inputSlices[dstRank], scratchSlices[dstRank]);
+        }
         CHK_PRT_RET(ret != HCCL_SUCCESS,
             HCCL_ERROR("[Run][ReduceScatter]rank:%u round[%u] reducer src run failed", interRank_, round), ret);
         HCCL_INFO("rank[%u] round[%u] rx from rank[%u], inSlicesoffset[%llu] size[%llu] "\
@@ -98,7 +114,12 @@ HcclResult ReduceScatterMesh::RunReduceScatter(const std::vector<LINK> &links,
             interRank_, round, srcRank, inputSlices[interRank_].offset, inputSlices[interRank_].size,
             scratchSlices[interRank_].offset, scratchSlices[interRank_].size);
 
-        ret = RunDestRducer(links[srcRank], inputSlices[interRank_], scratchSlices[interRank_]);
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "reduce_scatter", 0, interRank_, interRankSize_, interRank_, nullptr, nullptr,
+                links[srcRank]->GetRemoteRank(), "mesh", interRank_));
+            ret = RunDestRducer(links[srcRank], inputSlices[interRank_], scratchSlices[interRank_]);
+        }
         CHK_PRT_RET(ret != HCCL_SUCCESS,
             HCCL_ERROR("[Run][ReduceScatter]rank[%u] round[%u] reducer dst run failed", interRank_, round), ret);
 
@@ -146,6 +167,9 @@ HcclResult ReduceScatterMesh::RunAsync(const u32 rank, const u32 rankSize, const
     CHK_SMART_PTR_NULL(reducerInfo_);
     if (interRankSize_ == 1) {
         if (inputMem_ != outputMem_) {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "reduce_scatter", 0, interRank_, interRankSize_, 0, "copy_start", "hccl_local_copy",
+                INVALID_VALUE_RANKID, "mesh", interRank_));
             return HcclD2DMemcpyAsync(dispatcher_, outputMem_, inputMem_, stream_);
         }
         return HCCL_SUCCESS;
@@ -193,6 +217,9 @@ HcclResult ReduceScatterMesh::RunAsync(const u32 rank, const u32 rankSize, const
         HCCL_DEBUG("rank[%u] copy result from to output[%p] offset[%llu] size[%llu] ", \
                    interRank_, outputMem_.ptr(), slices_[interRank_].offset, \
                    slices_[interRank_].size);
+        TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+            "reduce_scatter", 0, interRank_, interRankSize_, interRank_, "copy_start", "hccl_local_copy",
+            INVALID_VALUE_RANKID, "mesh", interRank_));
         HcclResult ret = HcclD2DMemcpyAsync(dispatcher_, outputMem_, src, stream_);
         CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[ReduceScatterMesh][RunAsync]rank[%u] memcpy async from mem[%p] "\
             "to ouputmem[%p] failed", rank, src.ptr(), outputMem_.ptr()), ret);
