@@ -2,6 +2,7 @@
 
 当前单机证据见 [阶段归档](../hccl/tools/diagnosis/arch-94a1ab31c3ee.md)。多机采集与异常
 测试按 [task.md](../hccl/tools/diagnosis/task.md) 推进；本文不表示这些场景已验证。
+本次 master 集成后的 Mesh 定向验收及 Ring/NHR 小回归，使用 [设备测试交接 prompt](prompts/integrated-master-device-test.md)。
 
 本文档说明如何在单机昇腾环境验证当前 step trace 迁移，包括功能正确性和开销。脚本假设从 `hccl-trace` 仓库根目录执行；如需在设备机器上运行，可以整体同步本目录、`hccl/tools/diagnosis` 以及已编译安装的 HCCL/HCOMM 产物。
 

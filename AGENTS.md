@@ -40,8 +40,9 @@ HCCL HEAD 为 `4600cb6`、HCOMM HEAD 为 `7db54477`，后续实现相对子仓 H
 这是整理开始时的本地记录。随后 fetch 确认远端 `master@d0d2904` 领先 7 个提交，另有
 `feat-standard-ring`、`feat-mesh`、`feat-NHR`、`feat-RHD`。用户批准后，本地 master 已依次
 合入远端 master、standard Ring、NHR（合并提交 `2f26033`、`360d650`、`638e94c`）。
-Mesh normal Tx/Rx 已在 `codex/fix-mesh-semantic@286ef99` 修复，待配套环境构建、设备验证及
-合入批准；工作树位于 `test/out/mesh-fix/`。RHD 弃用并保留历史引用。没有推送远端。
+Mesh normal Tx/Rx 修复 `286ef99` 已获批准，并随 `f30a90a` 快进合入 master；待配套环境
+构建和设备验证。原修复工作树位于 `test/out/mesh-fix/`。RHD 弃用并保留历史引用。
+用户已批准推送 master；设备测试交接见 [测试 prompt](test/prompts/integrated-master-device-test.md)。
 
 - 修改前检查三个仓的分支、状态和相关 diff，保留已有改动；根仓干净不代表子仓干净。
 - 调查进展时同时检查远端 heads/跟踪引用及相关分支记录，不仅检查当前 checkout。

@@ -12,7 +12,7 @@
 - 已有样例：28,502 条 semantic 全部 exact，44,008 个 execution；62 项 Python 单测通过。
   这是已有单机样例的结论，不代表当前生产端已重新构建采集或多机已支持。
 - 已知边界：28 个 FFts single、8 个 local Notify resource boundary；保留解释，不补猜测边。
-- 已集成：远端 master 的提前返回语义修复、覆盖矩阵，以及 standard Ring/NHR 插桩。
+- 已集成：远端 master 的提前返回语义修复、覆盖矩阵，以及 standard Ring/NHR/Mesh 插桩和 Mesh normal Tx/Rx 修复。
   用户确认 NHR/Mesh/standard Ring 已测试；RHD 已弃用。上级目录留存
   NHR/Mesh/Ring resource HTML，已核对并记录其覆盖边界，未提供的测试版本信息保持未回填。
 - 当前缺口：分支成果集成、Ring 测试强制、resource 证据增强、多机输入与关系、自动诊断、异常测试。
@@ -24,12 +24,13 @@
 | `origin/master@d0d2904` | 已同步，合并提交 `2f26033` |
 | `feat-standard-ring@7dadcea` | 已合入，合并提交 `360d650` |
 | `feat-NHR@29ab3cd` | 已合入，合并提交 `638e94c` |
-| `feat-mesh@d870111` | normal Tx/Rx 错位已在 `codex/fix-mesh-semantic@286ef99` 修复；待构建、针对性设备验证与合入批准 |
+| `feat-mesh@d870111` + 修复 `286ef99` | 已获批准，随 `f30a90a` 快进合入；待构建和针对性设备验证 |
 | `feat-RHD@e3e368f` | 用户决定弃用；保留历史，不合入、不安排验证 |
 
-本次已按批准顺序同步 master→standard Ring→NHR；文档冲突保留简洁计划和分支实施记录。
+本次已按批准顺序同步 master→standard Ring→NHR→修复后的 Mesh；文档冲突保留简洁计划和分支实施记录。
 缺少原始 DB 不要求重跑完整矩阵，HTML 中未覆盖项继续保留。
 语义配对的最终验证与 Git 无冲突是两个结论，不能互相替代。
+设备测试按 [交接 prompt](../../../test/prompts/integrated-master-device-test.md) 执行并返回原始证据。
 
 ## 2. 实施约定
 

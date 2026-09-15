@@ -5,14 +5,15 @@
 用户已批准同步远端 master、合入 standard Ring/NHR，并要求修复 Mesh、弃用 RHD。
 本地根仓 master 已依次完成合并：`2f26033`（远端 master）、`360d650`（standard Ring）、
 `638e94c`（NHR）。本轮整理文档先保存为 `c7ae7c7`；合并中的 task/spec 冲突保留精简计划，
-结合远端事实更新，算法实施记录仍在分支说明及下文。没有推送。
+结合远端事实更新，算法实施记录仍在分支说明及下文。
 
 Mesh 已在 `codex/fix-mesh-semantic@286ef99` 修复；该分支基于已集成主线，通过 `7d89a0c`
 合入原 Mesh。normal Tx/Rx 沿用 Ring 的 signal/data 分开标注，仅改一个 C++ 文件，公共
 scope、transport、atomic/direct 和 Python 消费端未变。对照 transport 完成提交顺序与参数
 检查，`git diff --check` 通过；本机没有 CANN 构建环境，未声称 C++ 构建或设备验证通过。
 工作树在 `test/out/mesh-fix/`，其中 `文档/Mesh语义修复说明.md` 记录针对性设备验收步骤；
-合入 master 仍待批准。
+用户随后批准 Mesh 合入及推送，master 已快进到 `f30a90a`，包含原 Mesh 和修复 `286ef99`。
+设备测试尚未执行，交接见 [测试 prompt](../../../test/prompts/integrated-master-device-test.md)。
 
 RHD 弃用，保留历史引用，不安排测试或集成。以下为合并前调查快照，其中待批清单以本节
 最新决定为准。

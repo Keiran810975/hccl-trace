@@ -1,7 +1,8 @@
 # Mesh normal AllGather 语义修复
 
 更新：2026-09-15。修复分支 `codex/fix-mesh-semantic` 基于已集成 standard Ring/NHR 的
-master，合入原 `feat-mesh@d870111` 后修改。Mesh 合入 master 仍待用户批准。
+master，合入原 `feat-mesh@d870111` 后修改。修复提交 `286ef99` 已获用户批准，随
+`f30a90a` 快进合入 master；设备验证待执行，详见 [测试 prompt](../test/prompts/integrated-master-device-test.md)。
 
 ## 问题与改动
 
