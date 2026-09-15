@@ -40,15 +40,16 @@ private:
     HcclResult SimpleCheck(const u32 rank, const u32 rankSize, const std::vector<LINK> &links);
 
     HcclResult SdmaRx(LINK &linkLeft, LINK &linkRight, InterServerAlgoStep &stepInfo,
-        const std::vector<LINK> &links);
+        u32 rankSize, const std::vector<LINK> &links);
     HcclResult RdmaTxRx(LINK &linkLeft, LINK &linkRight, InterServerAlgoStep &stepInfo,
-        const std::vector<LINK> &links);
+        u32 rankSize, const std::vector<LINK> &links);
 
     HcclResult RunReduceNHROneshot(const u32 rank, const u32 rankSize, const std::vector<LINK> &links);
 
     HcclResult GetStepInfo(u32 step, u32 nSteps, u32 rank, u32 rankSize, InterServerAlgoStep &stepInfo) override;
 
-    HcclResult ExecuteBarrier(const std::shared_ptr<Transport> &preLink, const std::shared_ptr<Transport> &aftLink);
+    HcclResult ExecuteBarrier(const std::shared_ptr<Transport> &preLink, const std::shared_ptr<Transport> &aftLink,
+        const InterServerAlgoStep &stepInfo, u32 rankSize);
 
     u64 reduceAttr_; /* 0x1:表示data_type + reduce_type支持inlinereduce  */
 

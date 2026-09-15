@@ -12,6 +12,7 @@
 #include "alg_template_register.h"
 #include "reduce_scatter_nhr.h"
 #include "all_gather_nhr.h"
+#include "task_semantic_scope.h"
 
 namespace hccl {
 AllReduceNHR::AllReduceNHR(const HcclDispatcher dispatcher) : NHRBase(dispatcher)
@@ -39,6 +40,9 @@ HcclResult AllReduceNHR::RunAsync(const u32 rank, const u32 rankSize, const std:
     // 如果ranksize为1, inline reduce和普通跨片reduce操作一致，从input->output
     if (rankSize == 1) {
         if (inputMem_ != outputMem_) {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "allreduce_executor", 0, rank, rankSize, 0, "copy_start", "hccl_local_copy",
+                INVALID_VALUE_RANKID, "nhr", rank));
             ret = HcclD2DMemcpyAsync(dispatcher_, outputMem_, inputMem_, stream_);
             CHK_PRT_RET(ret != HCCL_SUCCESS,
                 HCCL_ERROR("[AllReduceNHR][RunAsync] rank[%u] memcpy async failed", rank), ret);

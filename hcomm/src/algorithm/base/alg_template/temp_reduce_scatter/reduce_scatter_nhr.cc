@@ -10,6 +10,7 @@
 
 #include "reduce_scatter_nhr.h"
 #include "alg_template_register.h"
+#include "task_semantic_scope.h"
 
 namespace hccl {
 
@@ -44,6 +45,9 @@ HcclResult ReduceScatterNHR::RunAsync(const u32 rank, const u32 rankSize, const 
     // 判断rank_size == 1
     if (rankSize == 1) {
         if (inputMem_ != outputMem_) {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "reduce_scatter", 0, rank, rankSize, 0, "copy_start", "hccl_local_copy",
+                INVALID_VALUE_RANKID, "nhr", rank));
             return HcclD2DMemcpyAsync(dispatcher_, outputMem_, inputMem_, stream_);
         }
         return HCCL_SUCCESS;
@@ -194,12 +198,15 @@ HcclResult ReduceScatterNHR::InlineReducer(const LINK &linkLeft, const std::vect
     CHK_RET(linkLeft->GetRemoteMem(UserMemType::INPUT_MEM, &remoteMem));
     for (ReducerMemoryInfo reduceMem : rxReduceMems) {
         const u64 dataBytes = reduceMem.remoteRcvTemp.size();
-        CHK_RET(
-            HcclReduceAsync(dispatcher_, static_cast<s8 *>(remoteMem) + reduceMem.remoteMemOffset,
-            dataBytes / SIZE_TABLE[dataType_], dataType_, reductionOp_, stream_, reduceMem.localsrc.ptr(),
-            linkLeft->GetRemoteRank(), linkLeft->GetLinkType(), INLINE_REDUCE_BIT));
+        {
+            TaskSemanticEventScope eventScope("rx_payload_reduce_start", "link_rx_payload_reduce");
+            CHK_RET(HcclReduceAsync(dispatcher_, static_cast<s8 *>(remoteMem) + reduceMem.remoteMemOffset,
+                dataBytes / SIZE_TABLE[dataType_], dataType_, reductionOp_, stream_, reduceMem.localsrc.ptr(),
+                linkLeft->GetRemoteRank(), linkLeft->GetLinkType(), INLINE_REDUCE_BIT));
+        }
 
         if (reduceMem.localsrc != reduceMem.localdst) {
+            TaskSemanticEventScope eventScope("rx_payload_copy_start", "link_rx_payload_copy");
             ret = HcclD2DMemcpyAsync(dispatcher_, reduceMem.localdst, reduceMem.localsrc, stream_);
             CHK_PRT_RET(ret != HCCL_SUCCESS,
                 HCCL_ERROR("[Reducer][Run]memcpy_async localSrc[%p] localDst[%p] failed", reduceMem.localsrc.ptr(),
@@ -259,12 +266,16 @@ HcclResult ReduceScatterNHR::TbeReduceRx(const LINK &linkLeft, std::vector<Slice
         HCCL_DEBUG("[ReduceScatterNHR][RunDestReducer] rcv offset[%llu], size[%llu] ,then reduce with "
             "offset[%llu] size[%llu] ",
             rxSlicestemp[i].offset, rxSlicestemp[i].size, rxSlices[i].offset, rxSlices[i].size);
-        CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dstMemScratch, srcMem, stream_, linkLeft->GetRemoteRank(), // left的inputMem拷到本端的scratchMem
-                        linkLeft->GetLinkType()));
+        {
+            TaskSemanticEventScope eventScope("rx_payload_copy_start", "link_rx_payload_copy");
+            CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dstMemScratch, srcMem, stream_, linkLeft->GetRemoteRank(), // left的inputMem拷到本端的scratchMem
+                            linkLeft->GetLinkType()));
+        }
         rxWithReduceMems.emplace_back(RxWithReduceMemoryInfo{ UserMemType::INPUT_MEM, baseOffset_ + rxSlices[i].offset,
             dstMemScratch.ptr(), dstMemScratch.size(), dstMemScratch.ptr(), dstMem.ptr(), dataCount });
     }
     for (RxWithReduceMemoryInfo rxReduceMem : rxWithReduceMems) {
+        TaskSemanticEventScope eventScope("rx_payload_reduce_start", "link_rx_payload_reduce");
         CHK_RET(HcclReduceAsync(dispatcher_, rxReduceMem.reduceSrc, rxReduceMem.reduceDataCount, dataType_, // 本端scratchMem localReduce到 本端inputMem
             reductionOp_, stream_, rxReduceMem.reduceDst, INVALID_VALUE_RANKID, LinkType::LINK_ONCHIP,
             reduceAttr_));
@@ -288,13 +299,17 @@ HcclResult ReduceScatterNHR::TbeReduceRxLastStep(const LINK &linkLeft, InterServ
         HCCL_DEBUG("[ReduceScatterNHR][RunReduceScatterNHR] final reduce rxSliceIdx[%u] will reduce with "
             "inputMem_ offset[%llu] to ouput_mem_ offset[%llu] size[%llu]", rxSliceIdx,
             inputSlices[rxSliceIdx].offset, outputSlices[rxSliceIdx].offset, outputSlices[rxSliceIdx].size);
-        CHK_RET(HcclD2DMemcpyAsync(dispatcher_, tmpMem, srcMemRemote, stream_, linkLeft->GetRemoteRank(), // left的inputMem拷到本端的scratchMem
-                        linkLeft->GetLinkType()));
+        {
+            TaskSemanticEventScope eventScope("rx_payload_copy_start", "link_rx_payload_copy");
+            CHK_RET(HcclD2DMemcpyAsync(dispatcher_, tmpMem, srcMemRemote, stream_, linkLeft->GetRemoteRank(), // left的inputMem拷到本端的scratchMem
+                            linkLeft->GetLinkType()));
+        }
         DeviceMem reduceSrc = (srcMem == dstMem) ? tmpMem : srcMem;
         rxWithReduceMems.emplace_back(RxWithReduceMemoryInfo{ UserMemType::INPUT_MEM, baseOffset_ + inputSlices[rxSliceIdx].offset,
             tmpMem.ptr(), tmpMem.size(), reduceSrc.ptr(), dstMem.ptr(), dataCount });
     }
     for (RxWithReduceMemoryInfo rxReduceMem : rxWithReduceMems) {
+        TaskSemanticEventScope eventScope("rx_payload_reduce_start", "link_rx_payload_reduce");
         CHK_RET(HcclReduceAsync(dispatcher_, rxReduceMem.reduceSrc, rxReduceMem.reduceDataCount, dataType_, // 本端inputMem localReduce到 本端outputMem(之前拷到本端scratch的数据呢？)
             reductionOp_, stream_, rxReduceMem.reduceDst, INVALID_VALUE_RANKID, LinkType::LINK_ONCHIP,
             reduceAttr_));
@@ -405,34 +420,124 @@ HcclResult ReduceScatterNHR::RunReduceScatterNHR(const u32 rank, const u32 rankS
             "nSlices[%u]", rank, rankSize, stepInfo.fromRank, stepInfo.toRank, step, nSteps, stepInfo.nSlices);
 
         if (linkLeft->IsSpInlineReduce() && linkRight->IsSpInlineReduce()) { // SDMA
-            CHK_RET(linkRight->TxAck(stream_));
-            CHK_RET(linkLeft->RxAck(stream_));
-            CHK_RET(SdmaReducer(nSteps, linkLeft, stepInfo, inputSlices, outputSlices));
-            CHK_RET(linkLeft->TxDataSignal(stream_)); // 告知left我读完了
-            CHK_RET(linkRight->RxDataSignal(stream_)); // 等right读完
+            {
+                TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                    "reduce_scatter", step, rank, rankSize, stepInfo.txSliceIdxs.front(),
+                    "tx_ack_start", "link_tx_ack", linkRight->GetRemoteRank(), "nhr", rank));
+                CHK_RET(linkRight->TxAck(stream_));
+            }
+            {
+                TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                    "reduce_scatter", step, rank, rankSize, stepInfo.rxSliceIdxs.front(),
+                    "rx_ack_start", "link_rx_ack", linkLeft->GetRemoteRank(), "nhr", rank));
+                CHK_RET(linkLeft->RxAck(stream_));
+            }
+            {
+                TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                    "reduce_scatter", step, rank, rankSize, stepInfo.rxSliceIdxs.front(), nullptr, nullptr,
+                    linkLeft->GetRemoteRank(), "nhr", rank));
+                CHK_RET(SdmaReducer(nSteps, linkLeft, stepInfo, inputSlices, outputSlices));
+            }
+            {
+                TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                    "reduce_scatter", step, rank, rankSize, stepInfo.rxSliceIdxs.front(),
+                    "tx_data_signal_start", "link_tx_data_signal", linkLeft->GetRemoteRank(), "nhr", rank));
+                CHK_RET(linkLeft->TxDataSignal(stream_)); // 告知left我读完了
+            }
+            {
+                TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                    "reduce_scatter", step, rank, rankSize, stepInfo.txSliceIdxs.front(),
+                    "rx_data_signal_start", "link_rx_data_signal", linkRight->GetRemoteRank(), "nhr", rank));
+                CHK_RET(linkRight->RxDataSignal(stream_)); // 等right读完
+            }
         } else { // RDMA
-            CHK_RET(linkLeft->TxAck(stream_));
-            CHK_RET(linkRight->RxAck(stream_));
+            {
+                TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                    "reduce_scatter", step, rank, rankSize, stepInfo.rxSliceIdxs.front(),
+                    "tx_ack_start", "link_tx_ack", linkLeft->GetRemoteRank(), "nhr", rank));
+                CHK_RET(linkLeft->TxAck(stream_));
+            }
+            {
+                TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                    "reduce_scatter", step, rank, rankSize, stepInfo.txSliceIdxs.front(),
+                    "rx_ack_start", "link_rx_ack", linkRight->GetRemoteRank(), "nhr", rank));
+                CHK_RET(linkRight->RxAck(stream_));
+            }
             // tx
-            ret = RunSourceSender(linkRight, stepInfo, inputSlices, outputSlices);
+            {
+                TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                    "reduce_scatter", step, rank, rankSize, stepInfo.txSliceIdxs.front(), nullptr, nullptr,
+                    linkRight->GetRemoteRank(), "nhr", rank));
+                ret = RunSourceSender(linkRight, stepInfo, inputSlices, outputSlices);
+            }
             CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[ReduceScatterNHR][RunReduceScatterNHR] Tx failed"), ret);
 
             // rx
-            if (step == (nSteps - 1)) {
-                ret = RunDestReducerLastStep(linkLeft, stepInfo, inputSlices, outputSlices);
-            } else {
-                ret = RunDestReducer(linkLeft, stepInfo, inputSlices, outputSlices);
+            {
+                TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                    "reduce_scatter", step, rank, rankSize, stepInfo.rxSliceIdxs.front(), nullptr, nullptr,
+                    linkLeft->GetRemoteRank(), "nhr", rank));
+                if (step == (nSteps - 1)) {
+                    ret = RunDestReducerLastStep(linkLeft, stepInfo, inputSlices, outputSlices);
+                } else {
+                    ret = RunDestReducer(linkLeft, stepInfo, inputSlices, outputSlices);
+                }
             }
 
             CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[ReduceScatterNHR][RunReduceScatterNHR] Rx failed"), ret);
-            ret = linkLeft->PostFinAck(stream_);
+            {
+                TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                    "reduce_scatter", step, rank, rankSize, stepInfo.rxSliceIdxs.front(),
+                    "tx_data_signal_start", "link_tx_data_signal", linkLeft->GetRemoteRank(), "nhr", rank));
+                ret = linkLeft->PostFinAck(stream_);
+            }
             CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[ReduceScatterNHR][RunReduceScatterNHR] PostFinAck failed"), ret);
 
-            ret = linkRight->WaitFinAck(stream_);
+            {
+                TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                    "reduce_scatter", step, rank, rankSize, stepInfo.txSliceIdxs.front(),
+                    "rx_data_signal_start", "link_rx_data_signal", linkRight->GetRemoteRank(), "nhr", rank));
+                ret = linkRight->WaitFinAck(stream_);
+            }
             CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[ReduceScatterNHR][RunReduceScatterNHR] WaitFinAck failed"), ret);
 
             if (barrierSwitchOn_) {
-                CHK_RET(ExecuteBarrier(linkLeft, linkRight));
+                {
+                    TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                        "reduce_scatter", step, rank, rankSize, stepInfo.rxSliceIdxs.front(),
+                        "tx_ack_start", "link_tx_ack", linkLeft->GetRemoteRank(), "nhr", rank));
+                    CHK_RET(linkLeft->TxAck(stream_));
+                }
+                {
+                    TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                        "reduce_scatter", step, rank, rankSize, stepInfo.txSliceIdxs.front(),
+                        "rx_ack_start", "link_rx_ack", linkRight->GetRemoteRank(), "nhr", rank));
+                    CHK_RET(linkRight->RxAck(stream_));
+                }
+                {
+                    TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                        "reduce_scatter", step, rank, rankSize, stepInfo.txSliceIdxs.front(),
+                        "tx_data_signal_start", "link_tx_data_signal", linkRight->GetRemoteRank(), "nhr", rank));
+                    CHK_RET(linkRight->TxDataSignal(stream_));
+                }
+                {
+                    TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                        "reduce_scatter", step, rank, rankSize, stepInfo.rxSliceIdxs.front(),
+                        "rx_data_signal_start", "link_rx_data_signal", linkLeft->GetRemoteRank(), "nhr", rank));
+                    CHK_RET(linkLeft->RxDataSignal(stream_));
+                }
+                {
+                    TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                        "reduce_scatter", step, rank, rankSize, stepInfo.rxSliceIdxs.front(),
+                        "tx_data_signal_start", "link_tx_data_signal", linkLeft->GetRemoteRank(), "nhr", rank));
+                    CHK_RET(linkLeft->PostFinAck(stream_));
+                }
+                {
+                    TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                        "reduce_scatter", step, rank, rankSize, stepInfo.txSliceIdxs.front(),
+                        "rx_data_signal_start", "link_rx_data_signal", linkRight->GetRemoteRank(), "nhr", rank));
+                    CHK_RET(linkRight->WaitFinAck(stream_));
+                }
             }
         }
     }
