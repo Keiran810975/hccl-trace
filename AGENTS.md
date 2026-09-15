@@ -19,7 +19,7 @@ NHR/Mesh/Ring HTML；可复核内容和
 2. [spec.md](hccl/tools/diagnosis/spec.md)：实现合同及已知限制。
 3. [阶段归档](hccl/tools/diagnosis/arch-94a1ab31c3ee.md)：分支、提交、验证证据和历史入口。
 4. [诊断 README](hccl/tools/diagnosis/README.md)、[依赖关系说明](文档/依赖关系的定义与构建.md)：工具用法与构图规则。
-5. [分支调查与待批合入清单](hccl/tools/diagnosis/branch-review-2026-09-15.md)：远端实现、验证边界及合并建议。
+5. [分支调查与集成记录](hccl/tools/diagnosis/branch-review-2026-09-15.md)：远端实现、验证边界及集成状态。
 
 `arch-*.md`、`archive/` 和早期迁移方案是历史材料，其中的任务、边类型、统计和设计建议
 不自动成为当前要求。完成记录归档，活动计划只保留下一步。
@@ -40,7 +40,8 @@ HCCL HEAD 为 `4600cb6`、HCOMM HEAD 为 `7db54477`，后续实现相对子仓 H
 这是整理开始时的本地记录。随后 fetch 确认远端 `master@d0d2904` 领先 7 个提交，另有
 `feat-standard-ring`、`feat-mesh`、`feat-NHR`、`feat-RHD`。用户批准后，本地 master 已依次
 合入远端 master、standard Ring、NHR（合并提交 `2f26033`、`360d650`、`638e94c`）。
-Mesh 在独立修复分支处理，合入仍需批准；RHD 弃用并保留历史引用。没有推送远端。
+Mesh normal Tx/Rx 已在 `codex/fix-mesh-semantic@286ef99` 修复，待配套环境构建、设备验证及
+合入批准；工作树位于 `test/out/mesh-fix/`。RHD 弃用并保留历史引用。没有推送远端。
 
 - 修改前检查三个仓的分支、状态和相关 diff，保留已有改动；根仓干净不代表子仓干净。
 - 调查进展时同时检查远端 heads/跟踪引用及相关分支记录，不仅检查当前 checkout。
@@ -65,7 +66,7 @@ msprof consolidated DB --------------------------------+-> merged.csv
 |---|---|
 | `hcomm/src/common/debug/profiling/` | 语义开关、捕获、上报及 FFts graph correlation |
 | `hcomm/src/algorithm/base/alg_template/component/` | RAII scope、Sender/Reducer 事件 |
-| `hcomm/src/algorithm/base/alg_template/temp_reduce_scatter/`、`temp_all_gather/` | 当前 concurrent-direct RS/AG 插桩 |
+| `hcomm/src/algorithm/base/alg_template/temp_reduce_scatter/`、`temp_all_gather/` | concurrent-direct、standard Ring、NHR 等算法插桩 |
 | `hccl/tools/diagnosis/schema.py`、`parse_plog.py`、`parse_msprof_db.py` | 数据模型及事实源解析 |
 | `hccl/tools/diagnosis/merge_timeline.py`、`validate_trace.py` | 精确关联、语义质量检查 |
 | `hccl/tools/diagnosis/dependency_model.py`、`visualize_dependency_graph.py` | 稳定身份、execution graph 与双层 artifact 导出 |

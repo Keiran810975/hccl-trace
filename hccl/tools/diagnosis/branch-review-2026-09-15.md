@@ -7,8 +7,15 @@
 `638e94c`（NHR）。本轮整理文档先保存为 `c7ae7c7`；合并中的 task/spec 冲突保留精简计划，
 结合远端事实更新，算法实施记录仍在分支说明及下文。没有推送。
 
-Mesh 在 `codex/fix-mesh-semantic` 独立修复，另行批准后合入。RHD 弃用，保留历史引用，
-不安排测试或集成。以下为合并前调查快照，其中待批清单以本节最新决定为准。
+Mesh 已在 `codex/fix-mesh-semantic@286ef99` 修复；该分支基于已集成主线，通过 `7d89a0c`
+合入原 Mesh。normal Tx/Rx 沿用 Ring 的 signal/data 分开标注，仅改一个 C++ 文件，公共
+scope、transport、atomic/direct 和 Python 消费端未变。对照 transport 完成提交顺序与参数
+检查，`git diff --check` 通过；本机没有 CANN 构建环境，未声称 C++ 构建或设备验证通过。
+工作树在 `test/out/mesh-fix/`，其中 `文档/Mesh语义修复说明.md` 记录针对性设备验收步骤；
+合入 master 仍待批准。
+
+RHD 弃用，保留历史引用，不安排测试或集成。以下为合并前调查快照，其中待批清单以本节
+最新决定为准。
 
 更新：2026-09-15。目标分支是 **hccl-trace 根仓的 master**，不是 HCOMM 上游的 master。
 本次已读取远端 heads 并 fetch 根仓远端跟踪引用；没有切换分支、合并、提交或推送。

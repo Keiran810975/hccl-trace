@@ -38,7 +38,9 @@ standard Ring, Mesh, NHR and RHD implementations, and its master includes the
 captured-semantic early-return fix. Do not classify them as unimplemented based
 on this old checkout. The approved remote master, standard Ring and NHR merges
 are now integrated into the root master (`2f26033`, `360d650`, `638e94c`).
-Mesh is being fixed separately; its merge still needs approval. RHD is abandoned
+Mesh normal Tx/Rx is fixed on `codex/fix-mesh-semantic@286ef99`, in the root
+`test/out/mesh-fix` worktree; build/device validation and merge approval remain.
+RHD is abandoned
 by user decision; retain its history but exclude it from development plans.
 The user confirms NHR/Mesh/standard Ring were tested.
 Parent-directory HTML captures add
