@@ -330,7 +330,9 @@ task-level exact 与同步关系证据仍是两个不同层次。
 
 | Event | Semantic | 含义 |
 |---|---|---|
-| `copy_start` | `hccl_local_copy` | 本地 D2D copy。 |
+| `copy_start` | `user_to_ccl_copy` | user buffer 搬入 CCL buffer。 |
+| `copy_start` | `ccl_to_user_copy` | CCL buffer 搬回 user buffer。 |
+| `copy_start` | `hccl_local_copy` | 不跨 user/CCL 边界的本地 D2D copy，或旧数据中未细分方向的 copy。 |
 | `tx_ack_start` | `link_tx_ack` | 向对端发送 ACK。 |
 | `rx_ack_start` | `link_rx_ack` | 等待/接收对端 ACK。 |
 | `tx_payload_start` | `link_tx_payload` | 发送 payload。 |

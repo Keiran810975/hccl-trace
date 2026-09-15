@@ -10,6 +10,7 @@
 
 #include "all_gather_ring.h"
 #include "alg_template_register.h"
+#include "task_semantic_scope.h"
 
 namespace hccl {
 AllGatherRing::AllGatherRing(const HcclDispatcher dispatcher) : AlgTemplateBase(dispatcher)
@@ -29,7 +30,19 @@ HcclResult AllGatherRing::TxVector(const LINK &link, const std::vector<Slice> &t
         txMems.emplace_back(TxMemoryInfo{UserMemType::OUTPUT_MEM, txSlice.offset + baseOffset_,
             srcMem.ptr(), txSlice.size});
     }
-    CHK_RET(link->TxAsync(txMems, stream_));
+    if (!link->IsSpInlineReduce()) {
+        TaskSemanticEventScope semanticScope("tx_payload_start", "link_tx_payload");
+        CHK_RET(link->TxAsync(txMems, stream_));
+        return HCCL_SUCCESS;
+    }
+    for (const TxMemoryInfo &txMem : txMems) {
+        TaskSemanticEventScope semanticScope("tx_payload_start", "link_tx_payload");
+        CHK_RET(link->TxData(txMem.dstMemType, txMem.dstOffset, txMem.src, txMem.len, stream_));
+    }
+    {
+        TaskSemanticEventScope semanticScope("tx_data_signal_start", "link_tx_data_signal");
+        CHK_RET(link->TxDataSignal(stream_));
+    }
     HCCL_DEBUG("[AllGatherRing]TxVector for txMems success");
     return HCCL_SUCCESS;
 }
@@ -44,7 +57,19 @@ HcclResult AllGatherRing::RxVector(const LINK &link, const std::vector<Slice> &r
         rxMems.emplace_back(RxMemoryInfo{UserMemType::OUTPUT_MEM, rxSlice.offset + baseOffset_,
             dstMem.ptr(), rxSlice.size});
     }
-    CHK_RET(link->RxAsync(rxMems, stream_));
+    if (!link->IsSpInlineReduce()) {
+        TaskSemanticEventScope semanticScope("rx_payload_copy_start", "link_rx_payload_copy");
+        CHK_RET(link->RxAsync(rxMems, stream_));
+        return HCCL_SUCCESS;
+    }
+    {
+        TaskSemanticEventScope semanticScope("rx_data_signal_start", "link_rx_data_signal");
+        CHK_RET(link->RxDataSignal(stream_));
+    }
+    for (const RxMemoryInfo &rxMem : rxMems) {
+        TaskSemanticEventScope semanticScope("rx_payload_copy_start", "link_rx_payload_copy");
+        CHK_RET(link->RxData(rxMem.srcMemType, rxMem.srcOffset, rxMem.dst, rxMem.len, stream_));
+    }
     return HCCL_SUCCESS;
 }
 
@@ -75,6 +100,9 @@ HcclResult AllGatherRing::RunAsync(const u32 rank, const u32 rankSize, const std
 
     if (rankSize == 1) {
         if (inputMem_ != outputMem_) {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "allgather", 0, rank, rankSize, 0, "copy_start", "hccl_local_copy",
+                INVALID_VALUE_RANKID, "ring", rank));
             CHK_RET(HcclD2DMemcpyAsync(dispatcher_, outputMem_, inputMem_, stream_));
         }
         return HCCL_SUCCESS;
@@ -121,6 +149,9 @@ HCCL_DEBUG("[AllGatherRing][RunAsync] AllGather Ring begins");
     if (inputMem_ != outputMem_) {
         DeviceMem dst = outputMem_.range(slices_[rank].offset, slices_[rank].size);
         DeviceMem src = inputMem_.range(inputSlices[rank].offset, inputSlices[rank].size);
+        TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+            "allgather", 0, rank, rankSize, rank, "copy_start", "hccl_local_copy",
+            INVALID_VALUE_RANKID, "ring", rank));
         CHK_RET(HcclD2DMemcpyAsync(dispatcher_, dst, src, stream_));
     }
 
@@ -160,12 +191,22 @@ HcclResult AllGatherRing::RunAllGather(u32 rank, u32 rankSize, const std::vector
     for (u32 i = 0; i < rankSize - 1; i++) {
         HCCL_DEBUG("rank[%u] round[%u] will tx_ack  outputslice[%u].offset is[%llu] size[%llu]",
             rank, i, rxSliceIndex, outputSlices[rxSliceIndex].offset, outputSlices[rxSliceIndex].size);
-        CHK_RET(linkLeft_->TxAck(stream_));
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "allgather", i, rank, rankSize, rxSliceIndex, "tx_ack_start", "link_tx_ack",
+                linkLeft_->GetRemoteRank(), "ring", rank));
+            CHK_RET(linkLeft_->TxAck(stream_));
+        }
 
         // reduce目的操作
         HCCL_DEBUG("rank[%u] round[%u] will rx ack because outputSlices[%u] size[%llu] ", rank, \
             i, txSliceIndex, outputSlices[txSliceIndex].size);
-        CHK_RET(linkRight_->RxAck(stream_));
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "allgather", i, rank, rankSize, txSliceIndex, "rx_ack_start", "link_rx_ack",
+                linkRight_->GetRemoteRank(), "ring", rank));
+            CHK_RET(linkRight_->RxAck(stream_));
+        }
 
         std::vector<Slice> txSegsSlice;
         std::vector<Slice> rxSegsSlice;
@@ -173,7 +214,12 @@ HcclResult AllGatherRing::RunAllGather(u32 rank, u32 rankSize, const std::vector
             txSegsSlice.push_back(outputSlices[txSliceIndex * sliceSize + j]);
             rxSegsSlice.push_back(outputSlices[rxSliceIndex * sliceSize + j]);
         }
-        ret = TxVector(linkRight_, txSegsSlice);
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "allgather", i, rank, rankSize, txSliceIndex, nullptr, nullptr,
+                linkRight_->GetRemoteRank(), "ring", rank));
+            ret = TxVector(linkRight_, txSegsSlice);
+        }
         CHK_PRT_RET(ret != HCCL_SUCCESS,
             HCCL_ERROR("[Run][AllGather]rank[%u] round[%u] Right Link tx outputSlices[%u] "\
                 "Failed", rank, i, txSliceIndex), ret);
@@ -181,7 +227,12 @@ HcclResult AllGatherRing::RunAllGather(u32 rank, u32 rankSize, const std::vector
         // reduce源操作
         HCCL_DEBUG("rank[%u]  round[%u] rx data outputSlices[%u] offset[%llu] size[%llu]", \
             rank, i, rxSliceIndex, outputSlices[rxSliceIndex].offset, outputSlices[rxSliceIndex].size);
-        ret = RxVector(linkLeft_, rxSegsSlice);
+        {
+            TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
+                "allgather", i, rank, rankSize, rxSliceIndex, nullptr, nullptr,
+                linkLeft_->GetRemoteRank(), "ring", rank));
+            ret = RxVector(linkLeft_, rxSegsSlice);
+        }
         CHK_PRT_RET(ret != HCCL_SUCCESS,
             HCCL_ERROR("[Run][AllGather]rank[%u] round[%u]  Left Link rx outputSlices[%u] "\
                 "Failed", rank, i, rxSliceIndex), ret);
