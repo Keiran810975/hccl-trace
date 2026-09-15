@@ -1198,10 +1198,10 @@ PROFILER_TRACE_EX
 
 1. **测试补丁改变生产算法选择。** 两处 `[TEST PATCH]` 会强制 910B 进入 ring 路径，
    必须在发布前撤回或移入独立测试控制面。
-2. **旧本地的提前返回窗口，远端 master 已修复。**
-   本地 `94a1ab3` 中 TaskData 可能已消费 one-shot，而 `Run()` 在 OP_BASE、未订阅、
-   非 capture 路径提前返回。远端 `9eedf27` 已使用 `ReportCapturedTaskSemantic()` 兑现
-   快照；后续同步并补针对性回归，不重复实现。FFTS callback 仍需 msprof 订阅触发。
+2. **提前返回导致语义丢失的窗口已修复并集成。**
+   `9eedf27` 使用 `ReportCapturedTaskSemantic()` 兑现 TaskData 快照；OP_BASE、未订阅、
+   非 capture 路径开启 trace 时仍输出 semantic，正常路径共用 submit timestamp。
+   针对性回归归入 NEXT-001。FFTS callback 仍需 msprof 订阅触发。
 
 ### P1：正确性与精确关联
 

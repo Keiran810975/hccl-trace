@@ -220,14 +220,36 @@ HcclResult TaskProfiling::Run(const StepData &stepData)
     return HCCL_SUCCESS;
 }
 
+HcclResult TaskProfiling::ReportCapturedTaskSemantic(const TaskData &taskData, u64 submitTs) const
+{
+    const TaskSemanticTraceInfo *semanticInfo =
+        taskData.hasSemanticTraceInfo ? &taskData.semanticTraceInfo : nullptr;
+    TaskSemanticTraceInfo enrichedInfo;
+    if (semanticInfo != nullptr) {
+        enrichedInfo = *semanticInfo;
+        enrichedInfo.submitTs = submitTs;
+        if (taskData.taskType == TaskType::TASK_NOTIFY_RECORD || taskData.taskType == TaskType::TASK_NOTIFY_WAIT) {
+            enrichedInfo.notifyId = taskData.Notify.notifyID;
+            enrichedInfo.notifyStage = taskData.Notify.stage;
+        }
+        semanticInfo = &enrichedInfo;
+    }
+    return ReportTaskSemanticTrace(deviceLogicId_, taskData.semanticStreamID, taskData.taskID,
+        taskData.taskType, semanticInfo, taskData.GetFftsCtxId());
+}
+
 HcclResult TaskProfiling::Run(const TaskData &taskData, bool isCapture)
 {
     HCCLReportData hcclReportData{};
     auto &profilingManager = hccl::ProfilingManager::Instance();
-    HcclResult is_subscribe = profilingManager.GetAddtionInfoState();
-    if (is_subscribe && GetWorkflowMode() == HcclWorkflowMode::HCCL_WORKFLOW_MODE_OP_BASE &&
-    !isCapture) {
-        return HCCL_SUCCESS;
+    const bool additionInfoEnabled = profilingManager.GetAddtionInfoState() == HCCL_SUCCESS;
+    if (!additionInfoEnabled && GetWorkflowMode() == HcclWorkflowMode::HCCL_WORKFLOW_MODE_OP_BASE &&
+        !isCapture) {
+        if (!IsTaskSemanticTraceEnabled()) {
+            return HCCL_SUCCESS;
+        }
+        const u64 submitTs = hrtMsprofSysCycleTime();
+        return ReportCapturedTaskSemantic(taskData, submitTs);
     }
     std::unique_lock<std::mutex> lock(mutex_);
 
@@ -265,21 +287,7 @@ HcclResult TaskProfiling::Run(const TaskData &taskData, bool isCapture)
         hcclReportData.tag.c_str(), hcclReportData.profInfo.cclTag, hcclReportData.groupName.c_str(),
         hcclReportData.profInfo.groupName);
 
-    const TaskSemanticTraceInfo *semanticInfo =
-        taskData.hasSemanticTraceInfo ? &taskData.semanticTraceInfo : nullptr;
-    // Timestamp narrows JSON candidates; notify metadata provides exact local-sync identity.
-    TaskSemanticTraceInfo enrichedInfo;
-    if (semanticInfo != nullptr) {
-        enrichedInfo = *semanticInfo;
-        enrichedInfo.submitTs = hcclReportData.ts;
-        if (taskData.taskType == TaskType::TASK_NOTIFY_RECORD || taskData.taskType == TaskType::TASK_NOTIFY_WAIT) {
-            enrichedInfo.notifyId = taskData.Notify.notifyID;
-            enrichedInfo.notifyStage = taskData.Notify.stage;
-        }
-        semanticInfo = &enrichedInfo;
-    }
-    CHK_RET(ReportTaskSemanticTrace(deviceLogicId_, taskData.semanticStreamID, taskData.taskID,
-        taskData.taskType, semanticInfo, taskData.GetFftsCtxId()));
+    CHK_RET(ReportCapturedTaskSemantic(taskData, hcclReportData.ts));
     DumpReportDataInfo(hcclReportData.type, hcclReportData.profInfo);
     CHK_RET(ReportMsprofData(hcclReportData));
     return HCCL_SUCCESS;
