@@ -39,6 +39,19 @@ HcclResult AllGatherMesh::Tx(const LINK &link, const Slice &txSlice, const Slice
 
     HCCL_DEBUG("rank[%u] tx srcMem[%p] output's offset[%llu] size[%llu]  to dstrank's offset[%llu]", interRank_,
         srcMem.ptr(), txSlice.offset, txSlice.size, dstSlice.offset);
+    if (link->IsSpInlineReduce()) {
+        {
+            TaskSemanticEventScope eventScope("tx_payload_start", "link_tx_payload");
+            CHK_RET(link->TxData(UserMemType::OUTPUT_MEM, baseOffset_ + dstSlice.offset,
+                srcMem.ptr(), txSlice.size, stream));
+        }
+        {
+            TaskSemanticEventScope eventScope("tx_data_signal_start", "link_tx_data_signal");
+            CHK_RET(link->TxDataSignal(stream));
+        }
+        return HCCL_SUCCESS;
+    }
+    TaskSemanticEventScope eventScope("tx_payload_start", "link_tx_payload");
     HcclResult ret =
         link->TxAsync(UserMemType::OUTPUT_MEM, baseOffset_ + dstSlice.offset, srcMem.ptr(), txSlice.size, stream);
     CHK_PRT_RET(ret != HCCL_SUCCESS,
@@ -53,6 +66,20 @@ HcclResult AllGatherMesh::Rx(const LINK &link, const Slice &srcSlice, const Slic
     HCCL_DEBUG("rank[%u] rx rcvMem[%p] output's offset[%llu] size[%llu] rcv data from srcrank's"
         "offset[%llu] ",
         interRank_, rcvMem.ptr(), rxSlice.offset, rxSlice.size, srcSlice.offset);
+    if (link->IsSpInlineReduce()) {
+        // P2P RxAsync submits a wait before the copy; each needs its own event scope.
+        {
+            TaskSemanticEventScope eventScope("rx_data_signal_start", "link_rx_data_signal");
+            CHK_RET(link->RxDataSignal(stream));
+        }
+        {
+            TaskSemanticEventScope eventScope("rx_payload_copy_start", "link_rx_payload_copy");
+            CHK_RET(link->RxData(UserMemType::OUTPUT_MEM, baseOffset_ + srcSlice.offset,
+                rcvMem.ptr(), rxSlice.size, stream));
+        }
+        return HCCL_SUCCESS;
+    }
+    TaskSemanticEventScope eventScope("rx_payload_copy_start", "link_rx_payload_copy");
     HcclResult ret =
         link->RxAsync(UserMemType::OUTPUT_MEM, baseOffset_ + srcSlice.offset, rcvMem.ptr(), rxSlice.size, stream);
     CHK_PRT_RET(ret != HCCL_SUCCESS,
@@ -105,7 +132,6 @@ HcclResult AllGatherMesh::RunAllGather(const std::vector<LINK> &links, const std
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
                 "allgather", 0, userRank_, interRankSize_, interRank_, nullptr, nullptr,
                 links[dstRank]->GetRemoteRank(), TaskSemanticAlgorithm(), interRank_));
-            TaskSemanticEventScope eventScope("tx_payload_start", "link_tx_payload");
             ret = Tx(links[dstRank], inputSlices[interRank_], outputSlices[interRank_], subStream);
         }
         CHK_PRT_RET(ret != HCCL_SUCCESS,
@@ -119,7 +145,6 @@ HcclResult AllGatherMesh::RunAllGather(const std::vector<LINK> &links, const std
             TaskSemanticScope semanticScope(MakeTaskSemanticTraceInfo(
                 "allgather", 0, userRank_, interRankSize_, dstRank, nullptr, nullptr,
                 links[dstRank]->GetRemoteRank(), TaskSemanticAlgorithm(), interRank_));
-            TaskSemanticEventScope eventScope("rx_payload_copy_start", "link_rx_payload_copy");
             ret = Rx(links[dstRank], inputSlices[dstRank], outputSlices[dstRank], subStream);
         }
         CHK_PRT_RET(ret != HCCL_SUCCESS,
