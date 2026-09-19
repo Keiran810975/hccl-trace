@@ -467,9 +467,6 @@ HcclResult AllReduceOperator::SelectAlgfor910B(const OpParam& param, std::string
             if (algName.empty()) {
                 algName = "AllReduceMeshExecutor";
             }
-        // [TEST PATCH] Add ring topology support for multi-card (>2) scenario
-        } else if (isRingTopo) {
-            algName = "AllReduceRingFor91093Executor";
         } else {
             algName = "AllReduceComm";
         }

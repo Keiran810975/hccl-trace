@@ -1,6 +1,6 @@
 # HCCL Step Trace 任务清单
 
-更新：2026-09-15。目标是在当前 HCCL/HCOMM 8.5 基线上完成**多机依赖感知诊断与异常验证**。
+更新：2026-09-20。目标是在当前 HCCL/HCOMM 8.5 基线上完成**多机依赖感知诊断与异常验证**。
 当前实现、分支和验证结果见 [阶段归档](arch-94a1ab31c3ee.md)；实现合同见 [spec.md](spec.md)。
 旧任务编号和拆分保存在 [原任务快照](archive/2026-09-15/task.md)，不再作为并行活动计划。
 补查远端后的实现与审批状态见 [分支调查](branch-review-2026-09-15.md)；不得只凭旧本地主线安排重复开发。
@@ -15,7 +15,7 @@
 - 已集成：远端 master 的提前返回语义修复、覆盖矩阵，以及 standard Ring/NHR/Mesh 插桩和 Mesh normal Tx/Rx 修复。
   用户确认 NHR/Mesh/standard Ring 已测试；RHD 已弃用。上级目录留存
   NHR/Mesh/Ring resource HTML，已核对并记录其覆盖边界，未提供的测试版本信息保持未回填。
-- 当前缺口：分支成果集成、Ring 测试强制、resource 证据增强、多机输入与关系、自动诊断、异常测试。
+- 当前缺口：撤回 Ring 强制后的默认路径验证、resource 证据增强、多机输入与关系、自动诊断、异常测试。
 
 ### 分支集成状态
 
@@ -45,8 +45,13 @@
 
 ### NEXT-001 收尾生产端单机问题
 
-- [ ] **位置**：HCOMM 算法选择、`task_profiling.cc`；`test/`。
-- **工作**：撤回两处 Ring `[TEST PATCH]`；直接复用已集成的
+- [-] **位置**：HCOMM 算法选择、`task_profiling.cc`；`test/`。
+- **已完成**：`codex/remove-ring-forcing` 精确撤回 `48b0a04` 的两处选路补丁，恢复
+  910B 全互联 HCCS 下的 NP_MESH，移除多卡 Ring 到 91093 executor 的测试分支。
+  两个文件与补丁引入前版本一致；本次没有构建或设备测试，尚未结束单机验收。
+- **待验证**：新环境构建 HCOMM，运行一个默认 AllReduce 样例并记录实际 executor/template；
+  以 trace on/off 同配置检查数值、选路和语义匹配，不要求默认进入 normal Mesh。
+  直接复用已集成的
   `ReportCapturedTaskSemantic()`，只补尚缺的捕获/提前返回回归，不重复修复。
   Ring 验证需要的路径选择留在明确的测试控制中，不改变生产默认算法。
 - **完成**：HCOMM 自身构建通过；相关捕获/提前返回小测试通过；短设备运行确认 trace

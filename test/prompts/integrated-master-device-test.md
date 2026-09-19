@@ -1,5 +1,10 @@
 # 给 gpt-5.6-sol 的设备测试 prompt
 
+2026-09-20 补充：验收 Ring 强制补丁撤回时，fetch 并固定
+`origin/codex/remove-ring-forcing` 的完整 SHA，替代下文的 origin/master 目标。
+本轮只需构建后跑一组无 selector 补丁的默认 AllReduce trace-on/off，沿用下文的采集、
+匹配及结果交付要求；已有 Ring/NHR 和有补丁的 Mesh 模板结果不要求全部重跑。
+
 你负责在已有 Linux/CANN/昇腾环境中验证 hccl-trace 当前 master，并把可复核结果返回给负责
 集成的 Codex。请直接执行以下工作。目标是验证本轮集成，重点确认 Mesh normal 的语义修复；
 先做小而完整的测试，不扩展到多机、异常注入、性能矩阵或新算法开发。RHD 已弃用，不测试。
@@ -38,7 +43,9 @@
 都不经过本次 normal Tx/Rx 修复；concurrent-direct Ring 也不能替代 standard Ring。
 普通 NHR 和 nhr_oneshot 分开记录，本轮不要求补齐 Oneshot。
 
-当前 `alg_configurator.cc` 和 `all_reduce_operator.cc` 仍有 Ring `[TEST PATCH]`。
+`codex/remove-ring-forcing` 已撤回 `alg_configurator.cc` 和 `all_reduce_operator.cc` 的
+Ring `[TEST PATCH]`；验证该分支时固定其完整 SHA，先完成一组无 selector 补丁的默认
+AllReduce trace-on/off，用实际选出的 Mesh Atomic/Direct 等路径验收默认行为，不要求进入 normal Mesh。
 先尝试已有配置/真实选择条件；若无法进入目标路径，可在独立测试工作树做最小 selector
 测试补丁，完整保存 diff、编译日志和加载库哈希，禁止顺便改插桩、公共 scope 或配对规则。
 结果必须标注“有测试补丁的模板验证”，不能写成“原样 master 默认选路已通过”。若无法

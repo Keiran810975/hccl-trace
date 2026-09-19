@@ -123,7 +123,8 @@ msprof consolidated DB --------------------------------+-> merged.csv
   不以 HCCL 构建代替；注意 host/device 多目标。
 - 测试围绕改动及真实失败模式：小 fixture 验证规则，代表性设备样例验证路径。纯文档修改
   检查事实、链接与 diff 即可；不要求每次重复跑全算法、构建、性能矩阵。
-- 当前仍有两处 Ring `[TEST PATCH]`；`Run()` 提前返回修复已随远端 master 集成，
+- 本分支已撤回两处 Ring `[TEST PATCH]`，恢复原有 910B 默认选路，构建与设备验证待新环境完成。
+  `Run()` 提前返回修复已随远端 master 集成，
   直接复用 `ReportCapturedTaskSemantic()` 并补针对性回归，禁止重复开发。FFTS
   callback 的正式采集仍需 msprof addition-info 订阅，不能混淆两种门控。
 
