@@ -1,6 +1,6 @@
 # HCCL Step Trace 任务清单
 
-更新：2026-09-15。目标是在当前 HCCL/HCOMM 8.5 基线上完成**多机依赖感知诊断与异常验证**。
+更新：2026-09-20。目标是在当前 HCCL/HCOMM 8.5 基线上完成**多机依赖感知诊断与异常验证**。
 当前实现、分支和验证结果见 [阶段归档](arch-94a1ab31c3ee.md)；实现合同见 [spec.md](spec.md)。
 旧任务编号和拆分保存在 [原任务快照](archive/2026-09-15/task.md)，不再作为并行活动计划。
 补查远端后的实现与审批状态见 [分支调查](branch-review-2026-09-15.md)；不得只凭旧本地主线安排重复开发。
@@ -15,7 +15,9 @@
 - 已集成：远端 master 的提前返回语义修复、覆盖矩阵，以及 standard Ring/NHR/Mesh 插桩和 Mesh normal Tx/Rx 修复。
   用户确认 NHR/Mesh/standard Ring 已测试；RHD 已弃用。上级目录留存
   NHR/Mesh/Ring resource HTML，已核对并记录其覆盖边界，未提供的测试版本信息保持未回填。
-- 当前缺口：分支成果集成、Ring 测试强制、resource 证据增强、多机输入与关系、自动诊断、异常测试。
+- 新设备结果：`10cda20` 的 3-rank Ring/NHR 原样通过；8-rank Mesh normal AllGather 在
+  selector/template 测试补丁下通过，默认选路尚未覆盖。见 [结果复核](arch-device-review-20260920.md)。
+- 当前缺口：Ring 测试强制、resource 证据增强、多机输入与关系、自动诊断、异常测试。
 
 ### 分支集成状态
 
@@ -24,13 +26,14 @@
 | `origin/master@d0d2904` | 已同步，合并提交 `2f26033` |
 | `feat-standard-ring@7dadcea` | 已合入，合并提交 `360d650` |
 | `feat-NHR@29ab3cd` | 已合入，合并提交 `638e94c` |
-| `feat-mesh@d870111` + 修复 `286ef99` | 已获批准，随 `f30a90a` 快进合入；待构建和针对性设备验证 |
+| `feat-mesh@d870111` + 修复 `286ef99` | 已合入；构建与有选路补丁的 normal AllGather 设备验证通过，默认选路待验证 |
 | `feat-RHD@e3e368f` | 用户决定弃用；保留历史，不合入、不安排验证 |
 
 本次已按批准顺序同步 master→standard Ring→NHR→修复后的 Mesh；文档冲突保留简洁计划和分支实施记录。
 缺少原始 DB 不要求重跑完整矩阵，HTML 中未覆盖项继续保留。
 语义配对的最终验证与 Git 无冲突是两个结论，不能互相替代。
 设备测试按 [交接 prompt](../../../test/prompts/integrated-master-device-test.md) 执行并返回原始证据。
+结果已收到；仅需补最终源码状态记录和两份空源码副本，不要求重跑已有通过用例。
 
 ## 2. 实施约定
 

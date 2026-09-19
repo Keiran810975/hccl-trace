@@ -39,8 +39,10 @@ captured-semantic early-return fix. Do not classify them as unimplemented based
 on this old checkout. The approved remote master, standard Ring and NHR merges
 are now integrated into the root master (`2f26033`, `360d650`, `638e94c`).
 Mesh normal Tx/Rx fix `286ef99` is also integrated into master via `f30a90a`.
-Build/device validation remains; follow the root
-[test handoff](../test/prompts/integrated-master-device-test.md).
+Device results at `10cda20` pass Ring/NHR on 3 ranks and normal Mesh AllGather
+on 8 ranks with an isolated selector/template patch. Default Mesh selection is
+not covered; source handoff has two remaining evidence gaps. See the
+[device review](tools/diagnosis/arch-device-review-20260920.md).
 RHD is abandoned
 by user decision; retain its history but exclude it from development plans.
 The user confirms NHR/Mesh/standard Ring were tested.
