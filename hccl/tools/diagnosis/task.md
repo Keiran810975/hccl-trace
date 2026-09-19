@@ -17,7 +17,7 @@
   NHR/Mesh/Ring resource HTML，已核对并记录其覆盖边界，未提供的测试版本信息保持未回填。
 - 新设备结果：`10cda20` 的 3-rank Ring/NHR 原样通过；8-rank Mesh normal AllGather 在
   selector/template 测试补丁下通过，默认选路尚未覆盖。见 [结果复核](arch-device-review-20260920.md)。
-- 当前缺口：Ring 测试强制、resource 证据增强、多机输入与关系、自动诊断、异常测试。
+- 当前缺口：撤回 Ring 强制后的默认路径验证、resource 证据增强、多机输入与关系、自动诊断、异常测试。
 
 ### 分支集成状态
 
@@ -28,6 +28,7 @@
 | `feat-NHR@29ab3cd` | 已合入，合并提交 `638e94c` |
 | `feat-mesh@d870111` + 修复 `286ef99` | 已合入；构建与有选路补丁的 normal AllGather 设备验证通过，默认选路待验证 |
 | `feat-RHD@e3e368f` | 用户决定弃用；保留历史，不合入、不安排验证 |
+| Ring 强制撤回 `1743819` | 已合入 master；新环境构建与默认路径验证待执行 |
 
 本次已按批准顺序同步 master→standard Ring→NHR→修复后的 Mesh；文档冲突保留简洁计划和分支实施记录。
 缺少原始 DB 不要求重跑完整矩阵，HTML 中未覆盖项继续保留。
@@ -48,8 +49,13 @@
 
 ### NEXT-001 收尾生产端单机问题
 
-- [ ] **位置**：HCOMM 算法选择、`task_profiling.cc`；`test/`。
-- **工作**：撤回两处 Ring `[TEST PATCH]`；直接复用已集成的
+- [-] **位置**：HCOMM 算法选择、`task_profiling.cc`；`test/`。
+- **已完成**：master 已合入 `1743819`，精确撤回 `48b0a04` 的两处选路补丁，恢复
+  910B 全互联 HCCS 下的 NP_MESH，移除多卡 Ring 到 91093 executor 的测试分支。
+  两个文件与补丁引入前版本一致；本次没有构建或设备测试，尚未结束单机验收。
+- **待验证**：新环境构建 HCOMM，运行一个默认 AllReduce 样例并记录实际 executor/template；
+  以 trace on/off 同配置检查数值、选路和语义匹配，不要求默认进入 normal Mesh。
+  直接复用已集成的
   `ReportCapturedTaskSemantic()`，只补尚缺的捕获/提前返回回归，不重复修复。
   Ring 验证需要的路径选择留在明确的测试控制中，不改变生产默认算法。
 - **完成**：HCOMM 自身构建通过；相关捕获/提前返回小测试通过；短设备运行确认 trace

@@ -1198,8 +1198,8 @@ PROFILER_TRACE_EX
 
 ### P0：发布阻断
 
-1. **测试补丁改变生产算法选择。** 两处 `[TEST PATCH]` 会强制 910B 进入 ring 路径，
-   必须在发布前撤回或移入独立测试控制面。
+1. **Ring 强制补丁已撤回，默认选路待设备验证。** master 中的 `1743819` 恢复
+   原有 910B 选路；未修改正式 Ring 算法或语义插桩。新环境构建和默认路径验收归入 NEXT-001。
 2. **提前返回导致语义丢失的窗口已修复并集成。**
    `9eedf27` 使用 `ReportCapturedTaskSemantic()` 兑现 TaskData 快照；OP_BASE、未订阅、
    非 capture 路径开启 trace 时仍输出 semantic，正常路径共用 submit timestamp。
