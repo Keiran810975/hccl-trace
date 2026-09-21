@@ -14,6 +14,10 @@
 以 run/node 命名空间隔离。merged 42 列、artifact v4 保持，新增 kind 为 additive 扩展。
 以下历史单机实现主体仍保留；多机真实设备验收、重复 FFts occurrence 的共享身份仍待验证。
 
+2026-09-21 实机确认：direct `reduce_inline` 在相同物理身份下兼容 DB `REDUCE_INLINE`
+或 `MEMCPY_ASYNC`；后者为 A3 HOST inline reduction 的实际表达。保留 profiler 原始
+类型，不将普通 memcpy 自动推断为 reduction。FFts 规则不变，见[验证记录](direct-inline-reduce-validation.md)。
+
 本文基于 HCOMM 8.5.0 差异调查，记录当前工作区的语义生产、DB 精确合并、
 execution/resource 依赖图合同、覆盖范围与已知风险。
 

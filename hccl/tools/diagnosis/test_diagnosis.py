@@ -34,7 +34,7 @@ if __package__ in (None, ""):
         parse_inputs as parse_msprof_db_inputs,
     )
     from diagnosis.parse_plog import parse_graph_correlation_lines, parse_plog_lines
-    from diagnosis.schema import GraphCorrelation, ProfilerTask
+    from diagnosis.schema import GraphCorrelation, ProfilerTask, SemanticRecord
     from diagnosis.validate_trace import collect_step_contract_errors, validate_rows
     from diagnosis.visualize_dependency_graph import (
         analyze_execution_graph,
@@ -72,7 +72,7 @@ else:
         parse_inputs as parse_msprof_db_inputs,
     )
     from .parse_plog import parse_graph_correlation_lines, parse_plog_lines
-    from .schema import GraphCorrelation, ProfilerTask
+    from .schema import GraphCorrelation, ProfilerTask, SemanticRecord
     from .validate_trace import collect_step_contract_errors, validate_rows
     from .visualize_dependency_graph import (
         analyze_execution_graph,
@@ -444,6 +444,57 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertEqual(stats["unmatched_semantic"], 1)
         self.assertEqual(matched[0]["profiler_task_id"], 2)
         self.assertEqual(matched[0]["match_confidence"], "exact")
+
+    def test_direct_inline_reduce_matches_memcpy_db_without_relabeling(self):
+        # A3 HOST Ring reports inline reduction as a direct MEMCPY_ASYNC TASK.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "msprof_fixture.db")
+            create_msprof_db(path)
+            profilers = parse_msprof_db_file(path, "node0")
+        semantic = SemanticRecord(
+            node_id="node0", device_id=0, stream_id=13, task_id=1,
+            algorithm="ring", phase="reduce_scatter", step=0,
+            task_kind="reduce_inline", event="rx_payload_reduce_start",
+        )
+        rows, stats = merge_records([semantic], profilers)
+        matched = [row for row in rows if row["match_status"] == "matched"]
+        self.assertEqual(stats["exact_matched"], 1)
+        self.assertEqual(stats["unmatched_semantic"], 0)
+        self.assertEqual(matched[0]["task_kind"], "reduce_inline")
+        self.assertEqual(matched[0]["profiler_task_kind"], "sdma")
+        self.assertEqual(matched[0]["event_name"], "MEMCPY_ASYNC")
+        self.assertEqual(matched[0]["match_method"], "task_id")
+        self.assertEqual(matched[0]["match_confidence"], "exact")
+        self.assertEqual(matched[0]["task_start"], "1.001")
+        self.assertEqual(matched[0]["duration"], "1.001")
+        self.assertEqual(profilers[0].task_kind, "sdma")
+
+    def test_direct_inline_reduce_compatibility_preserves_identity_and_kind_guards(self):
+        semantic = SemanticRecord(
+            node_id="node0", device_id=0, stream_id=45, task_id=7,
+            task_kind="reduce_inline", phase="reduce_scatter",
+        )
+        memcpy = profiler_task("MEMCPY_ASYNC", 45, 7, 100)
+        for change in (
+            {"node_id": "node1"}, {"device_id": 1}, {"stream_id": 46},
+            {"task_id": 8}, {"subtask_id": 8},
+            {"event_name": "SDMA"}, {"event_name": "RDMASEND"},
+            {"event_name": "NOTIFY_WAIT"}, {"event_name": "REDUCE_TBE"},
+        ):
+            with self.subTest(change=change):
+                _, stats = merge_records([semantic], [replace(memcpy, **change)])
+                self.assertEqual(stats["exact_matched"], 0)
+                self.assertEqual(stats["unmatched_semantic"], 1)
+        for kind in ("reduce_tbe", "notify_record", "notify_wait", "rdma"):
+            with self.subTest(kind=kind):
+                _, stats = merge_records([replace(semantic, task_kind=kind)], [memcpy])
+                self.assertEqual(stats["exact_matched"], 0)
+        _, stats = merge_records(
+            [semantic], [profiler_task("REDUCE_INLINE", 45, 7, 100)])
+        self.assertEqual(stats["exact_matched"], 1)
+        # An FFts semantic must still supply graph correlation, even at the same IDs.
+        _, stats = merge_records([replace(semantic, ffts_ctx_id=8)], [memcpy])
+        self.assertEqual(stats["exact_matched"], 0)
 
     def test_ffts_parent_ctx_correlation_matches_exact_subtask(self):
         profilers = [

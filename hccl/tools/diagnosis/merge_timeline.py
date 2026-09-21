@@ -41,7 +41,10 @@ else:
 TASK_KIND_KERNEL_TYPES = {
     "sdma": {"MEMCPY_ASYNC"},
     "rdma": {"RDMASEND"},
-    "reduce_inline": {"REDUCE_INLINE"},
+    # A3 HOST inline reduction (aclrtReduceAsync) is recorded as MEMCPY_ASYNC
+    # in msprof TASK. Keep the DB kind intact; only relax this compatibility
+    # check after the exact node/device/stream/task identity lookup.
+    "reduce_inline": {"REDUCE_INLINE", "MEMCPY_ASYNC"},
     "reduce_tbe": {"REDUCE_TBE"},
     "notify_record": {"NOTIFY_RECORD"},
     "notify_wait": {"NOTIFY_WAIT"},

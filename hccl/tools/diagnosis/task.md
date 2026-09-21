@@ -66,7 +66,9 @@
 - [-] **位置**：HCOMM 实际 executor/template/transport；`test/`。
 - **实现进度**：`codex/multinode-diagnosis` 已提供节点输入清单、逐节点 exact merge、
   operation inventory 和[双机测试交接](../../../test/prompts/multinode-device-test.md)。
-  用户确认当前无设备环境，真实双机采集由用户后续执行；不将离线 fixture 计为设备验收。
+  2026-09-21 机器 1 容器已就绪，A3 HOST Ring 单机四卡数值通过；修复 direct inline
+  reduction 类型兼容后，同一采集 528/528 exact，见[记录](direct-inline-reduce-validation.md)。
+  真实双机采集仍待执行，不将单机回放或离线 fixture 计为双机设备验收。
 - **工作**：优先双机 AllReduce，先复用已有 Ring/NHR 与修复后的 Mesh，按设备实际选出的
   机内/机间路径只补 rank 域、phase/peer 和 RDMA/RoCE 关联缺口；先固定一种消息规模并连续运行少量 operation。
   用一份简单输入清单记录 run、每个 node 的 plog/DB 路径和 user/comm rank 到 node/device
