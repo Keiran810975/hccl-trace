@@ -232,6 +232,7 @@ if(NOT BUILD_OPEN_PROJECT OR (BUILD_OPEN_PROJECT AND KERNEL_MODE))
     add_library(ccl_kernel  SHARED)
 
     set(CCL_KERNEL_SRC_LIST
+        ${HCCL_BASE_DIR}/algorithm/base/alg_template/component/task_semantic_scope.cc
         ${HCCL_BASE_DIR}/algorithm/impl/alg_env_config.cc
         ${HCCL_BASE_DIR}/algorithm/impl/coll_alg_utils.cc
         ${HCCL_BASE_DIR}/algorithm/impl/hccl_alg_device.cc

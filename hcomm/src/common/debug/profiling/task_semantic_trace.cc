@@ -19,6 +19,9 @@ namespace {
 constexpr u32 TASK_SEMANTIC_SCHEMA_VERSION = 4;
 constexpr u32 TASK_GRAPH_CORRELATION_SCHEMA_VERSION = 1;
 thread_local bool g_taskSemanticValid = false;
+thread_local int g_deviceTraceEnabled = -1;
+thread_local u32 g_deviceUserRank = INVALID_VALUE_RANKID;
+thread_local u32 g_physicalDeviceId = INVALID_UINT;
 thread_local TaskSemanticTraceInfo g_taskSemanticInfo{};
 // DispatcherGraph adds contexts and launches the graph synchronously on the
 // same thread. Keep one pending build per thread until the launch callback
@@ -96,6 +99,12 @@ u64 ObserveFftsGraphTask(u32 deviceId, u32 anchorTaskId)
 
 bool IsTaskSemanticTraceEnabled()
 {
+    if (g_deviceTraceEnabled >= 0) {
+        return g_deviceTraceEnabled != 0;
+    }
+#ifdef CCL_KERNEL
+    return false;
+#else
     static const bool enabled = []() -> bool {
         const char *stepTraceEnv = std::getenv("HCCL_STEP_TRACE");
         if (stepTraceEnv != nullptr && std::strcmp(stepTraceEnv, "1") == 0) {
@@ -105,6 +114,28 @@ bool IsTaskSemanticTraceEnabled()
         return legacyEnv != nullptr && std::strcmp(legacyEnv, "1") == 0;
     }();
     return enabled;
+#endif
+}
+
+TaskSemanticDeviceScope::TaskSemanticDeviceScope(bool enabled, u32 userRank, u32 physicalDeviceId)
+    : previous_(g_deviceTraceEnabled), previousUserRank_(g_deviceUserRank),
+      previousPhysicalDeviceId_(g_physicalDeviceId)
+{
+    g_deviceTraceEnabled = enabled ? 1 : 0;
+    g_deviceUserRank = userRank;
+    g_physicalDeviceId = physicalDeviceId;
+}
+
+TaskSemanticDeviceScope::~TaskSemanticDeviceScope()
+{
+    g_deviceTraceEnabled = previous_;
+    g_deviceUserRank = previousUserRank_;
+    g_physicalDeviceId = previousPhysicalDeviceId_;
+}
+
+u32 GetTaskSemanticPhysicalDeviceId()
+{
+    return g_physicalDeviceId;
 }
 
 bool GetTaskSemanticTraceInfo(TaskSemanticTraceInfo &info)
@@ -113,6 +144,11 @@ bool GetTaskSemanticTraceInfo(TaskSemanticTraceInfo &info)
         return false;
     }
     info = g_taskSemanticInfo;
+    // Hierarchical templates may use a subcommunicator rank. Keep commRank
+    // unchanged and obtain the global user rank from the device communicator.
+    if (g_deviceUserRank != INVALID_VALUE_RANKID) {
+        info.userRank = g_deviceUserRank;
+    }
     return true;
 }
 

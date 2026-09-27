@@ -17,7 +17,9 @@ python -m hccl.tools.diagnosis.multi_node_trace /capture/run.json -o /capture/re
 `operations` 留空，导出 `operations.csv` 与未决原因，不因同名 operation 跨机配对。
 出口 0 要求 merge、graph gate 通过且存在跨机边、远端无未决 channel；失败保留已有输出。
 
-当前支持 rank+offset 编码的 Ibverbs RDMA Notify；direct 重复 channel 要求两端各自单
+当前支持 Host rank+offset 编码及 AI_CPU 接收端硬件 Notify ID 的 Ibverbs RDMA Notify；
+AI_CPU 使用 DB 的两端 user rank 和设备映射区分资源，不把硬件 ID 解释为 Host 编码。
+direct 重复 channel 要求两端各自单
 stream、等数量、顺序唯一。FFts 仅支持 channel 内各一个 occurrence，重复时保留歧义。
 HTML/SVG 读取该入口的 artifact，节点分别按本地起点展示，不比较未校准的跨机时间。
 实现记录见 [多机设计](multi-node-design.md)，实机验收见
@@ -51,6 +53,11 @@ operation 与具体计算事件名称。合并结果同时保留未标注的 `pr
 
 当前支持的 msprof DB schema 为 `1.2.0`。解析器以 SQLite `mode=ro` 打开数据库；未知
 schema、缺表、重复 device 或一对多 communication metadata 会明确失败。
+
+AI_CPU 入口同时扫描 `device-*.log` 与 Host `plog*.log`。设备执行保留原始 `*_SQE`
+事件名称；`WRITE_VALUE_SQE` 只有在同一 DB 执行的 `COMMUNICATION_TASK_INFO.taskType`
+证明为 Notify 或 RDMA 时才归类，缺少子类型不猜测。当前验收与限制见
+[AI_CPU 支持记录](ai-cpu-support.md)。
 
 ## 聚合
 

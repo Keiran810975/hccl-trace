@@ -104,8 +104,9 @@ def operation_bindings(manifest: dict):
 def build_cross_node_edges(rows: list[dict], ranks: dict, operation_evidence: dict):
     """Join complete channels; no time comparison between different nodes.
 
-    Ibverbs SEND_NOTIFY and the receiving Wait share (receiver user rank,
-    notify offset). Payload RDMA uses a low-word UINT32_MAX sentinel. Repeated
+    Host Ibverbs shares (receiver user rank, notify offset). AI_CPU shares the
+    receiver's hardware Notify ID; DB rank endpoints disambiguate devices.
+    Payload RDMA uses a low-word UINT32_MAX sentinel. Repeated
     direct occurrences require one uniquely ordered stream on each side;
     FFts currently supports only one occurrence per operation/channel.
     """
@@ -120,6 +121,8 @@ def build_cross_node_edges(rows: list[dict], ranks: dict, operation_evidence: di
         if kind == "rdma" and notify >= 0 and notify & UINT32_MAX == UINT32_MAX:
             continue
         local, peer = row["_user_rank"], row["_peer_rank"]
+        aicpu = row.get("event_name", "") in ("WRITE_VALUE_SQE", "NOTIFY_WAIT_SQE")
+        encoding = "aicpu_notify_id" if aicpu else "host_rank_offset"
         if kind == "notify_wait" and peer < 0:
             continue  # Device-local control remains with the existing builder.
         local_endpoint, peer_endpoint = ranks.get(local), ranks.get(peer)
@@ -134,16 +137,18 @@ def build_cross_node_edges(rows: list[dict], ranks: dict, operation_evidence: di
             error = "rank_node_device_mapping"
         elif scope not in operation_evidence or row.get("_operation_scope_status") != "unique":
             error = "shared_operation_binding"
-        elif notify < 0 or notify >> 32 != consumer or notify & UINT32_MAX == UINT32_MAX:
+        elif (notify < 0 or notify & UINT32_MAX == UINT32_MAX
+              or (aicpu and notify >= UINT32_MAX)
+              or (not aicpu and notify >> 32 != consumer)):
             error = "receiver_rank_notify_offset"
         direction = (scope, producer, consumer)
         if error:
             blocked_directions.add(direction)
-        groups[direction + (notify,)].append({"row": row, "role": kind, "error": error})
+        groups[direction + (encoding, notify)].append({"row": row, "role": kind, "error": error})
 
     edges, ambiguities = [], []
     for key, endpoints in sorted(groups.items()):
-        scope, producer_rank, consumer_rank, notify = key
+        scope, producer_rank, consumer_rank, encoding, notify = key
         producers = [item for item in endpoints if item["role"] == "rdma"]
         consumers = [item for item in endpoints if item["role"] == "notify_wait"]
         channel_id = stable_id("rnc", key + (
@@ -193,7 +198,8 @@ def build_cross_node_edges(rows: list[dict], ranks: dict, operation_evidence: di
                 "kind": kind, "src": src["_graph_id"], "dst": dst["_graph_id"],
                 "relation_id": relation_id, "confidence": "observed",
                 "reason": "shared operation, receiver Notify resource and complete per-side channel order",
-                "evidence": "msprof_rdma_notify_rank_offset; " + operation_evidence[scope],
+                "evidence": ("msprof_aicpu_rdma_receiver_notify_id; " if encoding == "aicpu_notify_id"
+                             else "msprof_rdma_notify_rank_offset; ") + operation_evidence[scope],
                 "sequence_kind": "db_notify_ordinal", "sequence_value": str(ordinal),
             }
             for field in ("device", "stream", "task"):

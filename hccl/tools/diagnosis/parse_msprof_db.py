@@ -44,6 +44,10 @@ TASK_KIND_BY_EVENT = {
     "NOTIFY_RECORD": "notify_record",
     "WRITE_VALUE": "notify_record",
     "NOTIFY_WAIT": "notify_wait",
+    # Device-expanded AI_CPU executions use explicit SQE names in CANN 8.5.1.
+    "SDMA_SQE": "sdma",
+    "NOTIFY_RECORD_SQE": "notify_record",
+    "NOTIFY_WAIT_SQE": "notify_wait",
 }
 
 
@@ -157,6 +161,11 @@ def parse_file(path: str, default_node_id: str = "") -> List[ProfilerTask]:
                     path, list(device_ids)
                 )
             )
+        has_communication_type = "taskType" in _table_columns(connection, "COMMUNICATION_TASK_INFO")
+        communication_type = "communication_type.value" if has_communication_type else "NULL"
+        communication_type_join = (
+            "LEFT JOIN STRING_IDS AS communication_type ON communication_type.id = communication.taskType"
+            if has_communication_type else "")
         rows = connection.execute(
             """
             SELECT
@@ -170,6 +179,7 @@ def parse_file(path: str, default_node_id: str = "") -> List[ProfilerTask]:
                 task.taskId AS task_id,
                 task.modelId AS model_id,
                 task_type.value AS task_type,
+                {communication_type} AS communication_type,
                 compute_name.value AS compute_name,
                 communication.notifyId AS notify_id,
                 communication.srcRank AS src_rank,
@@ -187,6 +197,7 @@ def parse_file(path: str, default_node_id: str = "") -> List[ProfilerTask]:
               ON compute_name.id = compute.name
             LEFT JOIN COMMUNICATION_TASK_INFO AS communication
               ON communication.globalTaskId = task.globalTaskId
+            {communication_type_join}
             LEFT JOIN COMMUNICATION_OP AS operation
               ON operation.opId = communication.opId
             LEFT JOIN STRING_IDS AS op_name
@@ -195,7 +206,8 @@ def parse_file(path: str, default_node_id: str = "") -> List[ProfilerTask]:
               ON group_name.id = operation.groupName
             WHERE UPPER(task_type.value) <> 'AI_CORE'
             ORDER BY task.startNs, task.endNs, task.streamId, task.taskId, task.contextId
-            """
+            """.format(communication_type=communication_type,
+                       communication_type_join=communication_type_join)
         )
         tasks = []
         for row in rows:
@@ -206,12 +218,19 @@ def parse_file(path: str, default_node_id: str = "") -> List[ProfilerTask]:
                 context_id = -1
             task_type = str(row["task_type"] or "")
             event_name = str(row["compute_name"] or task_type).strip()
+            task_kind = _task_kind(task_type)
+            if task_type.upper() == "WRITE_VALUE_SQE":
+                # SQE opcode alone conflates Notify writes and RDMA doorbells.
+                # Require the same execution's communication profiling subtype.
+                task_kind = {"RDMASEND": "rdma", "INTER_RANK_RECORD": "notify_record",
+                             "NOTIFY_RECORD": "notify_record"}.get(
+                    str(row["communication_type"] or "").upper(), task_kind)
             tasks.append(ProfilerTask(
                 node_id=default_node_id,
                 device_id=int(row["device_id"]),
                 stream_id=int(row["stream_id"]),
                 task_id=int(row["task_id"]),
-                task_kind=_task_kind(task_type),
+                task_kind=task_kind,
                 task_start=_ns_to_us_text(start_ns),
                 task_stop=_ns_to_us_text(end_ns),
                 duration=_ns_to_us_text(end_ns - start_ns),

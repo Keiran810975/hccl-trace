@@ -99,6 +99,25 @@ def create_run_fixture(root):
 
 
 class MultiNodeTraceTest(unittest.TestCase):
+    def test_aicpu_raw_notify_id_requires_complete_rank_channel(self):
+        rows = cross_rows()
+        rows[0].update(event_name="WRITE_VALUE_SQE", _notify_id=5124)
+        rows[1].update(event_name="NOTIFY_WAIT_SQE", _notify_id=5124)
+        edges, issues, _ = build_cross_node_edges(rows, RANKS, EVIDENCE)
+        self.assertEqual(len(edges), 1)
+        self.assertEqual(issues, [])
+        self.assertIn("aicpu_rdma_receiver_notify_id", edges[0]["evidence"])
+        for change in ({"_notify_id": 5125}, {"_device_id": 3},
+                       {"event_name": "NOTIFY_WAIT"}, {"_peer_rank": -1}):
+            changed = deepcopy(rows)
+            changed[1].update(change)
+            edges, issues, _ = build_cross_node_edges(changed, RANKS, EVIDENCE)
+            self.assertEqual(edges, [])
+            self.assertTrue(issues)
+        payload = dict(rows[0], _notify_id=0xFFFFFFFF)
+        edges, issues, remote_ids = build_cross_node_edges([payload], RANKS, EVIDENCE)
+        self.assertEqual((edges, issues, remote_ids), ([], [], frozenset()))
+
     def test_cross_node_resource_wait_uses_local_clock(self):
         rows = cross_rows()
         resource = execution_row(2, 45, 3, 3, rank=9)

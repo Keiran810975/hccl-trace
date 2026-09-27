@@ -9,6 +9,11 @@
 
 ## 1. 文档目的
 
+2026-09-22 AI_CPU 分支增量见 [支持记录](ai-cpu-support.md)：设备语义v4、真实SQE身份、
+device日志输入与SQE子类型识别；设备RDMA使用接收端硬件Notify ID和DB两端rank，
+与Host rank+offset编码隔离。原有精确匹配、Notify校验、完整channel与未校准时钟合同不变。
+最终单机merge通过；最后rank修正的双机重采和控制端点完整图门禁尚未通过。
+
 2026-09-15 多机开发分支增量：见 [NEXT-003/004 实现记录](multi-node-design.md)。
 新增清单入口、显式共享 operation 绑定与跨节点 RDMA Notify 观测边；联合 node identity
 以 run/node 命名空间隔离。merged 42 列、artifact v4 保持，新增 kind 为 additive 扩展。
@@ -477,7 +482,10 @@ init/main 关系，再单独设计 `stage_kind=init|main|final`；在此之前�
 
 其中：
 
-- `device_id` 来自 HCOMM `deviceLogicId_`，不能由 rank 推断；
+- Host 现有路径的 `device_id` 来自 HCOMM `deviceLogicId_`，不能由 rank 推断；
+  AI_CPU 使用 communicator 的 `topoInfo_.devicePhyId`，在构造 SQE 时存入诊断快照。
+  dispatcher 的 HAL 局部编号不能替代 DB 物理设备号；延迟上报/缓存重放沿用快照，
+  缺少物理身份时不产生该语义项，不按可见序号猜测或偏移补配。
 - `stream_id` 使用 `semanticStreamID`；
 - `task_id` 解析自 `hccl_task_id`；
 - `node_id` 由离线 CLI 在输入边界补齐。

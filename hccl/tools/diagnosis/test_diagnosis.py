@@ -830,6 +830,75 @@ class DiagnosisToolTest(unittest.TestCase):
             records = parse_plog_inputs(plog_dir=temp_dir)
         self.assertEqual({record.device_id for record in records}, {0, 1})
 
+    def test_aicpu_device_logs_merge_with_real_sqe_identity(self):
+        line = (
+            "[INFO] HCCL(7928,aicpu_scheduler):2026-09-22-21:56:10.704.995 "
+            "[HcclTaskSemantic] schema_version[4] device_id[0] stream_id[90] "
+            "hccl_task_id[3] task_kind[sdma] source[aicpu] submit_ts[0] "
+            "event[copy_start] semantic[user_to_ccl_copy] phase[reduce_scatter_direct] "
+            "step[0] user_rank[0] comm_rank[0] rank_size[2] ffts_ctx_id[4294967295]\n"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            device_dir = Path(temp_dir) / "run" / "device-0"
+            device_dir.mkdir(parents=True)
+            (device_dir / "device-175671_20260922135612024.log").write_text(line, encoding="utf-8")
+            (Path(temp_dir) / "workload.log").write_text(line, encoding="utf-8")
+            (Path(temp_dir) / "plog-host.log").write_text("ordinary host log\n", encoding="utf-8")
+            records = parse_plog_inputs(plog_dir=temp_dir, node_id="node0")
+        self.assertEqual(len(records), 1)
+        self.assertEqual((records[0].source, records[0].pid, records[0].submit_ts), ("aicpu", 7928, 0))
+        profiler = replace(profiler_task("SDMA_SQE", 90, 3, 100), task_kind="sdma")
+        rows, stats = merge_records(records, [profiler])
+        self.assertEqual(stats["matched"], 1)
+        self.assertEqual(rows[0]["match_status"], "matched")
+        for change in ({"task_id": 4}, {"event_name": "NOTIFY_WAIT_SQE"},
+                       {"event_name": "MEMCPY_ASYNC"}):
+            _, rejected = merge_records(records, [replace(profiler, **change)])
+            self.assertEqual(rejected["matched"], 0)
+
+    def test_aicpu_sqe_db_kinds_and_notify_metadata_are_checked(self):
+        for event, kind in (("SDMA_SQE", "sdma"), ("NOTIFY_RECORD_SQE", "notify_record"),
+                            ("WRITE_VALUE_SQE", "notify_record"), ("WRITE_VALUE_SQE", "rdma"),
+                            ("NOTIFY_WAIT_SQE", "notify_wait")):
+            with self.subTest(event=event), tempfile.TemporaryDirectory() as temp_dir:
+                path = str(Path(temp_dir) / "msprof_fixture.db")
+                create_msprof_db(path)
+                with sqlite3.connect(path) as connection:
+                    connection.execute("UPDATE STRING_IDS SET value=? WHERE id=1", (event,))
+                    connection.execute("INSERT INTO COMMUNICATION_TASK_INFO VALUES(10, 4754, 0, 1, 7)")
+                    connection.execute("ALTER TABLE COMMUNICATION_TASK_INFO ADD COLUMN taskType INTEGER")
+                    connection.execute("INSERT INTO STRING_IDS VALUES(20, ?)",
+                                       ("RDMASend" if kind == "rdma" else "Inter_Rank_Record",))
+                    connection.execute("UPDATE COMMUNICATION_TASK_INFO SET taskType=20 WHERE globalTaskId=10")
+                connection.close()
+                profilers = parse_msprof_db_file(path, "node0")
+                self.assertEqual(profilers[0].task_kind, kind)
+                semantic = SemanticRecord(node_id="node0", device_id=0, stream_id=13, task_id=1,
+                    task_kind=kind, source="aicpu", user_rank=0, peer_rank=1, notify_id=4754)
+                _, stats = merge_records([semantic], profilers)
+                self.assertEqual(stats["exact_matched"], 1)
+                if kind.startswith("notify_"):
+                    _, stats = merge_records([replace(semantic, notify_id=0)], profilers)
+                    self.assertEqual(stats["notify_id_mismatch"], 1)
+                    self.assertEqual(stats["matched"], 0)
+
+    def test_aicpu_write_value_without_subtype_is_not_assumed_notify_or_rdma(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = str(Path(temp_dir) / "msprof_fixture.db")
+            create_msprof_db(path)
+            connection = sqlite3.connect(path)
+            connection.execute("UPDATE STRING_IDS SET value='WRITE_VALUE_SQE' WHERE id=1")
+            connection.commit()
+            connection.close()
+            profilers = parse_msprof_db_file(path, "node0")
+        self.assertEqual(profilers[0].task_kind, "write_value_sqe")
+        for kind in ("notify_record", "rdma"):
+            semantic = SemanticRecord(node_id="node0", device_id=0, stream_id=13, task_id=1,
+                                      task_kind=kind, source="aicpu")
+            _, stats = merge_records([semantic], profilers)
+            self.assertEqual(stats["matched"], 0)
+            self.assertEqual(stats["unmatched_semantic"], 1)
+
     def test_submit_ts_is_parsed_and_legacy_sequences_are_discarded(self):
         semantics = list(parse_plog_lines([
             "[HcclTaskSemantic] schema_version[3] device_id[7] stream_id[45] hccl_task_id[0] "

@@ -185,6 +185,11 @@ HcclResult ProfilingManager::ReportTaskInfo(s32 streamId, void* ctxPtr)
         dfx::ProfilingExtendInfoHelper::InitHcclInfo(taskInfo);
         CommInfo2HcclInfo(profInfo, taskInfo);
         dfx::ProfilingExtendInfoHelper::SqeInfo2MsprofAicpuMC2HcclInfo(sqeInfo, taskInfo);
+        // WRITE_VALUE (including RDMA doorbells) has no Notify ID in its SQE.
+        // The dispatcher already preserves that resource in the DFX snapshot.
+        if (sqeInfo.type == RT_STARS_SQE_TYPE_WRITE_VALUE) {
+            taskInfo.notifyID = sqeContextBuffer->dfxInfo[idx].notifyId;
+        }
         taskInfo.timeStamp = sqeContextBuffer->profTimestap[idx]; // 时间戳
         DumpHcclInfo(taskInfo, batchId, idx);
         // 上报信息

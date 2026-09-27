@@ -8,6 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include "task_semantic_trace.h"
 #include <memory>
 #include <atomic>
 #include <chrono>
@@ -5070,6 +5071,9 @@ namespace hccl
         opResPara_.kfcControlTransferH2DParams = kfcControlTransferH2D_->GetCommunicateParams();
         opResPara_.kfcStatusTransferD2HParams = kfcStatusTransferD2H_->GetCommunicateParams();
         opResPara_.debugConfig = GetDebugConfig();
+        // Versioned diagnostic extension; reserved words, unchanged H2D ABI.
+        opResPara_.rsv[0] = IsTaskSemanticTraceEnabled() ? TASK_SEMANTIC_DEVICE_MAGIC : 0;
+        opResPara_.rsv[1] = IsTaskSemanticTraceEnabled() ? 1 : 0;
 
         CHK_SMART_PTR_NULL(opRetryStreamPtr_);
         if (opRetryStreamPtr_->find(newTag) == opRetryStreamPtr_->end()) {

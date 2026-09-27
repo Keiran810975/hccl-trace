@@ -50,6 +50,14 @@ TASK_KIND_KERNEL_TYPES = {
     "notify_wait": {"NOTIFY_WAIT"},
 }
 
+AICPU_TASK_KIND_KERNEL_TYPES = {
+    "sdma": {"SDMA_SQE"},
+    "rdma": {"WRITE_VALUE_SQE"},
+    "reduce_inline": {"SDMA_SQE"},
+    "notify_record": {"NOTIFY_RECORD_SQE", "WRITE_VALUE_SQE"},
+    "notify_wait": {"NOTIFY_WAIT_SQE"},
+}
+
 FFTS_TASK_KIND_KERNEL_TYPES = {
     "sdma": {"SDMA"},
     "rdma": {"RDMASEND"},
@@ -333,6 +341,11 @@ def _is_compatible_task_kind(
     ffts: bool = False,
 ) -> bool:
     compatibility = FFTS_TASK_KIND_KERNEL_TYPES if ffts else TASK_KIND_KERNEL_TYPES
+    if not ffts and semantic.source == "aicpu":
+        compatibility = AICPU_TASK_KIND_KERNEL_TYPES
+        expected_kind = "sdma" if semantic.task_kind == "reduce_inline" else semantic.task_kind
+        if profiler.task_kind != expected_kind:
+            return False
     expected = compatibility.get(str(semantic.task_kind or "").strip().lower())
     if not expected:
         return True
@@ -478,12 +491,19 @@ def parse_msprof_inputs(
     return parse_msprof_db_inputs(msprof_db, msprof_db_dir, node_id)
 
 
+def _semantic_log_paths(plog_dir: str):
+    # CANN collects AI_CPU reports in device-<pid>_<timestamp>.log, while
+    # Host reports retain the plog prefix. Preserve both original inputs.
+    return sorted(path for path in Path(plog_dir).rglob("*.log")
+                  if path.is_file() and path.name.startswith(("plog", "device-")))
+
+
 def parse_plog_inputs(plog: str = "", plog_dir: str = "", node_id: str = "") -> List[SemanticRecord]:
     records: List[SemanticRecord] = []
     if plog:
         records.extend(parse_plog_file(plog))
     if plog_dir:
-        for path in sorted(Path(plog_dir).rglob("plog*.log")):
+        for path in _semantic_log_paths(plog_dir):
             records.extend(parse_plog_file(str(path)))
     if node_id:
         records = [replace(record, node_id=node_id) if not record.node_id else record for record in records]
@@ -499,7 +519,7 @@ def parse_graph_correlation_inputs(
     if plog:
         records.extend(parse_graph_correlations_file(plog))
     if plog_dir:
-        for path in sorted(Path(plog_dir).rglob("plog*.log")):
+        for path in _semantic_log_paths(plog_dir):
             records.extend(parse_graph_correlations_file(str(path)))
     if node_id:
         records = [
@@ -573,7 +593,7 @@ def main() -> int:
         description="Merge HCCL semantic plog and fine-grained msprof DB executions."
     )
     parser.add_argument("--plog", default="")
-    parser.add_argument("--plog-dir", default="", help="Directory containing one or more plog*.log files.")
+    parser.add_argument("--plog-dir", default="", help="Directory containing Host plog*.log and AI_CPU device-*.log files.")
     profiler_source = parser.add_mutually_exclusive_group(required=True)
     profiler_source.add_argument(
         "--msprof-db", default="", help="One consolidated msprof_*.db file.")

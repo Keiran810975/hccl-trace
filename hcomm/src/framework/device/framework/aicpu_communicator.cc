@@ -8,6 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include "task_semantic_trace.h"
 #include <iomanip>
 #include "aicpu_communicator.h"
 #include "dispatcher.h"
@@ -1235,6 +1236,11 @@ HcclResult HcclCommAicpu::InitCclbuffer(const HcclOpResParam *commParam)
 
 HcclResult HcclCommAicpu::InitConfigInfo(const HcclOpResParam *commParam)
 {
+    semanticTraceEnabled_ = commParam->rsv[0] == TASK_SEMANTIC_DEVICE_MAGIC && commParam->rsv[1] == 1 &&
+        (static_cast<DevType>(commParam->topoInfo.deviceType) == DevType::DEV_TYPE_910B ||
+         static_cast<DevType>(commParam->topoInfo.deviceType) == DevType::DEV_TYPE_910_93);
+    HCCL_RUN_INFO("[HcclTaskSemanticDevice] build[aicpu-support-v1] enabled[%u] device_id[%u]",
+        static_cast<u32>(semanticTraceEnabled_), commParam->topoInfo.devicePhyId);
     deterministic_ = commParam->config.deterministic;
     interHccsDisable_ = commParam->config.interHccsDisable;
     multiQpThreshold_ = commParam->config.multiQpThreshold;
@@ -3509,6 +3515,7 @@ HcclResult HcclCommAicpu::OrchestrateHcclOp(const std::string &algName, OpParam 
     std::unique_ptr<CollExecutorBase> &executor, AlgResourceResponse &algResource, uint32_t &beginSqePos,
     uint32_t &endSqePos)
 {
+    TaskSemanticDeviceScope traceScope(semanticTraceEnabled_, topoInfo_.userRank, topoInfo_.devicePhyId);
     LogControl logControl(false, false); // 重执行ERROR日志控制，析构时重置日志设置
     PrepareMc2Handler();
     HcclResult ret = HCCL_SUCCESS;
@@ -3618,6 +3625,7 @@ HcclResult HcclCommAicpu::RetryOrchestrateHcclOp(const std::string &algName, OpP
     std::unique_ptr<CollExecutorBase> &executor, AlgResourceResponse &algResource, uint32_t &beginSqePos,
     uint32_t &endSqePos)
 {
+    TaskSemanticDeviceScope traceScope(semanticTraceEnabled_, topoInfo_.userRank, topoInfo_.devicePhyId);
     LogControl logControl(false, false); // 重执行ERROR日志控制，析构时重置日志设置
     if ((param.opType == HcclCMDType::HCCL_CMD_BATCH_SEND_RECV) && retryEnable_) {
         param.BatchSendRecvDataDes.curMode =

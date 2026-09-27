@@ -12,6 +12,9 @@
 #include <cstdlib>
 
 #include "op_unfold_cache_entry.h"
+#ifdef CCL_KERNEL
+#include "task_semantic_aicpu.h"
+#endif
 
 #include "aicpu_hccl_sqcq.h"
 #include "aicpu_hccl_sqcqv1.h"
@@ -105,6 +108,9 @@ namespace hccl {
             if (UNLIKELY(curSqeArray == nullptr)) { // 不能使用CHK_PTR_NULL，因为会return HcclResult
                 HCCL_ERROR("[OpUnfoldCacheEntry][~OpUnfoldCacheEntry] curSqeArray is nullptr");
             } else {
+#ifdef CCL_KERNEL
+                EraseAicpuTaskSemantic(curSqeArray, srcRefreshAddrInfoArrays_[arrayIdx].size());
+#endif
                 free(curSqeArray);
                 curSqeArray = nullptr;
             }
@@ -207,6 +213,9 @@ namespace hccl {
         CHK_PTR_NULL(dstSqeDfxInfoArray);
         CHK_SAFETY_FUNC_RET(memcpy_s(dstSqeDfxInfoArray + sqeStartIdx, (totalSqeCount - sqeStartIdx) * sizeof(AicpuDfxInfo), sqeDfxInfoArray, sqeDfxInfoBytes));
 
+#ifdef CCL_KERNEL
+        CopyAicpuTaskSemantic(dstSqeArray + sqeStartIdx * HCCL_SQE_SIZE, sqeArray, sqeCount);
+#endif
         // 遍历SQE, 根据type更新src/dst RefreshAddrInfo
         std::vector<RefreshAddrInfo>& srcRefreshAddrInfoArray = srcRefreshAddrInfoArrays_[arrayIdx];
         std::vector<RefreshAddrInfo>& dstRefreshAddrInfoArray = dstRefreshAddrInfoArrays_[arrayIdx];

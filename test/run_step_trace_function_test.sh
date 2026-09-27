@@ -20,7 +20,7 @@ Usage:
 Options:
   --out-dir DIR              Output directory. Default: test/out/function
   --plog FILE                HCCL plog containing [HcclTaskSemantic] rows.
-  --plog-dir DIR            Directory containing plog*.log files.
+  --plog-dir DIR            Directory containing Host plog*.log and AI_CPU device-*.log files.
   --msprof-db FILE           Consolidated msprof_*.db.
   --msprof-db-dir DIR        Directory containing PROF_*/msprof_*.db files.
   --node-id ID               Node id assigned to this capture. Default: node0

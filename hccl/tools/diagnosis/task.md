@@ -61,23 +61,26 @@
 - **完成**：小图覆盖 direct、FFts、mixed 与 Notify 收缩；已存单机样例的纯证据修正不改变
   可达关系，边类型/ID 变化有说明。无需另建一套审计框架。
 
-### NEXT-003 采集一个双机正常样例
+### NEXT-003 正常双机样例已完成
 
-- [-] **位置**：HCOMM 实际 executor/template/transport；`test/`。
-- **实现进度**：`codex/multinode-diagnosis` 已提供节点输入清单、逐节点 exact merge、
-  operation inventory 和[双机测试交接](../../../test/prompts/multinode-device-test.md)。
-  2026-09-21 机器 1 容器已就绪，A3 HOST Ring 单机四卡数值通过；修复 direct inline
-  reduction 类型兼容后，同一采集 528/528 exact，见[记录](direct-inline-reduce-validation.md)。
-  真实双机采集仍待执行，不将单机回放或离线 fixture 计为双机设备验收。
-- **工作**：优先双机 AllReduce，先复用已有 Ring/NHR 与修复后的 Mesh，按设备实际选出的
-  机内/机间路径只补 rank 域、phase/peer 和 RDMA/RoCE 关联缺口；先固定一种消息规模并连续运行少量 operation。
-  用一份简单输入清单记录 run、每个 node 的 plog/DB 路径和 user/comm rank 到 node/device
-  的映射，同时记录构建、Toolkit/driver/msprof 版本与命令。
-- **完成**：算子结果正确；各节点输入可分别 exact merge，重复和 kind mismatch 为 0；
-  目标语义匹配率至少 95%，未覆盖项可解释；确认 operation 名称和同步字段能否跨节点对应。
-  样例记录实际算法/transport，不仅记录配置意图。
+2026-09-24在机器0/1 NPU7（各物理14、15）完成最终候选off/on、4 rank各4次8MiB AllReduce。
+数值全部正确，两机各256/256 semantic exact，重复和类型/Notify匹配冲突为0。
+真实路径为single-ring direct + NHR/RoCE，显式operation绑定及物理设备映射有原始证据。
+此前NHR全局rank问题及NPU7暴露的HAL局部设备号问题均已修正并实测。
+完成记录见[AI_CPU支持记录](ai-cpu-support.md)，完整证据在`test/out/ai-cpu-support-20260924/`。
+后续集中NEXT-004的完整图缺口，不再把正常双机语义采集列为待执行。
+
+同日扩大至NPU4–7、16 rank：off/on数值通过，4,800/4,800 semantic exact、1,080条跨机边。
+实际为AllReduceComm全rank NHR；RS/AG各4步。详见AI_CPU支持记录及16 rank本地报告。
 
 ### NEXT-004 打通多机依赖图
+
+2026-09-24：4 rank生产分析已构建144条跨机边、16 rank为1,080条，均0未决跨机通道。
+16 rank完整图因256个本地控制Notify缺operation/notify元数据失败，另有256个本地single。
+新增重点：816个同机RDMA通道被当前跨机/本地构图职责之间的空白遗漏，DB审计存在1,224对
+完整数量及唯一顺序候选，尚未加入生产图。优先复用已有RDMA规则覆盖同机跨设备路径并用
+现存数据回归，再调查控制元数据和512条无算法语义的RDMA门铃；不猜测补边或放宽门禁。
+
 
 - [-] **位置**：HCCL 输入组织、identity 与构图；仅缺事实时修改 HCOMM。
 - **实现进度**：清单驱动的 run 隔离、显式 operation 绑定、Ibverbs RDMA Notify channel、

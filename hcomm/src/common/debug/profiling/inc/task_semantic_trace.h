@@ -34,6 +34,22 @@ struct TaskSemanticTraceInfo {
 };
 
 bool IsTaskSemanticTraceEnabled();
+// Device workers do not inherit the submitting Host process environment.
+// HcclOpResParam::rsv[0:2] carries this opt-in, versioned diagnostic extension.
+constexpr u32 TASK_SEMANTIC_DEVICE_MAGIC = 0x48545331; // HTS1
+class TaskSemanticDeviceScope {
+public:
+    explicit TaskSemanticDeviceScope(bool enabled, u32 userRank = INVALID_VALUE_RANKID,
+        u32 physicalDeviceId = INVALID_UINT);
+    ~TaskSemanticDeviceScope();
+    TaskSemanticDeviceScope(const TaskSemanticDeviceScope &) = delete;
+    TaskSemanticDeviceScope &operator=(const TaskSemanticDeviceScope &) = delete;
+private:
+    int previous_;
+    u32 previousUserRank_;
+    u32 previousPhysicalDeviceId_;
+};
+u32 GetTaskSemanticPhysicalDeviceId();
 bool GetTaskSemanticTraceInfo(TaskSemanticTraceInfo &info);
 bool CaptureTaskSemanticTraceInfo(TaskSemanticTraceInfo &info);
 void SetTaskSemanticTraceInfo(const TaskSemanticTraceInfo &info);
