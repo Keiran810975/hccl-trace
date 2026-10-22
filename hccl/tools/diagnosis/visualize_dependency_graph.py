@@ -72,6 +72,8 @@ EDGE_COLOR = {
     "ffts_notify_sync_observed": "#2b8a3e",
     "direct_notify_sync_exact": "#7b3fb3",
     "local_notify_sync_exact": "#d9488b",
+    "cross_node_notify_sync_observed": "#007c91",
+    "same_node_rdma_notify_sync_observed": "#b05b00",
 }
 PHYSICAL_EDGE_KINDS = tuple(EDGE_COLOR)
 
@@ -361,6 +363,7 @@ def execution_sort_key(row: dict):
 def build_execution_edges(
     rows: List[dict],
     notify_ambiguities: List[dict] | None = None,
+    excluded_notify_graph_ids: frozenset[str] = frozenset(),
 ) -> List[dict]:
     """Build stream, local synchronization, and peer semantic dependencies."""
     edges: List[dict] = []
@@ -440,9 +443,10 @@ def build_execution_edges(
 
     _add_direct_stream_order_edges(rows, add)
     _add_ffts_logical_stream_order_edges(rows, add)
-    ambiguities = _add_ffts_notify_sync_edges(rows, add)
-    ambiguities.extend(_add_direct_notify_sync_edges(rows, add))
-    ambiguities.extend(_add_local_notify_sync_edges(rows, add))
+    notify_rows = [row for row in rows if row["_graph_id"] not in excluded_notify_graph_ids]
+    ambiguities = _add_ffts_notify_sync_edges(notify_rows, add)
+    ambiguities.extend(_add_direct_notify_sync_edges(notify_rows, add))
+    ambiguities.extend(_add_local_notify_sync_edges(notify_rows, add))
     if notify_ambiguities is not None:
         notify_ambiguities.extend(ambiguities)
     return sorted(edges, key=lambda edge: edge["edge_id"])
@@ -1281,8 +1285,9 @@ def _add_local_notify_sync_edges(rows: List[dict], add) -> List[dict]:
                 "local_notify_sync_exact",
                 producer["row"],
                 consumer["row"],
-                "same device-local DB Notify channel and per-stream execution ordinal",
-                "msprof_local_notify_resource_and_per_stream_ordinal",
+                "same verified device-local Notify resource and DB per-stream execution ordinal; "
+                "explicit control aliases, when present, are audited in control_metadata.csv",
+                "verified_local_notify_resource_and_db_per_stream_ordinal",
                 "exact",
                 relation.stable_id,
                 NOTIFY_SEQUENCE_DB_LOCAL_ORDINAL,
@@ -1389,6 +1394,16 @@ def export_dependency_tables(
     rows = read_execution_rows(merged_csv)
     notify_ambiguities: List[dict] = []
     edges = build_execution_edges(rows, notify_ambiguities)
+    return export_execution_tables(rows, edges, notify_ambiguities, prefix)
+
+
+def export_execution_tables(
+    rows: List[dict],
+    edges: List[dict],
+    notify_ambiguities: List[dict],
+    prefix: Path,
+):
+    """Export an already constructed graph through the shared artifact format."""
     graph_stats = analyze_execution_graph(rows, edges)
     _assert_execution_graph_integrity(graph_stats)
     nodes_path = prefix.with_name(prefix.name + "_nodes.csv")
@@ -1418,7 +1433,7 @@ def export_dependency_tables(
     for status, count in ambiguity_counts.items():
         summary["notify_relation_{}".format(status)] = count
     write_csv(str(nodes_path), node_fields, node_rows)
-    write_csv(str(edges_path), EDGE_FIELDS, edges)
+    write_csv(str(edges_path), EDGE_FIELDS, sorted(edges, key=lambda edge: edge["edge_id"]))
     write_csv(
         str(ambiguities_path),
         NOTIFY_AMBIGUITY_FIELDS,

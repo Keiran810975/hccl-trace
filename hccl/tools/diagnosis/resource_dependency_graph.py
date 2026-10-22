@@ -44,13 +44,23 @@ SYNC_EDGE_KIND_MAP = {
     "direct_notify_sync_exact": "resource_notify_sync_exact",
     "local_notify_sync_exact": "resource_local_notify_sync_exact",
     "ffts_notify_sync_observed": "resource_notify_sync_observed",
+    "cross_node_notify_sync_observed": "resource_cross_node_notify_sync_observed",
+    "same_node_rdma_notify_sync_observed": "resource_same_node_rdma_notify_sync_observed",
 }
 RESOURCE_EDGE_COLOR = {
     "resource_stream_order_observed": "#444444",
-    "resource_ffts_order_observed": "#5c6bc0",
+    "resource_ffts_order_semantic": "#5c6bc0",
+    "resource_order_semantic": "#5c6bc0",
+    "resource_local_notify_sync_observed": "#d9488b",
+    "resource_local_notify_sync_semantic": "#d9488b",
+    "resource_notify_sync_semantic": "#2b8a3e",
     "resource_notify_sync_observed": "#2b8a3e",
     "resource_notify_sync_exact": "#7b3fb3",
     "resource_local_notify_sync_exact": "#d9488b",
+    "resource_cross_node_notify_sync_observed": "#007c91",
+    "resource_cross_node_notify_sync_semantic": "#007c91",
+    "resource_same_node_rdma_notify_sync_observed": "#b05b00",
+    "resource_same_node_rdma_notify_sync_semantic": "#b05b00",
 }
 
 RESOURCE_NODE_FIELDS = [
@@ -279,7 +289,11 @@ def _timing_metrics(
         "handoff_gap_ns": "",
         "timing_status": "cross_node_uncalibrated",
     }
-    if record.get("_node_id") == wait.get("_node_id"):
+    if execution_edge["kind"] == "same_node_rdma_notify_sync_observed":
+        # Doorbell completion is not remote data completion. Keep local wait
+        # duration without presenting a network/compute delay decomposition.
+        metrics["timing_status"] = "same_node_rdma_completion_unmeasured"
+    elif record.get("_node_id") == wait.get("_node_id"):
         record_stop = execution.execution_time_order_value(record, "stop")
         remote_block = min(
             wait_span,
@@ -445,6 +459,10 @@ def build_resource_graph(
             item["control_ids"].update(path["control_ids"])
             for edge_id in path["edge_ids"]:
                 item["kinds"].add(execution_edges_by_id[edge_id]["kind"])
+    def weakest(edge_ids):
+        return min((execution_edges_by_id[e]["confidence"] for e in edge_ids),
+                   key={"semantic": 0, "observed": 1, "exact": 2}.__getitem__)
+
     for (src_id, dst_id), path in sorted(local_paths.items()):
         if path["kinds"] == {"direct_stream_order_observed"}:
             kind = "resource_stream_order_observed"
@@ -452,6 +470,8 @@ def build_resource_graph(
             kind = "resource_ffts_order_observed"
         else:
             kind = "resource_order_observed"
+        confidence = weakest(path["edge_ids"])
+        kind = kind.rsplit("_", 1)[0] + "_" + confidence
         relation_id = stable_id("rp", _ordered_unique(path["edge_ids"]))
         add_edge(
             kind,
@@ -462,7 +482,7 @@ def build_resource_graph(
             path["control_ids"],
             "maximal execution-order path contracted through control tasks",
             "execution_order_transitive_contraction",
-            "observed",
+            confidence,
         )
 
     contract_kinds = set(SYNC_EDGE_KIND_MAP)
@@ -525,6 +545,8 @@ def build_resource_graph(
             | set(downstream_path["control_ids"])
         )
         kind = SYNC_EDGE_KIND_MAP[source_edge["kind"]]
+        confidence = weakest(source_edge_ids)
+        kind = kind.rsplit("_", 1)[0] + "_" + confidence
         reason = "Notify record/wait control chain contracted between resource tasks"
         add_edge(
             kind,
@@ -535,7 +557,7 @@ def build_resource_graph(
             control_ids,
             reason,
             source_edge.get("evidence", ""),
-            source_edge.get("confidence", ""),
+            confidence,
             source_edge,
         )
     return (

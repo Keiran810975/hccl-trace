@@ -36,10 +36,17 @@ TaskSemanticScope::TaskSemanticScope(const TaskSemanticTraceInfo &info)
     }
     hadPrevious_ = GetTaskSemanticTraceInfo(previousInfo_);
     SetTaskSemanticTraceInfo(info);
+    if (GetTaskBuildAnchor(buildAnchor_)) {
+        (void)GetTaskSemanticTraceInfo(buildInfo_);
+        buildStartNs_ = TaskBuildClockNs();
+    }
 }
 
 TaskSemanticScope::~TaskSemanticScope()
 {
+    if (buildStartNs_ != 0) {
+        ReportTaskBuildSpan(buildAnchor_, buildInfo_, TaskBuildClockNs() - buildStartNs_);
+    }
     if (!enabled_) {
         return;
     }

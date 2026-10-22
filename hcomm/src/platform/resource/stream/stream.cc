@@ -12,6 +12,9 @@
 #include "adapter_error_manager.h"
 #include "sal.h"
 #include "stream_pub.h"
+#ifdef CCL_KERNEL
+#include "task_semantic_aicpu.h"
+#endif
 
 namespace hccl {
 // 默认构造函数只产生无效的Stream对象
@@ -307,6 +310,9 @@ HcclResult Stream::GetNextSqeBufferAddr(uint8_t *&sqeBufferAddr, uint8_t *&sqeTy
         CHK_RET(ClearLocalBuff());
     }
     sqeBufferAddr = buff.localBuff + buff.tailSqeIdx * HCCL_SQE_SIZE;
+#ifdef CCL_KERNEL
+    EraseAicpuTaskSemantic(sqeBufferAddr, 1);
+#endif
     sqeTypeAddr = &buff.sqeType[buff.tailSqeIdx];
     sqeDfxInfoAddr = reinterpret_cast<uint8_t*>(&buff.dfxInfo[buff.tailSqeIdx]);
 
@@ -345,6 +351,9 @@ HcclResult Stream::ClearLocalBuff()
 {
     CHK_PTR_NULL(sqeContext_);
     auto &buff = sqeContext_->buffer;
+#ifdef CCL_KERNEL
+    EraseAicpuTaskSemantic(buff.localBuff, HCCL_SQE_MAX_CNT);
+#endif
     if (memset_s(buff.localBuff, sizeof(buff.localBuff), 0, buff.tailSqeIdx * HCCL_SQE_SIZE) != EOK) {
         HCCL_ERROR("[Stream][ClearLocalBuff] clear local buff failed");
         return HCCL_E_MEMORY;

@@ -1,0 +1,54 @@
+diff --git a/hcomm/src/platform/resource/netdev/hccl_net_dev_v1.cc b/hcomm/src/platform/resource/netdev/hccl_net_dev_v1.cc
+index ca828b7..471b5f6 100644
+--- a/hcomm/src/platform/resource/netdev/hccl_net_dev_v1.cc
++++ b/hcomm/src/platform/resource/netdev/hccl_net_dev_v1.cc
+@@ -88,13 +88,14 @@ HcclResult HcclNetDevCloseV1(HcclNetDev netDev)
+ 
+     hccl::NetDevContext *pNetDevCtx = static_cast<hccl::NetDevContext *>(netDev);
+     bool isBackup = pNetDevCtx->GetIsBackup();
++    HcclNetDevDeployment deployment = pNetDevCtx->GetNetDevDeployment();
+     HcclResult ret = pNetDevCtx->DeinitV2();
+     if (ret != HCCL_SUCCESS) {
+         HCCL_ERROR("[HcclNetDevClose] NetDev Close fail. ret[%u]", ret);
+     }
+ 
+     // 再销毁进程
+-    switch (pNetDevCtx->GetNetDevDeployment()) {
++    switch (deployment) {
+         case HCCL_NETDEV_DEPLOYMENT_HOST: {
+             HcclResult ret_temp = hccl::NetworkManager::GetInstance(pNetDevCtx->GetLogicId())
+                                       .DeInitV2(NICDeployment::NIC_DEPLOYMENT_HOST, isBackup, false);
+@@ -112,7 +113,7 @@ HcclResult HcclNetDevCloseV1(HcclNetDev netDev)
+         }
+         default:
+             delete pNetDevCtx;
+-            HCCL_ERROR("[HcclNetDevClose]No Such HcclNetDevDeployment: %d", pNetDevCtx->GetNetDevDeployment());
++            HCCL_ERROR("[HcclNetDevClose]No Such HcclNetDevDeployment: %d", deployment);
+             return HCCL_E_NOT_SUPPORT;
+     }
+ 
+diff --git a/hcomm/src/platform/resource/notify/notify_pool_impl.h b/hcomm/src/platform/resource/notify/notify_pool_impl.h
+index 0ac8a5d..e712470 100644
+--- a/hcomm/src/platform/resource/notify/notify_pool_impl.h
++++ b/hcomm/src/platform/resource/notify/notify_pool_impl.h
+@@ -11,6 +11,7 @@
+ #ifndef NOTIFY_POOL_IMPL_H
+ #define NOTIFY_POOL_IMPL_H
+ 
++#include <array>
+ #include <mutex>
+ #include <map>
+ #include "hccl/base.h"
+diff --git a/hcomm/src/platform/resource/transport/host/transport_direct_npu.cc b/hcomm/src/platform/resource/transport/host/transport_direct_npu.cc
+index 380e5a5..c5c9292 100644
+--- a/hcomm/src/platform/resource/transport/host/transport_direct_npu.cc
++++ b/hcomm/src/platform/resource/transport/host/transport_direct_npu.cc
+@@ -96,7 +96,7 @@ HcclResult TransportDirectNpu::GetLocalNotifyValueAddrKey(std::vector<AddrKey> &
+ 
+ HcclResult TransportDirectNpu::GetLocalRdmaNotify(std::vector<HcclSignalInfo> &rdmaNotify)
+ {
+-    HcclSignalInfo signalInfo;
++    HcclSignalInfo signalInfo{};
+     rdmaNotify.push_back(signalInfo);
+     rdmaNotify.push_back(signalInfo);
+     rdmaNotify.push_back(signalInfo);

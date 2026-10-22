@@ -1,0 +1,15 @@
+{
+  "master_addr": "SET_NODE0_REACHABLE_IP",
+  "master_port": 29660,
+  "background_port_base": 29760,
+  "python": "python3",
+  "op_expansion_mode": "AI_CPU",
+  "preflight_confirmed": false,
+  "shared_path_evidence": "",
+  "internal_delay_runtime_evidence": "",
+  "nic_limit": null,
+  "nodes": [
+    {"node_rank": 0, "node_id": "node0", "devices": [6, 7], "hccl_if_ip": "", "hccl_socket_ifname": "", "background_addr": "", "runtime_lib_dir": "", "runtime_files": []},
+    {"node_rank": 1, "node_id": "node2", "devices": [6, 7], "hccl_if_ip": "", "hccl_socket_ifname": "", "background_addr": "SET_NODE2_REACHABLE_IP", "runtime_lib_dir": "", "runtime_files": []}
+  ]
+}

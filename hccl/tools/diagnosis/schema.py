@@ -77,6 +77,7 @@ MERGED_FIELDS = (
     "correlation_parent_task_id",
     "match_method",
     "match_confidence",
+    "profiler_size_bytes",
 )
 
 
@@ -152,6 +153,7 @@ class ProfilerTask:
     profiler_notify_id: int = -1
     profiler_src_rank: int = -1
     profiler_dst_rank: int = -1
+    profiler_size_bytes: int = -1
 
     @property
     def merge_key(self):

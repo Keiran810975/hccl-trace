@@ -9,6 +9,7 @@
  */
 
 #include "order_launch.h"
+#include "task_semantic_trace.h"
 #include "log.h"
 #include "acl/acl_base.h"
 #include "acl/acl_rt.h"
@@ -19,6 +20,22 @@
 #include "adapter_rts_common.h"
 
 namespace hccl {
+namespace {
+void ReportOrderControl(const char *kind, u32 notifyId, const Stream &stream)
+{
+    TaskControlAnchor anchor;
+    if (!GetTaskControlAnchor(anchor)) {
+        return;
+    }
+    u32 taskId = 0;
+    u32 streamId = 0;
+    if (hrtGetTaskIdAndStreamID(taskId, streamId) == HCCL_SUCCESS &&
+        streamId == static_cast<u32>(stream.id())) {
+        ReportTaskControl(anchor, streamId, taskId, kind, notifyId);
+    }
+}
+}
+
 OrderLaunch &OrderLaunch::GetInstance(s32 deviceLogicID)
 {
     static OrderLaunch orderLaunch[MAX_MODULE_DEVICE_NUM];
@@ -192,12 +209,14 @@ HcclResult OrderLaunch::LaunchInOrder(std::string &group, const Stream &kernelSt
     CHK_PRT_RET(ret != ACL_SUCCESS,
         HCCL_ERROR("[%s] aclrtWaitAndResetNotify failed, ret[%d], notifyId[%u], streamId[%d], timeOut[%d s]",
         __func__, ret, notify0->notifyId_, kernelStream.id(), timeOut), HCCL_E_RUNTIME);
+    ReportOrderControl("notify_wait", notify0->notifyId_, kernelStream);
     HCCL_CONFIG_INFO(HCCL_TASK, "[%s] aclrtWaitAndResetNotify para: notifyId[%u], streamId[%d], timeOut[%d s]",
         __func__, notify0->notifyId_, kernelStream.id(), timeOut);
 
     ret = aclrtRecordNotify(notify0->ptr(), hostOrderStream.ptr());
     CHK_PRT_RET(ret != ACL_SUCCESS, HCCL_ERROR("[%s] aclrtRecordNotify failed, ret[%d], notifyId[%u], streamId[%d]",
         __func__, ret, notify0->notifyId_, hostOrderStream.id()), HCCL_E_RUNTIME);
+    ReportOrderControl("notify_record", notify0->notifyId_, hostOrderStream);
     HCCL_CONFIG_INFO(HCCL_TASK, "[%s] aclrtRecordNotify para: notifyId[%u], streamId[%d]",
         __func__, notify0->notifyId_, hostOrderStream.id());
 
@@ -205,6 +224,7 @@ HcclResult OrderLaunch::LaunchInOrder(std::string &group, const Stream &kernelSt
     CHK_PRT_RET(ret != ACL_SUCCESS,
         HCCL_ERROR("[%s] aclrtWaitAndResetNotify failed, ret[%d], notifyId[%u], streamId[%d], timeOut[%d s]",
         __func__, ret, notify1->notifyId_, hostOrderStream.id(), timeOut), HCCL_E_RUNTIME);
+    ReportOrderControl("notify_wait", notify1->notifyId_, hostOrderStream);
     HCCL_CONFIG_INFO(HCCL_TASK, "[%s] aclrtWaitAndResetNotify para: notifyId[%u], streamId[%d], timeOut[%d s]",
         __func__, notify1->notifyId_, hostOrderStream.id(), timeOut);
     return HCCL_SUCCESS;

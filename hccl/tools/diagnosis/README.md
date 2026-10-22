@@ -1,8 +1,24 @@
 # HCCL fine-grained trace diagnosis
 
 开发入口：[活动任务](task.md)、[实现规格](spec.md)、[阶段归档](arch-94a1ab31c3ee.md)。
-本地真实验证基线是 8 卡 single-ring direct RS/AG；其他算法分支已有实现和部分设备记录，
-详见 [分支调查](branch-review-2026-09-15.md)。多机与异常定位仍在计划中。
+双机配置、容器、运行和样例验收见[910C运行指南](../../../文档/910C双机实验运行与验收指南.md)。
+`nf` 已整合 `codex/ring-nhr-diagnosis@6312667` 的 AI_CPU、控制事实、同机/跨机 RDMA
+及等待诊断，保留 master 的默认选路修复和本地关键路径。历史设备结论只对应原场景，
+本次四机验收进度见 [活动任务](task.md)。
+代码与真实设备验证边界见 [nf四机验证记录](nf-four-node-validation.md)。
+Node0+Node2正常小负载的配套AI_CPU语义、跨机依赖和等待诊断已通过，
+详见[授权双机验收](nf-authorized-two-node-validation.md)；两机原验签及官方Device包均恢复。
+
+## 完整多机回放
+
+```bash
+python3 -m hccl.tools.diagnosis.run_diagnosis run.json -o replay
+```
+
+输入清单必须提供各节点原始 plog/DB、真实 rank/device 映射及有调用证据的 operation 绑定。
+通过语义和图检查后才输出诊断 JSON/CSV、节点本地关键路径及 execution/waits/resource HTML。
+正常样例没有异常基线时不硬报根因；跨节点无时钟校准时不累计全局路径。
+已有正常参考可通过 `--baseline-dir` 传入，基线须是相同 workload 配置。
 
 诊断链只接受两个事实源：HCOMM `[HcclTaskSemantic]` plog 与 msprof consolidated
 `msprof_*.db`。Chrome-trace `msprof_*.json` 和 `task_time.csv` 已不再作为生产输入。
@@ -87,7 +103,7 @@ python -m tools.diagnosis.validate_dependency_graph dep_graph \
 execution node 使用
 `(node, device, physical stream, task, subtask, connection)` 的稳定摘要作为
 `graph_id`，CSV 重排和时间精度变化不会改变 ID；重复 physical identity 是硬错误。
-node/edge CSV 当前标记 `graph_schema_version=4`。execution graph 保留 Notify；
+node/edge CSV 当前标记 `graph_schema_version=6`。execution graph 保留 Notify；
 resource graph 只保留 `sdma/rdma/reduce_inline/reduce_tbe` 资源任务，并把唯一可达的
 `resource -> record -> wait -> resource` 控制链收缩为资源边。资源节点继续复用 execution
 `graph_id`；缺少一侧资源任务时生成稳定 boundary，多候选时只写 ambiguity，不做笛卡尔积。
@@ -153,6 +169,21 @@ DEP-008 已删除默认 connection/time Notify 推断。旧 JSON 的 3,016 条�
 旧实现中的“右邻居上一 payload”“上一 step”等算法规则不再作为默认边；它们不是 profiler
 观测事实。多节点关系需先确认跨端共享身份，现有 DB 字段不足时再增加 protocol token。
 拓扑配对不依赖跨节点时间比较；跨时钟差值和全局路径累计才需要统一时间基或校准 artifact。
+
+## 关键路径分析（nf 分支）
+
+新增离线入口，读取 execution artifact，不读取 resource `weight_ns` 来累加全量 Wait：
+
+```bash
+python3 -m hccl.tools.diagnosis.critical_path dep_graph_nodes.csv \
+  --edges-csv dep_graph_edges.csv -o critical_path
+```
+
+输出关键任务、slack、带原始边 ID 的代表路径，以及逐项缩短耗时后的模型完成时间变化。
+默认终点是全部输入任务完成，包含采集初始化/收尾；分析业务 workload 时应按
+`--operation-scope` 或 `--completion-task` 明确范围。仅支持同节点时间域，多机未校准时
+拒绝全局累计。FFts/未配对 Wait/时间冲突保留为 partial evidence，不宣称确定根因。
+计费公式、并行分支示例、CLI 和限制见 [关键路径说明](critical-path.md)。
 
 ## 交互可视化
 

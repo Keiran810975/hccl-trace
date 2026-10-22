@@ -8,6 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include "task_semantic_trace.h"
 #include <memory>
 #include <atomic>
 #include <chrono>
@@ -5070,6 +5071,10 @@ namespace hccl
         opResPara_.kfcControlTransferH2DParams = kfcControlTransferH2D_->GetCommunicateParams();
         opResPara_.kfcStatusTransferD2HParams = kfcStatusTransferD2H_->GetCommunicateParams();
         opResPara_.debugConfig = GetDebugConfig();
+        // Versioned diagnostic extension; reserved words, unchanged H2D ABI.
+        opResPara_.rsv[0] = IsTaskSemanticTraceEnabled() ? TASK_SEMANTIC_DEVICE_MAGIC : 0;
+        opResPara_.rsv[1] = IsTaskSemanticTraceEnabled() ? 2 : 0;
+        opResPara_.rsv[2] = IsTaskSemanticTraceEnabled() ? ResolveTaskSemanticDeviceId(deviceLogicId_) : 0;
 
         CHK_SMART_PTR_NULL(opRetryStreamPtr_);
         if (opRetryStreamPtr_->find(newTag) == opRetryStreamPtr_->end()) {
@@ -6868,6 +6873,37 @@ namespace hccl
         CHK_RET(LocalNotify::Post(mainStream, dispatcher_,
             localAiCpuOpNotify_[static_cast<u32>(AicpuLocalNotifyIdx::HOST_TO_AICPU_0)], INVALID_VALUE_STAGE));
 
+        TaskControlAnchor controlAnchor;
+        if (IsTaskSemanticTraceEnabled()) {
+            u32 taskId = 0;
+            u32 streamId = 0;
+            if (hrtGetTaskIdAndStreamID(taskId, streamId) == HCCL_SUCCESS &&
+                streamId == static_cast<u32>(mainStream.id())) {
+                controlAnchor.deviceId = ResolveTaskSemanticDeviceId(deviceLogicId_);
+                controlAnchor.streamId = streamId;
+                controlAnchor.taskId = taskId;
+            }
+        }
+        TaskControlScope controlScope(controlAnchor);
+        auto reportControl = [&](const char *kind, const std::shared_ptr<LocalNotify> &notify,
+                                 const Stream &stream) {
+            TaskControlAnchor anchor;
+            if (!GetTaskControlAnchor(anchor)) { return; }
+            u32 taskId = 0;
+            u32 streamId = 0;
+            if (hrtGetTaskIdAndStreamID(taskId, streamId) != HCCL_SUCCESS ||
+                streamId != static_cast<u32>(stream.id())) { return; }
+            u64 notifyId = INVALID_U64;
+            u64 dbNotifyId = INVALID_U64;
+            if (notify != nullptr) {
+                u64 offset = 0;
+                if (notify->GetNotifyOffset(offset) != HCCL_SUCCESS) { return; }
+                notifyId = notify->notifyId_;
+                dbNotifyId = (static_cast<u64>(INVALID_VALUE_RANKID) << 32) | (offset & 0xFFFFFFFFULL);
+            }
+            ReportTaskControl(anchor, streamId, taskId, kind, notifyId, dbNotifyId);
+        };
+        reportControl("notify_record", localAiCpuOpNotify_[static_cast<u32>(AicpuLocalNotifyIdx::HOST_TO_AICPU_0)], mainStream);
         Stream kfcOpStream;
         HcclWorkflowMode mode = GetWorkflowMode();
         bool isSupportHcomAttachedStream = !(attachedStreams_.empty() || attachedStreams_[0].ptr() == nullptr); // true 表示图模式下成功申请附属从流
@@ -6938,6 +6974,7 @@ namespace hccl
         CHK_RET(KernelLaunchChooseAicpuOrCustom(opParam.inputPtr, opParam.outputPtr, kfcOpStream.ptr(),
                                                 reinterpret_cast<u64>(deviceContext.ptr()), opTilingDataMem.ptr(), opTilingDataSize,
                                                 kernelName, mode, opParam.tag, isCustom));
+        reportControl("kernel_aicpu", nullptr, kfcOpStream);
         if (opParam.isCapture) {
             CHK_RET(orderLaunch.AclgraphLaunchInOrderToKernelStream(identifier_, kfcOpStream));
         }
@@ -6947,6 +6984,7 @@ namespace hccl
         CHK_RET(ProfilingManagerPub::CallMsprofReportNodeInfo(beginTime, endTime, profName, threadId));
         CHK_RET(LocalNotify::Wait(mainStream, dispatcher_,
             localAiCpuOpNotify_[static_cast<u32>(AicpuLocalNotifyIdx::HOST_TO_AICPU_1)], INVALID_VALUE_STAGE, timeOut));
+        reportControl("notify_wait", localAiCpuOpNotify_[static_cast<u32>(AicpuLocalNotifyIdx::HOST_TO_AICPU_1)], mainStream);
         return HCCL_SUCCESS;
     }
 

@@ -1,0 +1,43 @@
+{
+  "master_addr": "192.169.0.173",
+  "master_port": 29660,
+  "background_port_base": 29760,
+  "python": "/project/venvs/hccl-py311/bin/python",
+  "op_expansion_mode": "AI_CPU",
+  "preflight_confirmed": false,
+  "shared_path_evidence": "",
+  "internal_delay_runtime_evidence": "",
+  "nic_limit": null,
+  "nodes": [
+    {
+      "node_rank": 0,
+      "node_id": "node0",
+      "devices": [1, 3],
+      "hccl_if_ip": "192.169.0.173",
+      "hccl_socket_ifname": "enp23s0f3",
+      "background_addr": "192.169.0.173",
+      "runtime_lib_dir": "/workspace/nf-20261022/deploy/lib64",
+      "runtime_files": [
+        "/workspace/nf-20261022/deploy/lib64/libhcomm.so",
+        "/workspace/nf-20261022/deploy/lib64/libhccl_alg.so",
+        "/workspace/nf-20261022/deploy/lib64/libhccl_plf.so",
+        "/usr/local/Ascend/cann-8.5.1/opp/built-in/op_impl/aicpu/kernel/aicpu_hcomm.tar.gz"
+      ]
+    },
+    {
+      "node_rank": 1,
+      "node_id": "node2",
+      "devices": [1, 3],
+      "hccl_if_ip": "192.169.0.125",
+      "hccl_socket_ifname": "enp23s0f3",
+      "background_addr": "192.169.0.125",
+      "runtime_lib_dir": "/workspace/nf-20261022/deploy/lib64",
+      "runtime_files": [
+        "/workspace/nf-20261022/deploy/lib64/libhcomm.so",
+        "/workspace/nf-20261022/deploy/lib64/libhccl_alg.so",
+        "/workspace/nf-20261022/deploy/lib64/libhccl_plf.so",
+        "/usr/local/Ascend/cann-8.5.1/opp/built-in/op_impl/aicpu/kernel/aicpu_hcomm.tar.gz"
+      ]
+    }
+  ]
+}

@@ -227,6 +227,8 @@ HcclResult TaskProfiling::ReportCapturedTaskSemantic(const TaskData &taskData, u
     TaskSemanticTraceInfo enrichedInfo;
     if (semanticInfo != nullptr) {
         enrichedInfo = *semanticInfo;
+        // Algorithm subcommunicator ranks are not global user ranks.
+        enrichedInfo.userRank = localRank_;
         enrichedInfo.submitTs = submitTs;
         if (taskData.taskType == TaskType::TASK_NOTIFY_RECORD || taskData.taskType == TaskType::TASK_NOTIFY_WAIT) {
             enrichedInfo.notifyId = taskData.Notify.notifyID;

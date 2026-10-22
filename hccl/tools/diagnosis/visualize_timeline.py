@@ -390,13 +390,20 @@ def assign_time_slots(rows: List[dict]) -> Dict[Tuple[str, int, int, int], int]:
 
 
 def render_time_svg(rows: List[dict], gaps: List[dict], output: Path, max_width: int, min_px_per_us: float,
-                    show_gap_threshold: float, time_scale: str) -> None:
+                    show_gap_threshold: float, time_scale: str, time_span_us: float = 0.0) -> None:
     if not rows:
         raise ValueError("no matched timed rows to render")
 
     min_t = min(row["_start"] for row in rows)
     max_t = max(row["_stop"] for row in rows)
-    span = max(1.0, max_t - min_t)
+    actual_span = max(1.0, max_t - min_t)
+    if time_span_us < 0:
+        raise ValueError("time span must be non-negative")
+    if time_span_us and time_span_us < actual_span:
+        raise ValueError(
+            f"time span {time_span_us:.3f} us is shorter than task span {actual_span:.3f} us"
+        )
+    span = time_span_us or actual_span
     left = 250
     right = 80
     top = 92
@@ -492,6 +499,12 @@ def main() -> int:
     parser.add_argument("--min-px-per-us", type=float, default=0.025)
     parser.add_argument("--show-gap-threshold", type=float, default=20.0)
     parser.add_argument("--time-scale", choices=("minimum", "fit"), default="minimum")
+    parser.add_argument(
+        "--time-span-us",
+        type=float,
+        default=0.0,
+        help="Use a fixed relative time span for comparable time-layout SVGs.",
+    )
     args = parser.parse_args()
 
     output = args.output or args.merged_csv.with_name(args.merged_csv.stem + "_timeline.svg")
@@ -503,7 +516,16 @@ def main() -> int:
     if args.layout == "logical":
         render_logical_svg(rows, output, args.col_width, args.node_width)
     else:
-        render_time_svg(rows, gaps, output, args.max_width, args.min_px_per_us, args.show_gap_threshold, args.time_scale)
+        render_time_svg(
+            rows,
+            gaps,
+            output,
+            args.max_width,
+            args.min_px_per_us,
+            args.show_gap_threshold,
+            args.time_scale,
+            args.time_span_us,
+        )
     nodes_path = output.with_name(output.stem + "_nodes.csv")
     gaps_path = output.with_name(output.stem + "_gaps.csv")
     export_nodes(nodes_path, rows)

@@ -31,6 +31,9 @@ private:
     TaskSemanticTraceInfo previousInfo_{};
     bool hadPrevious_{false};
     bool enabled_{false};
+    TaskControlAnchor buildAnchor_{};
+    TaskSemanticTraceInfo buildInfo_{};
+    u64 buildStartNs_{0};
 };
 
 class TaskSemanticEventScope {

@@ -7,6 +7,7 @@ import argparse
 import os
 import sqlite3
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Sequence
 
@@ -39,11 +40,16 @@ TASK_KIND_BY_EVENT = {
     "SDMA": "sdma",
     "MEMCPY_ASYNC": "sdma",
     "RDMASEND": "rdma",
+    "RDMA_DB_SEND": "rdma",
     "REDUCE_INLINE": "reduce_inline",
     "REDUCE_TBE": "reduce_tbe",
     "NOTIFY_RECORD": "notify_record",
     "WRITE_VALUE": "notify_record",
     "NOTIFY_WAIT": "notify_wait",
+    # Device-expanded AI_CPU executions use explicit SQE names in CANN 8.5.1.
+    "SDMA_SQE": "sdma",
+    "NOTIFY_RECORD_SQE": "notify_record",
+    "NOTIFY_WAIT_SQE": "notify_wait",
 }
 
 
@@ -157,6 +163,12 @@ def parse_file(path: str, default_node_id: str = "") -> List[ProfilerTask]:
                     path, list(device_ids)
                 )
             )
+        has_communication_type = "taskType" in _table_columns(connection, "COMMUNICATION_TASK_INFO")
+        size_column = ("communication.size" if "size" in _table_columns(connection, "COMMUNICATION_TASK_INFO") else "NULL")
+        communication_type = "communication_type.value" if has_communication_type else "NULL"
+        communication_type_join = (
+            "LEFT JOIN STRING_IDS AS communication_type ON communication_type.id = communication.taskType"
+            if has_communication_type else "")
         rows = connection.execute(
             """
             SELECT
@@ -170,6 +182,8 @@ def parse_file(path: str, default_node_id: str = "") -> List[ProfilerTask]:
                 task.taskId AS task_id,
                 task.modelId AS model_id,
                 task_type.value AS task_type,
+                {communication_type} AS communication_type,
+                {size_column} AS size_bytes,
                 compute_name.value AS compute_name,
                 communication.notifyId AS notify_id,
                 communication.srcRank AS src_rank,
@@ -187,6 +201,7 @@ def parse_file(path: str, default_node_id: str = "") -> List[ProfilerTask]:
               ON compute_name.id = compute.name
             LEFT JOIN COMMUNICATION_TASK_INFO AS communication
               ON communication.globalTaskId = task.globalTaskId
+            {communication_type_join}
             LEFT JOIN COMMUNICATION_OP AS operation
               ON operation.opId = communication.opId
             LEFT JOIN STRING_IDS AS op_name
@@ -195,7 +210,8 @@ def parse_file(path: str, default_node_id: str = "") -> List[ProfilerTask]:
               ON group_name.id = operation.groupName
             WHERE UPPER(task_type.value) <> 'AI_CORE'
             ORDER BY task.startNs, task.endNs, task.streamId, task.taskId, task.contextId
-            """
+            """.format(communication_type=communication_type, size_column=size_column,
+                       communication_type_join=communication_type_join)
         )
         tasks = []
         for row in rows:
@@ -206,12 +222,25 @@ def parse_file(path: str, default_node_id: str = "") -> List[ProfilerTask]:
                 context_id = -1
             task_type = str(row["task_type"] or "")
             event_name = str(row["compute_name"] or task_type).strip()
+            task_kind = _task_kind(task_type)
+            if task_type.upper() == "SDMA_SQE":
+                # The same hardware opcode carries memcpy and inline reduction.
+                # Size alone cannot distinguish a control counter from a payload.
+                task_kind = {"REDUCE_INLINE": "reduce_inline", "MEMCPY": "sdma"}.get(
+                    str(row["communication_type"] or "").upper(), task_kind)
+            if task_type.upper() == "WRITE_VALUE_SQE":
+                # SQE opcode alone conflates Notify writes and RDMA doorbells.
+                # Require the same execution's communication profiling subtype.
+                task_kind = {"RDMASEND": "rdma", "INTER_RANK_RECORD": "notify_record",
+                             "NOTIFY_RECORD": "notify_record"}.get(
+                    str(row["communication_type"] or "").upper(), task_kind)
             tasks.append(ProfilerTask(
                 node_id=default_node_id,
                 device_id=int(row["device_id"]),
                 stream_id=int(row["stream_id"]),
                 task_id=int(row["task_id"]),
-                task_kind=_task_kind(task_type),
+                task_kind=task_kind,
+                profiler_size_bytes=_optional_int(row["size_bytes"]),
                 task_start=_ns_to_us_text(start_ns),
                 task_stop=_ns_to_us_text(end_ns),
                 duration=_ns_to_us_text(end_ns - start_ns),
@@ -258,6 +287,49 @@ def discover_db_files(path: str) -> List[Path]:
             "no consolidated msprof_*.db found under {!r}".format(path)
         )
     return files
+
+
+@dataclass(frozen=True)
+class ProfilerOperation:
+    node_id: str
+    device_id: int
+    group_name: str
+    op_name: str
+    op_id: int
+    start_ns: int
+    end_ns: int
+
+
+def parse_operations(path: str, node_id: str = "") -> List[ProfilerOperation]:
+    """Read actual COMMUNICATION_OP intervals; never infer from child tasks."""
+    operations = []
+    identities = set()
+    seen_devices = set()
+    for db in discover_db_files(path):
+        connection = _readonly_connection(str(db))
+        try:
+            _validate_contract(connection, str(db))
+            devices = _device_ids(connection)
+            if len(devices) != 1 or devices[0] in seen_devices:
+                raise MsprofDbError("operation input requires unique per-device DBs")
+            seen_devices.add(devices[0])
+            if not {"startNs", "endNs"} <= _table_columns(connection, "COMMUNICATION_OP"):
+                continue  # Older minimal inputs have no operation timing evidence.
+            for row in connection.execute(
+                "SELECT o.*, g.value AS group_name, n.value AS op_name FROM COMMUNICATION_OP o "
+                "JOIN STRING_IDS g ON g.id=o.groupName JOIN STRING_IDS n ON n.id=o.opName"
+            ):
+                key = (int(row["deviceId"]), row["group_name"], row["op_name"])
+                if key in identities or key[0] != devices[0] or not all(key[1:]):
+                    raise MsprofDbError("ambiguous operation timing identity: {!r}".format(key))
+                identities.add(key)
+                start, end = int(row["startNs"]), int(row["endNs"])
+                if end < start:
+                    raise MsprofDbError("operation end precedes start: {!r}".format(key))
+                operations.append(ProfilerOperation(node_id, *key, int(row["opId"]), start, end))
+        finally:
+            connection.close()
+    return operations
 
 
 def parse_inputs(

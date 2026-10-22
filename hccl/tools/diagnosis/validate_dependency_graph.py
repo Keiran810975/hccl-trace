@@ -122,6 +122,8 @@ def validate_dependency_artifacts(
             "direct_notify_sync_exact",
             "local_notify_sync_exact",
             "ffts_notify_sync_observed",
+            "cross_node_notify_sync_observed",
+            "same_node_rdma_notify_sync_observed",
         )
     )
     stats["execution_payload_edges"] = execution_kinds.get(

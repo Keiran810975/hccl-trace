@@ -1,5 +1,18 @@
 # HCCL Trace 单机实现与后续开发交接归档
 
+## 2026-09-24 新阶段入口
+
+`codex/ring-nhr-diagnosis` 已完成固定2x4 Single Ring/NHR诊断闭环：1,792/1,792 exact，
+1,504个Wait全部配对，288条跨机边，execution/resource完整门禁通过；
+Ring rank3/RS step1与NHR rank7/RS step0的40ms CPU构图异常均4/4定位正确，
+分别关联112/88项长等待。111项Python回归、Host/Device构建、C++stub和实际数据扰动检查通过。
+最终正常off/on数值正确、无注入残留；验签恢复、远端临时产物清理完成。
+
+实现合同、边界与测试证据见[Ring/NHR场景记录](ring-nhr-diagnosis.md)和
+[测试报告](../../../test/out/ring-nhr-diagnosis/测试结果说明.md)。此前活动计划已归档到
+[2026-09-24快照](archive/2026-09-24/task-before-ring-nhr-completion.md)。
+本段补充最新入口，下文为旧阶段事实，不再作为本场景待办。
+
 > 本归档记录旧本地 `94a1ab3`，不覆盖后来补查发现的远端增量。远端 master 已修复
 > 提前返回窗口，另有 Ring/Mesh/NHR/RHD 分支；详见
 > [分支调查](branch-review-2026-09-15.md)。以下旧状态保留作历史快照。

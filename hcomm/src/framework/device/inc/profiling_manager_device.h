@@ -61,6 +61,7 @@ public:
     static uint32_t GetStartReportSqeIdx(s32 streamId);
     static bool GetProfL0State();
     static bool GetProfL1State();
+    static bool GetKernelTaskIdentity(uint32_t &streamId, uint64_t &taskId);
     static HcclResult ReportMainStreamTask(hccl::Stream& stream, uint16_t taskId, uint16_t type);
     static HcclResult ReportFilpTask(s32 streamId,  uint16_t taskId, uint32_t flipNum);
     static uint64_t TransferAlgType(AlgType algType);

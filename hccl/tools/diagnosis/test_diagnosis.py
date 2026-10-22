@@ -34,7 +34,7 @@ if __package__ in (None, ""):
         parse_inputs as parse_msprof_db_inputs,
     )
     from diagnosis.parse_plog import parse_graph_correlation_lines, parse_plog_lines
-    from diagnosis.schema import GraphCorrelation, ProfilerTask
+    from diagnosis.schema import GraphCorrelation, ProfilerTask, SemanticRecord
     from diagnosis.validate_trace import collect_step_contract_errors, validate_rows
     from diagnosis.visualize_dependency_graph import (
         analyze_execution_graph,
@@ -72,7 +72,7 @@ else:
         parse_inputs as parse_msprof_db_inputs,
     )
     from .parse_plog import parse_graph_correlation_lines, parse_plog_lines
-    from .schema import GraphCorrelation, ProfilerTask
+    from .schema import GraphCorrelation, ProfilerTask, SemanticRecord
     from .validate_trace import collect_step_contract_errors, validate_rows
     from .visualize_dependency_graph import (
         analyze_execution_graph,
@@ -316,7 +316,8 @@ def dependency_edge(kind, src, dst, edge_id, relation_id=""):
         "dst": dst,
         "reason": "fixture",
         "evidence": "fixture",
-        "confidence": "exact",
+        "confidence": "semantic" if kind == "ffts_logical_stream_order" else
+                      ("observed" if kind.endswith("_observed") else "exact"),
         "relation_id": relation_id,
         "semantic_status": "both",
         "signal_kind": "ack",
@@ -444,6 +445,57 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertEqual(stats["unmatched_semantic"], 1)
         self.assertEqual(matched[0]["profiler_task_id"], 2)
         self.assertEqual(matched[0]["match_confidence"], "exact")
+
+    def test_direct_inline_reduce_matches_memcpy_db_without_relabeling(self):
+        # A3 HOST Ring reports inline reduction as a direct MEMCPY_ASYNC TASK.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "msprof_fixture.db")
+            create_msprof_db(path)
+            profilers = parse_msprof_db_file(path, "node0")
+        semantic = SemanticRecord(
+            node_id="node0", device_id=0, stream_id=13, task_id=1,
+            algorithm="ring", phase="reduce_scatter", step=0,
+            task_kind="reduce_inline", event="rx_payload_reduce_start",
+        )
+        rows, stats = merge_records([semantic], profilers)
+        matched = [row for row in rows if row["match_status"] == "matched"]
+        self.assertEqual(stats["exact_matched"], 1)
+        self.assertEqual(stats["unmatched_semantic"], 0)
+        self.assertEqual(matched[0]["task_kind"], "reduce_inline")
+        self.assertEqual(matched[0]["profiler_task_kind"], "sdma")
+        self.assertEqual(matched[0]["event_name"], "MEMCPY_ASYNC")
+        self.assertEqual(matched[0]["match_method"], "task_id")
+        self.assertEqual(matched[0]["match_confidence"], "exact")
+        self.assertEqual(matched[0]["task_start"], "1.001")
+        self.assertEqual(matched[0]["duration"], "1.001")
+        self.assertEqual(profilers[0].task_kind, "sdma")
+
+    def test_direct_inline_reduce_compatibility_preserves_identity_and_kind_guards(self):
+        semantic = SemanticRecord(
+            node_id="node0", device_id=0, stream_id=45, task_id=7,
+            task_kind="reduce_inline", phase="reduce_scatter",
+        )
+        memcpy = profiler_task("MEMCPY_ASYNC", 45, 7, 100)
+        for change in (
+            {"node_id": "node1"}, {"device_id": 1}, {"stream_id": 46},
+            {"task_id": 8}, {"subtask_id": 8},
+            {"event_name": "SDMA"}, {"event_name": "RDMASEND"},
+            {"event_name": "NOTIFY_WAIT"}, {"event_name": "REDUCE_TBE"},
+        ):
+            with self.subTest(change=change):
+                _, stats = merge_records([semantic], [replace(memcpy, **change)])
+                self.assertEqual(stats["exact_matched"], 0)
+                self.assertEqual(stats["unmatched_semantic"], 1)
+        for kind in ("reduce_tbe", "notify_record", "notify_wait", "rdma"):
+            with self.subTest(kind=kind):
+                _, stats = merge_records([replace(semantic, task_kind=kind)], [memcpy])
+                self.assertEqual(stats["exact_matched"], 0)
+        _, stats = merge_records(
+            [semantic], [profiler_task("REDUCE_INLINE", 45, 7, 100)])
+        self.assertEqual(stats["exact_matched"], 1)
+        # An FFts semantic must still supply graph correlation, even at the same IDs.
+        _, stats = merge_records([replace(semantic, ffts_ctx_id=8)], [memcpy])
+        self.assertEqual(stats["exact_matched"], 0)
 
     def test_ffts_parent_ctx_correlation_matches_exact_subtask(self):
         profilers = [
@@ -778,6 +830,75 @@ class DiagnosisToolTest(unittest.TestCase):
                     )
             records = parse_plog_inputs(plog_dir=temp_dir)
         self.assertEqual({record.device_id for record in records}, {0, 1})
+
+    def test_aicpu_device_logs_merge_with_real_sqe_identity(self):
+        line = (
+            "[INFO] HCCL(7928,aicpu_scheduler):2026-09-22-21:56:10.704.995 "
+            "[HcclTaskSemantic] schema_version[4] device_id[0] stream_id[90] "
+            "hccl_task_id[3] task_kind[sdma] source[aicpu] submit_ts[0] "
+            "event[copy_start] semantic[user_to_ccl_copy] phase[reduce_scatter_direct] "
+            "step[0] user_rank[0] comm_rank[0] rank_size[2] ffts_ctx_id[4294967295]\n"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            device_dir = Path(temp_dir) / "run" / "device-0"
+            device_dir.mkdir(parents=True)
+            (device_dir / "device-175671_20260922135612024.log").write_text(line, encoding="utf-8")
+            (Path(temp_dir) / "workload.log").write_text(line, encoding="utf-8")
+            (Path(temp_dir) / "plog-host.log").write_text("ordinary host log\n", encoding="utf-8")
+            records = parse_plog_inputs(plog_dir=temp_dir, node_id="node0")
+        self.assertEqual(len(records), 1)
+        self.assertEqual((records[0].source, records[0].pid, records[0].submit_ts), ("aicpu", 7928, 0))
+        profiler = replace(profiler_task("SDMA_SQE", 90, 3, 100), task_kind="sdma")
+        rows, stats = merge_records(records, [profiler])
+        self.assertEqual(stats["matched"], 1)
+        self.assertEqual(rows[0]["match_status"], "matched")
+        for change in ({"task_id": 4}, {"event_name": "NOTIFY_WAIT_SQE"},
+                       {"event_name": "MEMCPY_ASYNC"}):
+            _, rejected = merge_records(records, [replace(profiler, **change)])
+            self.assertEqual(rejected["matched"], 0)
+
+    def test_aicpu_sqe_db_kinds_and_notify_metadata_are_checked(self):
+        for event, kind in (("SDMA_SQE", "sdma"), ("NOTIFY_RECORD_SQE", "notify_record"),
+                            ("WRITE_VALUE_SQE", "notify_record"), ("WRITE_VALUE_SQE", "rdma"),
+                            ("NOTIFY_WAIT_SQE", "notify_wait")):
+            with self.subTest(event=event), tempfile.TemporaryDirectory() as temp_dir:
+                path = str(Path(temp_dir) / "msprof_fixture.db")
+                create_msprof_db(path)
+                with sqlite3.connect(path) as connection:
+                    connection.execute("UPDATE STRING_IDS SET value=? WHERE id=1", (event,))
+                    connection.execute("INSERT INTO COMMUNICATION_TASK_INFO VALUES(10, 4754, 0, 1, 7)")
+                    connection.execute("ALTER TABLE COMMUNICATION_TASK_INFO ADD COLUMN taskType INTEGER")
+                    connection.execute("INSERT INTO STRING_IDS VALUES(20, ?)",
+                                       ("RDMASend" if kind == "rdma" else "Inter_Rank_Record",))
+                    connection.execute("UPDATE COMMUNICATION_TASK_INFO SET taskType=20 WHERE globalTaskId=10")
+                connection.close()
+                profilers = parse_msprof_db_file(path, "node0")
+                self.assertEqual(profilers[0].task_kind, kind)
+                semantic = SemanticRecord(node_id="node0", device_id=0, stream_id=13, task_id=1,
+                    task_kind=kind, source="aicpu", user_rank=0, peer_rank=1, notify_id=4754)
+                _, stats = merge_records([semantic], profilers)
+                self.assertEqual(stats["exact_matched"], 1)
+                if kind.startswith("notify_"):
+                    _, stats = merge_records([replace(semantic, notify_id=0)], profilers)
+                    self.assertEqual(stats["notify_id_mismatch"], 1)
+                    self.assertEqual(stats["matched"], 0)
+
+    def test_aicpu_write_value_without_subtype_is_not_assumed_notify_or_rdma(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = str(Path(temp_dir) / "msprof_fixture.db")
+            create_msprof_db(path)
+            connection = sqlite3.connect(path)
+            connection.execute("UPDATE STRING_IDS SET value='WRITE_VALUE_SQE' WHERE id=1")
+            connection.commit()
+            connection.close()
+            profilers = parse_msprof_db_file(path, "node0")
+        self.assertEqual(profilers[0].task_kind, "write_value_sqe")
+        for kind in ("notify_record", "rdma"):
+            semantic = SemanticRecord(node_id="node0", device_id=0, stream_id=13, task_id=1,
+                                      task_kind=kind, source="aicpu")
+            _, stats = merge_records([semantic], profilers)
+            self.assertEqual(stats["matched"], 0)
+            self.assertEqual(stats["unmatched_semantic"], 1)
 
     def test_submit_ts_is_parsed_and_legacy_sequences_are_discarded(self):
         semantics = list(parse_plog_lines([
@@ -1340,7 +1461,7 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertEqual(ambiguities, [])
         self.assertEqual(len(resource_edges), 1)
         edge = resource_edges[0]
-        self.assertEqual(edge["kind"], "resource_notify_sync_exact")
+        self.assertEqual(edge["kind"], "resource_notify_sync_observed")
         self.assertEqual((edge["src"], edge["dst"]), ("p0", "p3"))
         self.assertEqual(edge["relation_id"], "dnr_fixture")
         self.assertEqual(edge["wait_span_ns"], "3000")
@@ -1389,7 +1510,7 @@ class DiagnosisToolTest(unittest.TestCase):
         self.assertEqual(ambiguities, [])
         self.assertEqual(len(resource_edges), 1)
         edge = resource_edges[0]
-        self.assertEqual(edge["kind"], "resource_local_notify_sync_exact")
+        self.assertEqual(edge["kind"], "resource_local_notify_sync_observed")
         self.assertEqual((edge["src"], edge["dst"]), ("p0", "p3"))
         self.assertEqual(edge["relation_id"], "lnr_fixture")
         self.assertEqual(edge["wait_span_ns"], "3000")
@@ -1492,7 +1613,7 @@ class DiagnosisToolTest(unittest.TestCase):
         )
 
         self.assertFalse(any(
-            edge["kind"] == "resource_notify_sync_exact"
+            edge["kind"] == "resource_notify_sync_observed"
             for edge in resource_edges
         ))
         self.assertEqual(len(ambiguities), 1)

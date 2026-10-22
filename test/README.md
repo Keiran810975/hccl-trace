@@ -1,5 +1,15 @@
 # HCCL step trace single-node test runbook
 
+双机现场操作与验收入口：[910C双机实验运行与验收指南](../文档/910C双机实验运行与验收指南.md)。
+区分执行/注入、数据/依赖、诊断命中三层标准，不能只凭退出码或HTML判断根因定位通过。
+
+双机4 Rank大负载及五类异常计划见[双机测试集说明](../文档/双机异常测试集与Workload说明.md)，
+入口`python3 test/two_node_suite.py`。共享执行逻辑保留四机默认配置；只生成/查看不会占用设备。
+
+四机 Transformer-CommMix 异常测试集的配置、生成、执行和验收见
+[四机测试集说明](../文档/四机异常测试集与Workload说明.md)。入口为
+`python3 test/four_node_suite.py`，默认只生成计划或查看启动参数，不占用设备。
+
 当前单机证据见 [阶段归档](../hccl/tools/diagnosis/arch-94a1ab31c3ee.md)。多机采集与异常
 测试按 [task.md](../hccl/tools/diagnosis/task.md) 推进；本文不表示这些场景已验证。
 本次 master 集成后的 Mesh 定向验收及 Ring/NHR 小回归，使用 [设备测试交接 prompt](prompts/integrated-master-device-test.md)。

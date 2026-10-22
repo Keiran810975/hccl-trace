@@ -273,6 +273,14 @@ add_library(ccl_kernel_plf  SHARED)
 # 创建 ccl_kernel_plf_a静态库
 add_library(ccl_kernel_plf_a  STATIC)
 
+foreach(trace_target ccl_kernel_plf ccl_kernel_plf_a)
+    target_sources(${trace_target} PRIVATE
+        ${HCCL_BASE_DIR}/common/debug/profiling/task_semantic_trace.cc
+        ${HCCL_BASE_DIR}/common/debug/profiling/task_semantic_aicpu.cc)
+    target_include_directories(${trace_target} PRIVATE
+        ${HCCL_BASE_DIR}/common/debug/profiling/inc)
+endforeach()
+
 # 指定ccl_kernel_plf所需包含文件搜索路径
 if(BUILD_OPEN_PROJECT)
     target_compile_definitions(ccl_kernel_plf PRIVATE

@@ -20,6 +20,7 @@
 #include "dlhal_function.h"
 #include "adapter_hal_pub.h"
 #include "dispatcher_aicpu.h"
+#include "task_semantic_aicpu.h"
 
 namespace hccl {
 constexpr uint64_t NANOSECOND_TO_SECOND = 1000000000U;
@@ -172,6 +173,8 @@ HcclResult DispatcherAiCpu::SignalRecord(HcclRtNotify signal, hccl::Stream &stre
         addOneWriteValueRecordSqe_(streamInfo.actualStreamId, taskId, signalAddr, sqeBuffer, sqeTypeAddr);
     }
 
+    CaptureAicpuTaskSemantic(sqeBuffer, TaskType::TASK_NOTIFY_RECORD, notifyId, stage);
+
     PLF_CONFIG_INFO(PLF_TASK,
         "%s para: streamId[%d] remoteRank[%u] inchip[%d] devType[%d] notifyId[%u]",
         __func__, streamInfo.actualStreamId, userRank, inchip, aicpuInfo_.devType, notifyId);
@@ -207,6 +210,8 @@ HcclResult DispatcherAiCpu::SignalRecord(hccl::DeviceMem &dst, hccl::DeviceMem &
     dfxInfo->notifyId = notifyId;
     addOneMemcpySqe_(streamInfo.actualStreamId, taskId, src.ptr(), src.size() , ACL_FLOAT, rtReduceOp,
         dst.ptr(), 0, aicpuInfo_.ssid, aicpuInfo_.devId, aicpuInfo_.overflowAddr, linkType, sqeBuffer, sqeTypeAddr);
+
+    CaptureAicpuTaskSemantic(sqeBuffer, TaskType::TASK_SDMA, notifyId, -1);
 
     PLF_CONFIG_INFO(PLF_TASK,
         "%s para: linkType[%u] srcPtr[%p] srcSize[%llu] dstPtr[%p] taskId[%u] streamId[%u] remoteRank[%u] notifyId[%u]",
@@ -254,6 +259,8 @@ HcclResult DispatcherAiCpu::SignalWait(HcclRtNotify signal, Stream &stream, u32 
             HCCL_WARNING("%s SignalWait id is not event, please check %d", __func__, notifyId);
         }
     }
+
+    CaptureAicpuTaskSemantic(sqeBuffer, TaskType::TASK_NOTIFY_WAIT, notifyId, stage);
 
     PLF_CONFIG_INFO(PLF_TASK,
         "%s para: streamId[%u] userRank[%u] remoteRank[%u] inchip[%d] devType[%d] notifyId[%u]",
@@ -314,6 +321,8 @@ HcclResult DispatcherAiCpu::MemcpyAsync(hccl::DeviceMem &dst, const hccl::Device
         dfxInfo->notifyId = INVALID_VALUE_RANKID;
         addOneMemcpySqe_(streamInfo.actualStreamId, taskId, srcSplit, countSplit , ACL_FLOAT, rtReduceOp,
             dstSplit, 0, aicpuInfo_.ssid, aicpuInfo_.devId, aicpuInfo_.overflowAddr, linkType, sqeBuffer, sqeTypeAddr);
+
+        CaptureAicpuTaskSemantic(sqeBuffer, TaskType::TASK_SDMA, 0, -1);
 
         PLF_CONFIG_INFO(PLF_TASK,
             "%s para: linkType[%u] srcSplit[%p] dstSplit[%p] countSplit[%llu] taskId[%u] streamId[%u] remoteRank[%u]",
@@ -709,6 +718,8 @@ HcclResult DispatcherAiCpu::LaunchTask(Stream &stream, bool isBlockLaunch)
     }
 
     CHK_RET(ConfigSqStatusByType(aicpuInfo_.devId, streamInfo.sqId, DRV_SQCQ_PROP_SQ_TAIL, newTail));
+    ReportAicpuTaskSemantic(
+        sqeContextBuffer->localBuff + (sqeContextBuffer->tailSqeIdx - cnt) * HCCL_SQE_SIZE, cnt, true);
     tail = newTail;
     PLF_CONFIG_INFO(PLF_TASK,
         "%s success, sqid:%d, sqe_num:%u, curHead:%u, curtail:%u", __func__, streamInfo.sqId, cnt, head, tail);
@@ -805,6 +816,8 @@ HcclResult DispatcherAiCpu::InlineReduceAsync(const void *src, u64 dataCount, co
         addOneMemcpySqe_(streamInfo.actualStreamId, taskId, srcSplit, countSplit, runtimeDataType, rtReduceOp, dstSplit, 0,
             aicpuInfo_.ssid, aicpuInfo_.devId, aicpuInfo_.overflowAddr, linkType, sqeBuffer, sqeTypeAddr);
 
+        CaptureAicpuTaskSemantic(sqeBuffer, TaskType::TASK_REDUCE_INLINE, 0, -1);
+
         PLF_CONFIG_INFO(PLF_TASK,
             "%s para: linkType[%u] srcSplit[%p] dstSplit[%p] countSplit[%llu] taskId[%u] streamId[%u] remoteRank[%u] "\
             "rtDatatType[%d] rtReduceOp[%d]", __func__, linkType, srcSplit, dstSplit, countSplit, taskId,
@@ -845,6 +858,8 @@ HcclResult DispatcherAiCpu::RdmaSend(u32 dbindex, u64 dbinfo, hccl::Stream &stre
     u64 dbAddr = CalcDbAddr(dbindex);
     addOneRdmaDbSendSqe_(streamInfo.actualStreamId, taskId, dbinfo, dbAddr, wrLen,
         static_cast<uint8_t>(taskInfo.rdmaType), sqeBuffer, sqeTypeAddr);
+
+    CaptureAicpuTaskSemantic(sqeBuffer, TaskType::TASK_RDMA, dfxInfo->notifyId, -1);
 
     PLF_CONFIG_INFO(PLF_TASK,
         "%s para: streamId[%u] taskId[%u] remoteRank[%u] RdmaType[%d] wrLen[%u] notifyId[%u]",
@@ -1056,6 +1071,7 @@ HcclResult DispatcherAiCpu::MemcpyRtsq(Stream& stream, const size_t sqeCount, co
 
     // 更新RTSQ ring buffer的tail
     CHK_RET(ConfigSqStatusByType(aicpuInfo_.devId, streamInfo.sqId, DRV_SQCQ_PROP_SQ_TAIL, newTail));
+    ReportAicpuTaskSemantic(sqeArray, sqeCount, false);
     tail = newTail;
     PLF_CONFIG_INFO(PLF_TASK,
         "%s success, sqid:%d, sqe_num:%u, curHead:%u, curtail:%u", __func__, streamInfo.sqId, sqeCount, head, tail);

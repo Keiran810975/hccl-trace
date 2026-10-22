@@ -1,5 +1,17 @@
 # HCOMM 8.5.0 步骤语义与依赖诊断实现规格
 
+> 2026-10-22 nf 集成：已引入 `6312667` 的 AI_CPU sidecar、控制任务 anchor 和等待诊断，
+> 当前 merged CSV 为43列、graph artifact 为v6；原始DB只读。控制元数据规则见
+> [Ring/NHR实现记录](ring-nhr-diagnosis.md)，不与下文历史v4 artifact混用。
+> 新入口 `run_diagnosis.py` 依次执行严格回放、等待分析、本地关键路径和三种HTML导出；
+> 未通过语义或图检查时不产生成功诊断。四机设备验收与代码集成分别记录。
+>
+> 本轮真实容器暴露 device 命名空间差异。Host semantic、control、FFts correlation
+> 统一使用 runtime/profiler 设备命名空间；存在 `ASCEND_RT_VISIBLE_DEVICES` 时只按其
+> 显式、唯一的数字列表解析，不从 rank、task偏移或时间推断设备。新启动脚本直接选卡，
+> 不再二次重编号。Host/device诊断扩展v2通过既有 `rsv[2]` 传递此ID；Device仍兼容
+> v1物理ID协议。无效列表/未知扩展关闭相应打点，不改变通信执行；需配套部署新Device库。
+
 > 2026-09-15 整理：本文件保留实现合同；唯一活动计划见 [task.md](task.md)，
 > 分支、当前单机证据与历史入口见 [阶段归档](arch-94a1ab31c3ee.md)。
 > 整理前全文已保存为 [历史快照](archive/2026-09-15/spec.md)。下文各次 replay
@@ -785,6 +797,23 @@ cycle residual、Notify ambiguous/incomplete/conflict、resource contraction amb
 `ffts_physical_stream_order`、默认 time-inferred 和旧 inferred Notify 边为 0。boundary
 默认作为事实统计，可用 `--max-boundary-nodes` 收紧；`--golden-summary` 对指定统计做精确
 比较，统计变化必须先在 spec 中解释再更新 golden。
+
+#### 8.6.5 nf 分支关键路径分析
+
+`critical_path.py` 新增只消费 execution artifact 的观测调度分析，不修改 graph v4
+身份/边语义或 resource 权重。输出独立 analysis schema v1。正向最长路与反向剩余距离
+给出全部零 slack 任务和一条代表路径；保留多个等长关键分支。默认对最大的 20 项关键
+耗时分别置零重算，只报告固定其他耗时/空隙条件下的模型收益，不冒充实测加速。
+
+Notify Wait 在完成端汇合 `wait.start` 与 `record.stop`，只额外计费
+`wait.stop - max(wait.start, record.stop)` 的观测残余，避免上游任务与其造成的等待重复
+计费。任务间空隙、capture root release 单列，不自动归因到 kernel。时间不兼容的同步
+边排除并报告，未配对等待保持 opaque；不得通过截断、猜测边或 resource 证据增强补齐。
+
+默认终点是全部选中采集任务完成，不等同于整个应用；可显式选择 operation 或完成端点。
+只支持同节点时钟，未校准多机拒绝全局分析。FFts 声明序、RDMA 硬件完成和未观测依赖
+仍有边界，结果标记 partial evidence。完整公式、计费和使用合同见
+[critical-path.md](critical-path.md)。既有 device golden 图统计不因本分析层变化。
 
 ### 8.7 单机 stream 顺序规则（DEP-003/DEP-004）
 

@@ -8,6 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include "task_semantic_trace.h"
 #include <iomanip>
 #include "aicpu_communicator.h"
 #include "dispatcher.h"
@@ -861,6 +862,18 @@ HcclResult HcclCommAicpu::RecordHostOrder(const HcclOpResParam *commParam, const
     HCCL_INFO("%s group[%s] tag[%s] isDeviceMode[%d] orderLaunchMode[%d] mode[%d] streamId[%d] notifyId[%d]",
             __func__, identifier_.c_str(), tag.c_str(), isDeviceMode_, orderLaunchMode, GetWorkflowMode(), orderStream_.id(),
             orderNotifies_[orderLaunchMode]->notifyId_);
+    TaskSemanticDeviceScope traceScope(semanticTraceEnabled_, topoInfo_.userRank, semanticTraceDeviceId_);
+    TaskControlAnchor controlAnchor;
+    if (IsTaskSemanticTraceEnabled()) {
+        uint32_t streamId = 0;
+        uint64_t taskId = 0;
+        if (dfx::ProfilingManager::GetKernelTaskIdentity(streamId, taskId) && taskId <= UINT32_MAX) {
+            controlAnchor.deviceId = semanticTraceDeviceId_;
+            controlAnchor.streamId = streamId;
+            controlAnchor.taskId = static_cast<u32>(taskId);
+        }
+    }
+    TaskControlScope controlScope(controlAnchor);
     CHK_RET(LocalNotify::Post(orderStream_, dispatcher_, orderNotifies_[orderLaunchMode]));
     CHK_RET(LaunchTask(dispatcher_, const_cast<Stream &>(orderStream_)));
     return HCCL_SUCCESS;
@@ -1235,6 +1248,14 @@ HcclResult HcclCommAicpu::InitCclbuffer(const HcclOpResParam *commParam)
 
 HcclResult HcclCommAicpu::InitConfigInfo(const HcclOpResParam *commParam)
 {
+    const u32 traceVersion = commParam->rsv[1];
+    semanticTraceDeviceId_ = traceVersion == 1 ? commParam->topoInfo.devicePhyId : commParam->rsv[2];
+    semanticTraceEnabled_ = commParam->rsv[0] == TASK_SEMANTIC_DEVICE_MAGIC &&
+        (traceVersion == 1 || traceVersion == 2) && semanticTraceDeviceId_ != INVALID_UINT &&
+        (static_cast<DevType>(commParam->topoInfo.deviceType) == DevType::DEV_TYPE_910B ||
+         static_cast<DevType>(commParam->topoInfo.deviceType) == DevType::DEV_TYPE_910_93);
+    HCCL_RUN_INFO("[HcclTaskSemanticDevice] build[nf-aicpu-v2] enabled[%u] device_id[%u] physical_device_id[%u]",
+        static_cast<u32>(semanticTraceEnabled_), semanticTraceDeviceId_, commParam->topoInfo.devicePhyId);
     deterministic_ = commParam->config.deterministic;
     interHccsDisable_ = commParam->config.interHccsDisable;
     multiQpThreshold_ = commParam->config.multiQpThreshold;
@@ -3509,6 +3530,18 @@ HcclResult HcclCommAicpu::OrchestrateHcclOp(const std::string &algName, OpParam 
     std::unique_ptr<CollExecutorBase> &executor, AlgResourceResponse &algResource, uint32_t &beginSqePos,
     uint32_t &endSqePos)
 {
+    TaskSemanticDeviceScope traceScope(semanticTraceEnabled_, topoInfo_.userRank, semanticTraceDeviceId_);
+    TaskControlAnchor buildAnchor;
+    if (IsTaskSemanticTraceEnabled()) {
+        uint32_t streamId = 0;
+        uint64_t taskId = 0;
+        if (dfx::ProfilingManager::GetKernelTaskIdentity(streamId, taskId) && taskId <= UINT32_MAX) {
+            buildAnchor.deviceId = semanticTraceDeviceId_;
+            buildAnchor.streamId = streamId;
+            buildAnchor.taskId = static_cast<u32>(taskId);
+        }
+    }
+    TaskBuildContext buildContext(buildAnchor);
     LogControl logControl(false, false); // 重执行ERROR日志控制，析构时重置日志设置
     PrepareMc2Handler();
     HcclResult ret = HCCL_SUCCESS;
@@ -3618,6 +3651,7 @@ HcclResult HcclCommAicpu::RetryOrchestrateHcclOp(const std::string &algName, OpP
     std::unique_ptr<CollExecutorBase> &executor, AlgResourceResponse &algResource, uint32_t &beginSqePos,
     uint32_t &endSqePos)
 {
+    TaskSemanticDeviceScope traceScope(semanticTraceEnabled_, topoInfo_.userRank, semanticTraceDeviceId_);
     LogControl logControl(false, false); // 重执行ERROR日志控制，析构时重置日志设置
     if ((param.opType == HcclCMDType::HCCL_CMD_BATCH_SEND_RECV) && retryEnable_) {
         param.BatchSendRecvDataDes.curMode =

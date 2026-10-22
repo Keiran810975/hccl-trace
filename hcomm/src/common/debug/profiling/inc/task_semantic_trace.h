@@ -34,6 +34,54 @@ struct TaskSemanticTraceInfo {
 };
 
 bool IsTaskSemanticTraceEnabled();
+// Local control evidence uses an existing physical task as its operation anchor.
+// It never introduces an execution task or a process-local operation counter.
+struct TaskControlAnchor {
+    u32 deviceId{INVALID_UINT};
+    u32 streamId{INVALID_UINT};
+    u32 taskId{INVALID_UINT};
+};
+class TaskControlScope {
+public:
+    explicit TaskControlScope(const TaskControlAnchor &anchor);
+    ~TaskControlScope();
+    TaskControlScope(const TaskControlScope &) = delete;
+    TaskControlScope &operator=(const TaskControlScope &) = delete;
+private:
+    TaskControlAnchor previous_;
+};
+bool GetTaskControlAnchor(TaskControlAnchor &anchor);
+void ReportTaskControl(const TaskControlAnchor &anchor, u32 streamId, u32 taskId,
+    const char *kind, u64 notifyId = INVALID_U64, u64 dbNotifyId = INVALID_U64);
+class TaskBuildContext {
+public:
+    explicit TaskBuildContext(const TaskControlAnchor &anchor);
+    ~TaskBuildContext();
+    TaskBuildContext(const TaskBuildContext &) = delete;
+    TaskBuildContext &operator=(const TaskBuildContext &) = delete;
+private:
+    TaskControlAnchor previous_;
+};
+bool GetTaskBuildAnchor(TaskControlAnchor &anchor);
+u64 TaskBuildClockNs();
+void ReportTaskBuildSpan(const TaskControlAnchor &anchor, const TaskSemanticTraceInfo &info, u64 durationNs);
+// Device workers do not inherit the submitting Host process environment.
+// Version 2 also carries the submitting process's profiler device namespace.
+constexpr u32 TASK_SEMANTIC_DEVICE_MAGIC = 0x48545331; // HTS1
+u32 ResolveTaskSemanticDeviceId(u32 logicalDeviceId);
+class TaskSemanticDeviceScope {
+public:
+    explicit TaskSemanticDeviceScope(bool enabled, u32 userRank = INVALID_VALUE_RANKID,
+        u32 physicalDeviceId = INVALID_UINT);
+    ~TaskSemanticDeviceScope();
+    TaskSemanticDeviceScope(const TaskSemanticDeviceScope &) = delete;
+    TaskSemanticDeviceScope &operator=(const TaskSemanticDeviceScope &) = delete;
+private:
+    int previous_;
+    u32 previousUserRank_;
+    u32 previousPhysicalDeviceId_;
+};
+u32 GetTaskSemanticPhysicalDeviceId();
 bool GetTaskSemanticTraceInfo(TaskSemanticTraceInfo &info);
 bool CaptureTaskSemanticTraceInfo(TaskSemanticTraceInfo &info);
 void SetTaskSemanticTraceInfo(const TaskSemanticTraceInfo &info);

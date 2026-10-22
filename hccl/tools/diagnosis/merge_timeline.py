@@ -14,6 +14,7 @@ from typing import Dict, Iterable, List, Tuple
 
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from diagnosis.control_trace import parse_control_inputs, enrich_control_tasks, AUDIT_FIELDS as CONTROL_AUDIT_FIELDS
     from diagnosis.dependency_model import (
         OPERATION_SCOPE_AMBIGUOUS,
         OPERATION_SCOPE_MISSING,
@@ -27,6 +28,7 @@ if __package__ in (None, ""):
     )
     from diagnosis.schema import GraphCorrelation, MERGED_FIELDS, ProfilerTask, SemanticRecord, write_csv
 else:
+    from .control_trace import parse_control_inputs, enrich_control_tasks, AUDIT_FIELDS as CONTROL_AUDIT_FIELDS
     from .dependency_model import (
         OPERATION_SCOPE_AMBIGUOUS,
         OPERATION_SCOPE_MISSING,
@@ -40,11 +42,22 @@ else:
 
 TASK_KIND_KERNEL_TYPES = {
     "sdma": {"MEMCPY_ASYNC"},
-    "rdma": {"RDMASEND"},
-    "reduce_inline": {"REDUCE_INLINE"},
+    "rdma": {"RDMASEND", "RDMA_DB_SEND"},
+    # A3 HOST inline reduction (aclrtReduceAsync) is recorded as MEMCPY_ASYNC
+    # in msprof TASK. Keep the DB kind intact; only relax this compatibility
+    # check after the exact node/device/stream/task identity lookup.
+    "reduce_inline": {"REDUCE_INLINE", "MEMCPY_ASYNC"},
     "reduce_tbe": {"REDUCE_TBE"},
     "notify_record": {"NOTIFY_RECORD"},
     "notify_wait": {"NOTIFY_WAIT"},
+}
+
+AICPU_TASK_KIND_KERNEL_TYPES = {
+    "sdma": {"SDMA_SQE"},
+    "rdma": {"WRITE_VALUE_SQE"},
+    "reduce_inline": {"SDMA_SQE"},
+    "notify_record": {"NOTIFY_RECORD_SQE", "WRITE_VALUE_SQE"},
+    "notify_wait": {"NOTIFY_WAIT_SQE"},
 }
 
 FFTS_TASK_KIND_KERNEL_TYPES = {
@@ -330,6 +343,12 @@ def _is_compatible_task_kind(
     ffts: bool = False,
 ) -> bool:
     compatibility = FFTS_TASK_KIND_KERNEL_TYPES if ffts else TASK_KIND_KERNEL_TYPES
+    if not ffts and semantic.source == "aicpu":
+        compatibility = AICPU_TASK_KIND_KERNEL_TYPES
+        expected_kinds = ({"sdma", "reduce_inline"} if semantic.task_kind == "reduce_inline"
+                          else {semantic.task_kind})
+        if profiler.task_kind not in expected_kinds:
+            return False
     expected = compatibility.get(str(semantic.task_kind or "").strip().lower())
     if not expected:
         return True
@@ -475,16 +494,28 @@ def parse_msprof_inputs(
     return parse_msprof_db_inputs(msprof_db, msprof_db_dir, node_id)
 
 
+def _semantic_log_paths(plog_dir: str):
+    # CANN collects AI_CPU reports in device-<pid>_<timestamp>.log, while
+    # Host reports retain the plog prefix. Preserve both original inputs.
+    return sorted(path for path in Path(plog_dir).rglob("*.log")
+                  if path.is_file() and path.name.startswith(("plog", "device-")))
+
+
 def parse_plog_inputs(plog: str = "", plog_dir: str = "", node_id: str = "") -> List[SemanticRecord]:
     records: List[SemanticRecord] = []
     if plog:
         records.extend(parse_plog_file(plog))
     if plog_dir:
-        for path in sorted(Path(plog_dir).rglob("plog*.log")):
+        for path in _semantic_log_paths(plog_dir):
             records.extend(parse_plog_file(str(path)))
     if node_id:
         records = [replace(record, node_id=node_id) if not record.node_id else record for record in records]
     return records
+
+
+def apply_control_inputs(profilers, plog: str = "", plog_dir: str = "", node_id: str = ""):
+    paths = ([Path(plog)] if plog else []) + (_semantic_log_paths(plog_dir) if plog_dir else [])
+    return enrich_control_tasks(profilers, parse_control_inputs(paths, node_id))
 
 
 def parse_graph_correlation_inputs(
@@ -496,7 +527,7 @@ def parse_graph_correlation_inputs(
     if plog:
         records.extend(parse_graph_correlations_file(plog))
     if plog_dir:
-        for path in sorted(Path(plog_dir).rglob("plog*.log")):
+        for path in _semantic_log_paths(plog_dir):
             records.extend(parse_graph_correlations_file(str(path)))
     if node_id:
         records = [
@@ -528,10 +559,9 @@ def _merged_row(status: str, semantic: SemanticRecord, profiler: ProfilerTask, d
                 graph_correlation: GraphCorrelation = None,
                 operation_scope: Tuple[str, str] = ("", "")):
     row = semantic.to_row()
-    if profiler and profiler.task_kind in ("notify_record", "notify_wait"):
-        # DB metadata covers profiler-only tasks as well as matched semantic
-        # tasks. Keep one canonical merged representation instead of adding
-        # duplicate profiler_notify/src/dst columns.
+    if profiler and profiler.task_kind in ("notify_record", "notify_wait", "rdma"):
+        # DB metadata also covers unannotated RDMA Notify sends. Keep one
+        # canonical representation instead of duplicate notify/src/dst columns.
         row["task_kind"] = profiler.task_kind
         if profiler.profiler_notify_id >= 0:
             row["notify_id"] = profiler.profiler_notify_id
@@ -545,6 +575,7 @@ def _merged_row(status: str, semantic: SemanticRecord, profiler: ProfilerTask, d
         "duplicate_semantic": int(duplicate_semantic),
         "duplicate_profiler": int(duplicate_profiler),
         "profiler_task_kind": profiler.task_kind if profiler else "",
+        "profiler_size_bytes": profiler.profiler_size_bytes if profiler else "",
         "profiler_stream_id": profiler.stream_id if profiler else "",
         "profiler_task_id": profiler.task_id if profiler else "",
         "task_start": profiler.task_start if profiler else "",
@@ -571,7 +602,7 @@ def main() -> int:
         description="Merge HCCL semantic plog and fine-grained msprof DB executions."
     )
     parser.add_argument("--plog", default="")
-    parser.add_argument("--plog-dir", default="", help="Directory containing one or more plog*.log files.")
+    parser.add_argument("--plog-dir", default="", help="Directory containing Host plog*.log and AI_CPU device-*.log files.")
     profiler_source = parser.add_mutually_exclusive_group(required=True)
     profiler_source.add_argument(
         "--msprof-db", default="", help="One consolidated msprof_*.db file.")
@@ -593,6 +624,7 @@ def main() -> int:
         parser.error(str(error))
 
     try:
+        profilers, control_audit = apply_control_inputs(profilers, args.plog, args.plog_dir, args.node_id)
         rows, stats = merge_records(
             parse_plog_inputs(args.plog, args.plog_dir, args.node_id),
             profilers,
@@ -602,10 +634,12 @@ def main() -> int:
                 args.node_id,
             ),
         )
-    except PhaseConflictError as error:
-        print("phase_conflict_error={}".format(error), file=sys.stderr)
+    except ValueError as error:
+        print("trace_evidence_error={}".format(error), file=sys.stderr)
         return 1
     write_csv(args.output, list(MERGED_FIELDS), rows)
+    stats["control_tasks_enriched"] = len(control_audit)
+    write_csv(str(Path(args.output).with_suffix(".control.csv")), CONTROL_AUDIT_FIELDS, control_audit)
     for key in sorted(stats):
         print("{}={}".format(key, stats[key]))
     if args.summary:

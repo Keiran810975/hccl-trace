@@ -1,0 +1,110 @@
+diff --git a/hcomm/src/algorithm/base/alg_template/component/task_semantic_scope.cc b/hcomm/src/algorithm/base/alg_template/component/task_semantic_scope.cc
+index 6d16b6f..0ac30af 100644
+--- a/hcomm/src/algorithm/base/alg_template/component/task_semantic_scope.cc
++++ b/hcomm/src/algorithm/base/alg_template/component/task_semantic_scope.cc
+@@ -13,7 +13,97 @@
+ 
+ #include "task_semantic_scope.h"
+ 
++#include <atomic>
++#include <chrono>
++#include <cstdlib>
++#include <cstring>
++#include <limits>
++#include <thread>
++
+ namespace hccl {
++namespace {
++struct TaskDelayInjectionConfig {
++    bool enabled{false};
++    u64 delayUs{0};
++    u32 userRank{INVALID_VALUE_RANKID};
++    u32 step{INVALID_UINT};
++    u32 skipMatches{0};
++    u32 maxHits{1};
++    const char *phase{nullptr};
++    const char *event{nullptr};
++};
++
++bool ParseU64Env(const char *name, u64 &value)
++{
++    const char *text = std::getenv(name);
++    if (text == nullptr || text[0] == '\0') {
++        return false;
++    }
++    char *end = nullptr;
++    const unsigned long long parsed = std::strtoull(text, &end, 10);
++    if (end == text || end == nullptr || end[0] != '\0') {
++        return false;
++    }
++    value = static_cast<u64>(parsed);
++    return true;
++}
++
++bool ParseU32Env(const char *name, u32 &value)
++{
++    u64 parsed = 0;
++    if (!ParseU64Env(name, parsed) || parsed > std::numeric_limits<u32>::max()) {
++        return false;
++    }
++    value = static_cast<u32>(parsed);
++    return true;
++}
++
++const TaskDelayInjectionConfig &GetTaskDelayInjectionConfig()
++{
++    static const TaskDelayInjectionConfig config = []() {
++        TaskDelayInjectionConfig value{};
++        value.phase = std::getenv("HCCL_DIAG_INJECT_PHASE");
++        value.event = std::getenv("HCCL_DIAG_INJECT_EVENT");
++        const bool delayOk = ParseU64Env("HCCL_DIAG_INJECT_DELAY_US", value.delayUs);
++        const bool rankOk = ParseU32Env("HCCL_DIAG_INJECT_RANK", value.userRank);
++        const bool stepOk = ParseU32Env("HCCL_DIAG_INJECT_STEP", value.step);
++        ParseU32Env("HCCL_DIAG_INJECT_SKIP_MATCHES", value.skipMatches);
++        ParseU32Env("HCCL_DIAG_INJECT_MAX_HITS", value.maxHits);
++        value.enabled = delayOk && rankOk && stepOk && value.delayUs > 0 &&
++            value.delayUs <= 10000000 && value.maxHits > 0 &&
++            value.phase != nullptr && value.phase[0] != '\0' &&
++            value.event != nullptr && value.event[0] != '\0';
++        return value;
++    }();
++    return config;
++}
++
++void MaybeInjectTaskDelay(const TaskSemanticTraceInfo &info)
++{
++    static std::atomic<u32> matchingOccurrences{0};
++    static std::atomic<u32> injectedOccurrences{0};
++    const TaskDelayInjectionConfig &config = GetTaskDelayInjectionConfig();
++    if (!config.enabled || info.userRank != config.userRank || info.step != config.step ||
++        info.phase == nullptr || info.event == nullptr ||
++        std::strcmp(info.phase, config.phase) != 0 || std::strcmp(info.event, config.event) != 0) {
++        return;
++    }
++    const u32 occurrence = matchingOccurrences.fetch_add(1, std::memory_order_relaxed);
++    if (occurrence < config.skipMatches) {
++        return;
++    }
++    const u32 injected = injectedOccurrences.fetch_add(1, std::memory_order_relaxed);
++    if (injected >= config.maxHits) {
++        return;
++    }
++    HCCL_RUN_INFO("[HcclDiagInject] type[task_launch_delay] delay_us[%llu] "
++        "user_rank[%u] comm_rank[%u] phase[%s] step[%u] event[%s] occurrence[%u] hit[%u]",
++        config.delayUs, info.userRank, info.commRank, info.phase, info.step, info.event,
++        occurrence, injected);
++    std::this_thread::sleep_for(std::chrono::microseconds(config.delayUs));
++}
++} // namespace
++
+ TaskSemanticTraceInfo MakeTaskSemanticTraceInfo(const char *phase, u32 step, u32 userRank, u32 rankSize,
+     u32 slice, const char *event, const char *semantic, u32 peerRank, const char *algorithm, u32 commRank)
+ {
+@@ -59,6 +149,7 @@ TaskSemanticEventScope::TaskSemanticEventScope(const char *event, const char *sem
+     nextInfo.event = event;
+     nextInfo.semantic = semantic;
+     nextInfo.oneShot = true;
++    MaybeInjectTaskDelay(nextInfo);
+     SetTaskSemanticTraceInfo(nextInfo);
+     active_ = true;
+ }

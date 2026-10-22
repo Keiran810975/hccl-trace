@@ -466,6 +466,8 @@ private:
     DeviceMem cclInputBuffer_;
     DeviceMem cclOutputBuffer_;
     DeviceMem tinySendRecvMem_;
+    bool semanticTraceEnabled_ = false;
+    u32 semanticTraceDeviceId_ = INVALID_UINT;
     u8 deterministic_ = 0;        // 确定性开关
     bool dumpDebug_ = false;
     bool fftsEnable_ = false;         // ffts使能开关
