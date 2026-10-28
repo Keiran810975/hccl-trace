@@ -15,6 +15,7 @@
 #include "adapter_hal.h"
 #include "adapter_hccp.h"
 #include "adapter_rts.h"
+#include "adapter/rdma_completion_observer.h"
 #include "dlhal_function.h"
 #include "network_manager_pub.h"
 #include "transport_ibverbs_pub.h"
@@ -248,6 +249,7 @@ HcclResult TransportHeterogRoce::Iwrite(const TransData &sendData, const HcclEnv
         HCCL_INFO("rdma write: remote addr[%llu] count[%d] datatype[%s] wrId[%llu]",
             reinterpret_cast<u64>(envelope.transData.dstBuf), envelope.transData.count,
             GetDataTypeEnumStr(envelope.transData.dataType).c_str(), dataWriteWr_.wr_id);
+        RdmaCompletionContextScope traceScope(-1, -1, envelope.msn, "data_write");
         CHK_RET(hrtIbvPostSend(dataQpInfo_.qp, &dataWriteWr_, &badWr));
         // 写notify
         if (deviceLogicId_ == HOST_DEVICE_ID) {
@@ -329,6 +331,8 @@ HcclResult TransportHeterogRoce::Imrecv(const TransData &recvData, HcclMessageIn
         HCCL_INFO("rdma read: remote addr[%llx] count[%d] datatype[%s] wrId[%llu]",
             reinterpret_cast<u64>(envelope.transData.srcBuf), envelope.transData.count,
             GetDataTypeEnumStr(envelope.transData.dataType).c_str(), dataReadWr_.wr_id);
+        RdmaCompletionContextScope traceScope(envelope.epParam.dst.rank, envelope.epParam.src.rank,
+            envelope.msn, "data_read_and_ack");
         CHK_RET(hrtIbvPostSend(dataQpInfo_.qp, &dataReadWr_, &badWr));
     } else {
         if (envelope.transData.count == 0) {
@@ -669,6 +673,8 @@ HcclResult TransportHeterogRoce::SendEnvelope(HcclEnvelope &envelopInfo, void *s
             envelopInfo.epParam.src.rank, envelopInfo.epParam.dst.rank, envelopInfo.epParam.src.tag,
             reinterpret_cast<u64>(envelopInfo.transData.srcBuf), envelopInfo.transData.count,
             GetDataTypeEnumStr(envelopInfo.transData.dataType).c_str(), envelopInfo.msn);
+        RdmaCompletionContextScope traceScope(envelopInfo.epParam.src.rank, envelopInfo.epParam.dst.rank,
+            envelopInfo.msn, "control_envelope");
         CHK_RET(hrtIbvPostSend(tagQpInfo_.qp, &envelopeWr_, &badWr));
     } else {
         struct SgList list = {};

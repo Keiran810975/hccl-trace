@@ -10,12 +10,24 @@ import os
 from pathlib import Path
 import time
 
+if __package__:
+    from .npu_compute import gemm
+else:
+    from npu_compute import gemm
+
 
 def communication_continue(store: object, index: int, rank: int, stop: bool) -> bool:
     # A host-store handshake prevents one peer exiting while the other starts another collective.
     store.set(f"continue/{index}/{rank}", "0" if stop else "1")
     peer = store.get(f"continue/{index}/{1 - rank}")
     return not stop and peer == b"1"
+
+
+def wait_for_finalize(directory: Path, deadline: float) -> None:
+    while not (directory / "finalize").exists():
+        if time.monotonic() >= deadline:
+            raise TimeoutError("foreground measurement did not authorize background finalization")
+        time.sleep(.01)
 
 
 def main() -> int:
@@ -26,6 +38,8 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=1200)
     parser.add_argument("--buffer-mib", type=int, default=256)
     parser.add_argument("--matrix-size", type=int, default=4096)
+    parser.add_argument("--gemm-backend", choices=("matmul", "grouped"), default="matmul")
+    parser.add_argument("--defer-finalize", action="store_true")
     parser.add_argument("--master-addr")
     parser.add_argument("--master-port", type=int)
     parser.add_argument("--rank", type=int, choices=(0, 1))
@@ -44,11 +58,16 @@ def main() -> int:
     store = None
     if args.kind == "compute":
         left = torch.ones((args.matrix_size, args.matrix_size), dtype=torch.bfloat16, device=device)
-        right = torch.full_like(left, 1 / args.matrix_size)
+        right = (torch.ones_like(left) if args.gemm_backend == "grouped" else
+                 torch.full_like(left, 1 / args.matrix_size))
         output = torch.empty_like(left)
 
         def operation() -> None:
-            torch.mm(left, right, out=output)
+            nonlocal output
+            if args.gemm_backend == "grouped":
+                output = gemm(left, right, "grouped")
+            else:
+                torch.mm(left, right, out=output)
     else:
         left = torch.ones(args.buffer_mib * 1024 * 1024 // 4, dtype=torch.float32, device=device)
         output = torch.empty_like(left)
@@ -78,6 +97,7 @@ def main() -> int:
             raise TimeoutError("background start was not received")
         time.sleep(0.01)
     started = time.monotonic_ns()
+    started_raw = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
     operations = 0
     peer_stopped = False
     try:
@@ -94,9 +114,18 @@ def main() -> int:
             operations += 1
             if operations == 1:
                 (args.control_dir / "active").touch()
+        finished_raw = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
         if operations == 0:
             raise RuntimeError("background worker did not execute during the requested window")
+        if args.defer_finalize:
+            (args.control_dir / "activity-window.json").write_text(json.dumps(dict(started_raw_ns=started_raw,
+                finished_raw_ns=finished_raw, operations=operations, validation_status="pending")) + "\n")
+            (args.control_dir / "paused").touch()
+            wait_for_finalize(args.control_dir, deadline)
+        finalize_authorized_raw = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
         expected = 2 if args.kind == "communication" else 1
+        if args.kind == "compute" and args.gemm_backend == "grouped":
+            expected = args.matrix_size  # Exact BF16 integer for the suite's multiples of 256.
         error = float(torch.max(torch.abs(output.float() - expected)).cpu())
         if error != 0:
             raise RuntimeError("background load numerical check failed")
@@ -109,7 +138,12 @@ def main() -> int:
         result = {"kind": args.kind, "pid": os.getpid(), "runtime_device_index": args.device,
                   "operations": operations, "started_monotonic_ns": started,
                   "finished_monotonic_ns": time.monotonic_ns(), "max_error": error,
+                  "started_raw_ns": started_raw, "finished_raw_ns": finished_raw,
+                  "finalize_deferred": args.defer_finalize, "finalize_authorized_raw_ns": finalize_authorized_raw,
                   "status": "completed_not_proof_of_contention"}
+        if args.kind == "compute":
+            result.update(gemm_backend=args.gemm_backend, matrix_size=args.matrix_size,
+                          expected=expected, input_pattern="ones" if args.gemm_backend == "grouped" else "scaled_ones")
         (args.control_dir / "result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(result), flush=True)
     finally:

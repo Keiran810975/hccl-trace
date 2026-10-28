@@ -281,6 +281,8 @@ class SuiteTests(unittest.TestCase):
         torch.distributed, torch.nn, nn.functional = dist, nn, functional
         calls = []
         class Tensor:
+            def numel(self) -> int:
+                return 1024
             def fill_(self, value: int) -> None:
                 calls.append("fill")
             def mul_(self, value: float) -> None:
@@ -294,15 +296,29 @@ class SuiteTests(unittest.TestCase):
             spec = importlib.util.spec_from_file_location("commmix_for_test", path)
             workload = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(workload)
-            workload.compute_block = lambda activation, weight: activation
+            backends = []
+            def compute(activation, weight, backend="matmul"):
+                backends.append(backend)
+                return activation
+            workload.compute_block = compute
             slots = []
             def before(iteration: int, block: int, bucket: int) -> None:
                 slots.append((iteration, block, bucket))
                 calls.append("before")
             workload.run_transformer_step(25, 8, Tensor(), [(None,) * 4] * 2, [Tensor() for _ in range(3)],
-                                          -1, 0, -1, -1, 0, before)
+                                          -1, 0, -1, -1, 0, before, gemm_backend="grouped")
             self.assertEqual(slots, [(25, block, bucket) for block in range(2) for bucket in range(3)])
             self.assertEqual(calls, ["fill", "before", "allreduce"] * 6)
+            self.assertEqual(backends, ["grouped"] * 8)
+            calls.clear()
+            recorder = types.SimpleNamespace(
+                prepare=lambda *args: calls.append("prepare"),
+                begin=lambda *args: calls.append("begin"), end=lambda: calls.append("end"))
+            workload.compute_block = lambda activation, *args: (calls.append("compute"), activation)[1]
+            workload.run_transformer_step(25, 8, Tensor(), [(None,) * 4], [Tensor() for _ in range(3)],
+                                          -1, 0, -1, -1, 0, before, recorder, gemm_backend="grouped")
+            self.assertEqual(calls, ["prepare", "compute", "fill", "before", "begin", "allreduce", "end"] * 2 +
+                                   ["prepare", "compute", "compute", "fill", "before", "begin", "allreduce", "end"])
 
 
 class Store:

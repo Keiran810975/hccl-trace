@@ -32,18 +32,28 @@ class CaseControl:
         self.closed = False
         self.emit("control_created", kind=self.inj["kind"])
 
-    def verify_configuration(self, torch: object, dist: object, device: str) -> None:
+    def verify_configuration(self, torch: object, dist: object, device: str, public_calls=None) -> None:
         payload = json.dumps({"case": self.case, "cluster": self.cluster}, sort_keys=True).encode()
         digest = hashlib.sha256(payload).digest()
         expected = torch.tensor(list(digest), dtype=torch.int32, device=device)
         actual = expected.clone()
+        if public_calls is not None:
+            public_calls.control_begin("configuration_sum", 32, "int32", "sum")
         dist.all_reduce(actual, op=dist.ReduceOp.SUM)
+        if public_calls is not None:
+            public_calls.control_end()
         mismatch = torch.tensor([int(bool(torch.any(actual != expected * self.world_size).item()))],
                                 dtype=torch.int32, device=device)
+        if public_calls is not None:
+            public_calls.control_begin("configuration_max", 1, "int32", "max")
         dist.all_reduce(mismatch, op=dist.ReduceOp.MAX)
+        if public_calls is not None:
+            public_calls.control_end()
         if mismatch.item():
             raise ValueError("nodes launched different cases or cluster configurations")
         self.emit("configuration_agreed", sha256=digest.hex())
+        if public_calls is not None:
+            public_calls.controls_done()
 
     def emit(self, event: str, **fields: object) -> None:
         self.events.write(json.dumps({"event": event, "rank": self.rank, "pid": os.getpid(),

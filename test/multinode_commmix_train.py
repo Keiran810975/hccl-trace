@@ -27,6 +27,11 @@ import torch.distributed as dist
 import torch.nn.functional as functional
 import torch_npu
 
+try:
+    from test.anomaly_injection.npu_compute import gemm
+except ModuleNotFoundError:
+    from anomaly_injection.npu_compute import gemm
+
 
 MIB = 1024 * 1024
 
@@ -48,6 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=30)
     parser.add_argument("--seed", type=int, default=20260924)
+    parser.add_argument("--gemm-backend", choices=("matmul", "grouped"), default="matmul")
     parser.add_argument("--skip-check", action="store_true")
     parser.add_argument("--delay-rank", type=int, default=-1)
     parser.add_argument("--delay-iteration", type=int, default=0)
@@ -57,6 +63,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--case-config", type=Path)
     parser.add_argument("--case-cluster", type=Path)
     parser.add_argument("--events-dir", type=Path)
+    parser.add_argument("--single-case", type=Path)
+    parser.add_argument("--private-events-dir", type=Path)
+    parser.add_argument("--public-calls-dir", type=Path)
+    parser.add_argument("--communication-worker", type=Path)
     parser.add_argument(
         "--no-barrier",
         action="store_true",
@@ -81,8 +91,8 @@ def percentile(values: list[float], percentile_value: float) -> float:
     return ordered[index]
 
 
-def compute_block(value: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    return functional.gelu(torch.matmul(value, weight))
+def compute_block(value: torch.Tensor, weight: torch.Tensor, backend="matmul") -> torch.Tensor:
+    return functional.gelu(gemm(value, weight, backend))
 
 
 def run_legacy_step(
@@ -91,10 +101,11 @@ def run_legacy_step(
     source: torch.Tensor,
     weights: list[torch.Tensor],
     buckets: list[torch.Tensor],
+    gemm_backend="matmul",
 ) -> torch.Tensor:
     activation = source
     for bucket_index, (weight, bucket) in enumerate(zip(weights, buckets)):
-        activation = compute_block(activation, weight)
+        activation = compute_block(activation, weight, gemm_backend)
         bucket.fill_(step + rank + bucket_index + 1)
         dist.all_reduce(bucket, op=dist.ReduceOp.SUM)
     activation.mul_(0.999)
@@ -119,17 +130,23 @@ def run_transformer_step(
     delay_bucket: int,
     delay_ms: float,
     before_collective: Callable[[int, int, int], None] | None = None,
+    public_calls=None,
+    gemm_backend="matmul",
 ) -> tuple[torch.Tensor, bool]:
     activation = source
     delay_applied = False
     for block_index, (qkv_weight, output_weight, ffn_up, ffn_down) in enumerate(block_weights):
-        qkv = compute_block(activation, qkv_weight)
+        if public_calls is not None:
+            public_calls.prepare(step, block_index, 0, buckets[0].numel())
+        qkv = compute_block(activation, qkv_weight, gemm_backend)
         for bucket_index, bucket in enumerate(buckets):
+            if public_calls is not None and bucket_index > 0:
+                public_calls.prepare(step, block_index, bucket_index, bucket.numel())
             if bucket_index == 1:
-                activation = compute_block(qkv, output_weight)
+                activation = compute_block(qkv, output_weight, gemm_backend)
             elif bucket_index == 2:
-                ffn_activation = compute_block(activation, ffn_up)
-                activation = compute_block(ffn_activation, ffn_down)
+                ffn_activation = compute_block(activation, ffn_up, gemm_backend)
+                activation = compute_block(ffn_activation, ffn_down, gemm_backend)
 
             bucket.fill_(step + rank + block_index * len(buckets) + bucket_index + 1)
             if before_collective is not None:
@@ -143,7 +160,11 @@ def run_transformer_step(
             ):
                 time.sleep(delay_ms / 1000)
                 delay_applied = True
+            if public_calls is not None:
+                public_calls.begin(step, block_index, bucket_index, bucket.numel())
             dist.all_reduce(bucket, op=dist.ReduceOp.SUM)
+            if public_calls is not None:
+                public_calls.end()
         activation.mul_(0.999)
     return activation, delay_applied
 
@@ -181,6 +202,19 @@ def main() -> None:
 
     rank = dist.get_rank()
     world_size = dist.get_world_size()
+    single_control, public_calls = None, None
+    if args.single_case or args.public_calls_dir:
+        if (not transformer_mode or not args.public_calls_dir or not args.no_barrier
+                or (args.single_case and world_size != 4)):
+            raise ValueError("public capture requires transformer mode and no-barrier; single-case additionally requires four ranks")
+        from anomaly_injection.single_node_control import PublicCalls, SingleControl
+        public_calls = PublicCalls(args.public_calls_dir, rank, device_id)
+        if args.single_case:
+            if not args.private_events_dir or args.case_config:
+                raise ValueError("single-case requires separate private events and cannot use the old controller")
+            single_control = SingleControl(args.single_case, args.private_events_dir, rank, selected,
+                                           args.communication_worker, args.gemm_backend)
+            single_control.prepare()
     control = None
     if any((args.case_config, args.case_cluster, args.events_dir)):
         if not all((args.case_config, args.case_cluster, args.events_dir)) or not transformer_mode:
@@ -193,7 +227,10 @@ def main() -> None:
                                rank, local_rank, world_size, args)
         import atexit
         atexit.register(control.close)
-        control.verify_configuration(torch, dist, f"npu:{device_id}")
+        if public_calls is not None:
+            control.verify_configuration(torch, dist, f"npu:{device_id}", public_calls=public_calls)
+        else:
+            control.verify_configuration(torch, dist, f"npu:{device_id}")
         control.prepare()
     torch.manual_seed(args.seed)
     torch_npu.npu.manual_seed_all(args.seed)
@@ -237,11 +274,16 @@ def main() -> None:
                 args.delay_block,
                 args.delay_bucket,
                 args.delay_ms,
+                public_calls=public_calls,
+                gemm_backend=args.gemm_backend,
             )
         else:
             activation = run_legacy_step(
-                -(warmup_step + 1), rank, source, weights, buckets
+                -(warmup_step + 1), rank, source, weights, buckets, args.gemm_backend
             )
+        if public_calls is not None:
+            torch_npu.npu.synchronize()
+            public_calls.iteration_done(-(warmup_step + 1))
     torch_npu.npu.synchronize()
     if not args.no_barrier:
         dist.barrier()
@@ -251,8 +293,9 @@ def main() -> None:
     measured_started_ns = time.perf_counter_ns()
     for step in range(args.iters):
         if control is not None and control.transition(step):
-            # All cases, including paired normals, use the same two window barriers.
-            dist.barrier()
+            # Public capture omits extra collectives; legacy cases keep paired barriers.
+            if not args.no_barrier:
+                dist.barrier()
             torch_npu.npu.synchronize()
         if (
             not transformer_mode
@@ -275,23 +318,36 @@ def main() -> None:
                 args.delay_block,
                 args.delay_bucket,
                 args.delay_ms,
-                control.before_collective if control is not None else None,
+                (control.before_collective if control is not None else
+                 single_control.before_collective if single_control is not None else None),
+                public_calls=public_calls,
+                gemm_backend=args.gemm_backend,
             )
             delay_applied = delay_applied or step_delay_applied
         else:
-            activation = run_legacy_step(step, rank, source, weights, buckets)
+            activation = run_legacy_step(step, rank, source, weights, buckets, args.gemm_backend)
         torch_npu.npu.synchronize()
+        if public_calls is not None:
+            public_calls.iteration_done(step)
         elapsed_ns = time.perf_counter_ns() - started_ns
         step_times_ms.append(elapsed_ns / 1_000_000)
         if control is not None:
             control.step_done(step, elapsed_ns)
 
+    measured_region_ns = time.perf_counter_ns() - measured_started_ns
+    control_finalize_started_ns = time.perf_counter_ns()
     if control is not None:
         if control.transition(args.iters):
-            dist.barrier()
+            if not args.no_barrier:
+                dist.barrier()
             torch_npu.npu.synchronize()
         control.close(completed=True)
-    measured_region_ns = time.perf_counter_ns() - measured_started_ns
+    if single_control is not None:
+        single_control.finish()
+        single_control.close()
+    if public_calls is not None:
+        public_calls.close()
+    post_measurement_control_ns = time.perf_counter_ns() - control_finalize_started_ns
 
     max_error = 0.0
     if not args.skip_check:
@@ -320,6 +376,7 @@ def main() -> None:
         "runtime_device_id": device_id,
         "workload": "Transformer-CommMix" if transformer_mode else "MiniTrain-CommMix",
         "compute_dtype": "bf16",
+        "gemm_backend": args.gemm_backend,
         "communication_dtype": "fp32",
         "compute_size": args.compute_size,
         "blocks": args.blocks,
@@ -334,6 +391,9 @@ def main() -> None:
         "avg_step_ms": sum(step_times_ms) / len(step_times_ms),
         "median_step_ms": percentile(step_times_ms, 0.50),
         "p95_step_ms": percentile(step_times_ms, 0.95),
+        "step_times_ms": step_times_ms,
+        "measured_region_ns": measured_region_ns,
+        "post_measurement_control_ns": post_measurement_control_ns,
         "steps_per_second": args.iters / elapsed_s,
         "max_error": max_error,
         "delay_rank": args.delay_rank,
@@ -348,10 +408,13 @@ def main() -> None:
     }
     if control is not None:
         result["injection_kind"] = control.inj["kind"]
-        result["control_barriers"] = "before_measurement,window_start,window_stop,after_measurement"
+        result["control_barriers"] = "disabled" if args.no_barrier else "before_measurement,window_start,window_stop,after_measurement"
         result["configuration_check_allreduces"] = 2
         result["measured_region_ns_including_window_control"] = measured_region_ns
         result["delay_applied"] = None  # Use private control events / native hit logs, not the legacy flag.
+    if single_control is not None:
+        result["injection_kind"] = single_control.inj["kind"]
+        result["delay_applied"] = None  # Private actual windows are the execution evidence.
     if not args.no_barrier:
         dist.barrier()
     dist.destroy_process_group()

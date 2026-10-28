@@ -188,7 +188,8 @@ def validate_cluster(cluster: dict, case: dict, execute: bool, allow_background:
             raise ValueError("library_task needs an explicitly verified HCCL_DIAG_INJECT runtime; no automatic patching")
 
 
-def build_command(case: dict, cluster: dict, node_rank: int, out: Path, profile: bool) -> tuple[list[str], dict]:
+def build_command(case: dict, cluster: dict, node_rank: int, out: Path, profile: bool,
+                  *, public_calls: bool = False) -> tuple[list[str], dict]:
     if not 0 <= node_rank < case["nnodes"]:
         raise ValueError("node rank is outside the case topology")
     node, w, inj = cluster["nodes"][node_rank], case["workload"], case["injection"]
@@ -218,6 +219,8 @@ def build_command(case: dict, cluster: dict, node_rank: int, out: Path, profile:
         command += ["--" + key.replace("_", "-"), str(w[key])]
     command += ["--seed", str(case["seed"]), "--case-config", str(out / "private/case.json"),
                 "--case-cluster", str(out / "private/cluster.json"), "--events-dir", str(out / "private/events")]
+    if public_calls:
+        command += ["--public-calls-dir", str(out / "public"), "--no-barrier"]
     if profile:
         if any(any(c.isspace() for c in arg) for arg in command):
             raise ValueError("msprof application paths/arguments cannot contain whitespace")
@@ -293,7 +296,8 @@ def execute_node(args: argparse.Namespace) -> int:
     case, cluster = read_json(args.case), read_json(args.cluster)
     validate_cluster(cluster, case, False, args.allow_background, args.allow_network_change)
     out = (args.output / identifier(case["case_id"]) / identifier(args.attempt) / f"node{args.node_rank}").resolve()
-    command, overrides = build_command(case, cluster, args.node_rank, out, not args.no_profile)
+    command, overrides = build_command(case, cluster, args.node_rank, out, not args.no_profile,
+                                       public_calls=getattr(args, "diagnosis_capture", False))
     if not args.execute:
         print(json.dumps({"dry_run": True, "argv": command, "environment_overrides": overrides,
                           "stats": workload_stats(case)}, indent=2))
@@ -311,6 +315,7 @@ def execute_node(args: argparse.Namespace) -> int:
     result = {"status": "preflight_failed", "stage": "preflight", "started_unix_ns": time.time_ns(),
               "injection_effect": "not_evaluated"}
     limiter = None
+    clock_server, clock_data = None, None
     try:
         validate_cluster(cluster, case, True, args.allow_background, args.allow_network_change)
         (out / "ascend_log").mkdir()
@@ -330,11 +335,33 @@ def execute_node(args: argparse.Namespace) -> int:
                    "source_sha256": {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
                        for p in [Path(__file__), ROOT / "test/multinode_commmix_train.py",
                                  ROOT / "test/anomaly_injection/four_node_control.py",
-                                 ROOT / "test/anomaly_injection/npu_background_load.py"]
+                                 ROOT / "test/anomaly_injection/npu_background_load.py",
+                                 ROOT / "test/anomaly_injection/single_node_control.py",
+                                 ROOT / "test/multinode_clock_probe.py"]
                        + ([ROOT / "test/two_node_suite.py"] if case["nnodes"] == 2 else [])}})
         if case["injection"]["kind"] == "nic_limit" and args.node_rank == cluster["nic_limit"]["node_rank"]:
             limiter = NicLimit(cluster["nic_limit"], case["injection"]["level"], out / "private")
             limiter.apply()
+        if getattr(args, "clock_probe_port", None) is not None:
+            if __package__ in (None, ""):
+                from multinode_clock_probe import ProbeServer, probe_batch, raw_ns
+            else:
+                from .multinode_clock_probe import ProbeServer, probe_batch, raw_ns
+            port = args.clock_probe_port
+            if not 1024 <= port <= 65535 or port in {cluster["master_port"], *range(cluster["background_port_base"], cluster["background_port_base"] + 4)}:
+                raise ValueError("clock probe port must be distinct from foreground/background ports")
+            names = [n["node_id"] for n in cluster["nodes"]]
+            if len(set(names)) != len(names):
+                raise ValueError("clock probes require unique explicit physical node IDs")
+            clock_data = dict(schema_version=1, clock="CLOCK_MONOTONIC_RAW", capture_id=case["case_id"] + "/" + args.attempt,
+                              node_id=names[args.node_rank], reference_node=names[0])
+            if args.node_rank == 0:
+                clock_server = ProbeServer(cluster["master_addr"], port, clock_data["capture_id"], names[0], names[1:])
+                clock_server.__enter__()
+                clock_data["before_raw_ns"] = raw_ns()
+            else:
+                clock_data["before"] = probe_batch(cluster["master_addr"], port, clock_data["capture_id"],
+                    names[args.node_rank], names[0], "before", timeout=args.clock_probe_timeout)
         result.update(status="running", stage="workload")
         result["returncode"] = run_capture(command, env, out / "private/capture.log", args.timeout)
         result["status"] = "completed" if result["returncode"] == 0 else "failed"
@@ -355,6 +382,24 @@ def execute_node(args: argparse.Namespace) -> int:
     except Exception as error:
         result.update(status="preflight_failed" if result["stage"] == "preflight" else "failed", error=str(error))
     finally:
+        if clock_data is not None:
+            try:
+                if args.node_rank == 0:
+                    if clock_server is None or not clock_server.wait_for_after(args.clock_probe_timeout):
+                        raise TimeoutError("clock peers did not complete their after probes")
+                    clock_data["after_raw_ns"] = raw_ns()
+                elif "before" in clock_data:
+                    clock_data["after"] = probe_batch(cluster["master_addr"], args.clock_probe_port,
+                        clock_data["capture_id"], clock_data["node_id"], clock_data["reference_node"], "after",
+                        timeout=args.clock_probe_timeout)
+                write_json(out / "clock-probes.json", clock_data)
+            except Exception as error:
+                result["clock_probe_error"] = str(error)
+                if result["status"] == "completed":
+                    result["status"] = "clock_collection_failed"
+            finally:
+                if clock_server is not None:
+                    clock_server.__exit__(None, None, None)
         if limiter is not None:
             try:
                 limiter.restore()
@@ -477,6 +522,9 @@ def main(nnodes: int = 4, ranks_per_node: int = 4) -> int:
     run.add_argument("--allow-background", action="store_true")
     run.add_argument("--allow-network-change", action="store_true")
     run.add_argument("--no-profile", action="store_true")
+    run.add_argument("--diagnosis-capture", action="store_true", help="Record public business calls and omit extra barrier operations")
+    run.add_argument("--clock-probe-port", type=int, help="Opt-in independent CPU probes before/after profiling; same free port on all nodes")
+    run.add_argument("--clock-probe-timeout", type=float, default=180)
     ledger = commands.add_parser("summarize")
     ledger.add_argument("--suite", type=Path, required=True)
     ledger.add_argument("--runs", type=Path, required=True)

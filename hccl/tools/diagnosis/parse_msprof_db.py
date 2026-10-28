@@ -8,6 +8,7 @@ import os
 import sqlite3
 import sys
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import List, Sequence
 
@@ -330,6 +331,73 @@ def parse_operations(path: str, node_id: str = "") -> List[ProfilerOperation]:
         finally:
             connection.close()
     return operations
+
+
+COMMUNICATION_DETAIL_FIELDS = ("graph_id", "node_id", "device_id", "stream_id", "task_id", "subtask_id",
+    "connection_id", "start_ns", "end_ns", "submission_or_task_duration_ns", "src_rank", "dst_rank",
+    "transport_type", "rdma_type", "size_bytes", "reported_bandwidth_bytes_per_s",
+    "bandwidth_derived_duration_ns", "duration_evidence", "hardware_completion_ns")
+
+
+def parse_communication_details(path: str, node_id: str = "") -> List[dict]:
+    """Read real per-task communication metadata; never divide by SQE duration."""
+    if __package__ in (None, ""):
+        from diagnosis.dependency_model import ExecutionIdentity
+    else:
+        from .dependency_model import ExecutionIdentity
+    result, identities = [], set()
+    for db_path in discover_db_files(path):
+        connection = _readonly_connection(str(db_path))
+        try:
+            _validate_contract(connection, str(db_path))
+            columns = _table_columns(connection, "COMMUNICATION_TASK_INFO")
+            if not {"transportType", "rdmaType", "size", "bandwidth"} <= columns:
+                continue  # Old fixtures/captures do not contain these optional facts.
+            enums = {}
+            for field, table in (("transport_type", "ENUM_HCCL_TRANSPORT_TYPE"), ("rdma_type", "ENUM_HCCL_RDMA_TYPE")):
+                if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+                    values = connection.execute("SELECT * FROM " + table).fetchall()
+                    if any(len(row) != 2 for row in values):
+                        raise MsprofDbError("unsupported communication enum layout")
+                    enums[field] = {int(row[0]): str(row[1]) for row in values}
+                else:
+                    enums[field] = {}
+            records = connection.execute("SELECT t.*,c.srcRank,c.dstRank,c.transportType,c.rdmaType,c.size,"
+                "CAST(c.bandwidth AS TEXT) AS bandwidth FROM TASK t "
+                "JOIN COMMUNICATION_TASK_INFO c ON t.globalTaskId=c.globalTaskId ORDER BY t.startNs,t.taskId")
+            for row in records:
+                if int(row["endNs"]) < int(row["startNs"]):
+                    raise MsprofDbError("communication task end precedes start")
+                context = int(row["contextId"])
+                context = -1 if context == UINT32_MAX else context
+                identity = ExecutionIdentity(node_id, int(row["deviceId"]), int(row["streamId"]),
+                    int(row["taskId"]), context, int(row["connectionId"])).stable_id
+                if identity in identities:
+                    raise MsprofDbError("duplicate physical communication task identity")
+                identities.add(identity)
+                size = _optional_int(row["size"])
+                bandwidth = "" if row["bandwidth"] is None else str(row["bandwidth"])
+                transport = enums["transport_type"].get(_optional_int(row["transportType"]), "unknown")
+                rdma = enums["rdma_type"].get(_optional_int(row["rdmaType"]), "unknown")
+                estimate = None
+                try:
+                    value = Decimal(bandwidth) if bandwidth else Decimal(0)
+                    if size > 0 and value.is_finite() and value > 0 and rdma == "RDMA_SEND_PAYLOAD":
+                        estimate = str(Decimal(size) * 1000000000 / value)
+                except InvalidOperation:
+                    raise MsprofDbError("invalid reported communication bandwidth")
+                result.append(dict(graph_id=identity, node_id=node_id, device_id=int(row["deviceId"]),
+                    stream_id=int(row["streamId"]), task_id=int(row["taskId"]), subtask_id=context,
+                    connection_id=int(row["connectionId"]), start_ns=int(row["startNs"]), end_ns=int(row["endNs"]),
+                    submission_or_task_duration_ns=int(row["endNs"]) - int(row["startNs"]),
+                    src_rank=_optional_int(row["srcRank"], UINT32_MAX), dst_rank=_optional_int(row["dstRank"], UINT32_MAX),
+                    transport_type=transport, rdma_type=rdma, size_bytes=size,
+                    reported_bandwidth_bytes_per_s=bandwidth, bandwidth_derived_duration_ns=estimate,
+                    duration_evidence="size/reported_bandwidth_estimate" if estimate is not None else "not_available",
+                    hardware_completion_ns=None))
+        finally:
+            connection.close()
+    return result
 
 
 def parse_inputs(

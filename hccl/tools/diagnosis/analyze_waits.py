@@ -51,7 +51,7 @@ def union_ns(intervals):
 
 
 def analyze(rows, edges, issues=(), spans=(), baseline_rows=(), min_wait_ns=1000000,
-            min_slow_ns=5000000, slowdown_factor=3):
+            min_slow_ns=5000000, slowdown_factor=3, *, trace_wait_chains=True):
     if min_wait_ns <= 0 or min_slow_ns <= 0 or slowdown_factor <= 1:
         raise ValueError("positive wait/slow thresholds and slowdown factor > 1 required")
     nodes = {r["_graph_id"]: r for r in rows}
@@ -110,6 +110,11 @@ def analyze(rows, edges, issues=(), spans=(), baseline_rows=(), min_wait_ns=1000
         by_op[candidate["operation_scope"]].append(candidate)
     waits = build_wait_inventory(rows, edges, issues)
     for wait in waits:
+        if not trace_wait_chains:
+            wait.update(classification="pending_rolling", candidate_ids="", candidate_ranks="",
+                        candidate_phases="", candidate_graph_ids="", evidence_path_edge_ids="",
+                        attribution="", traversal_truncated=0)
+            continue
         identifier, scope = wait["wait_graph_id"], wait["operation_scope"]
         sync = [e for e in incoming[identifier] if "notify_sync" in e["kind"]]
         seen, paths, queue = set(), {}, []

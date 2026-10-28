@@ -11,6 +11,12 @@ Node0+Node2正常小负载的配套AI_CPU语义、跨机依赖和等待诊断已
 
 ## 完整多机回放
 
+多机协议判慢、直接通信算子/小任务元数据及带误差说明的软件时钟对齐见
+[多机通信诊断与校时](multinode-communication.md)。新采集可通过`run-node --diagnosis-capture
+--clock-probe-port 29860`保存完整公开调用和前后探针，再用`bind_multinode_capture.py`生成映射。
+`run_diagnosis --require-clock-alignment`拒绝缺少适用校时的采集；旧数据不会被事后平移成已校准。
+软件对齐只用于展示，不等于PTP精度、逐WQE硬件计时或跨机全局关键路径。
+
 ```bash
 python3 -m hccl.tools.diagnosis.run_diagnosis run.json -o replay
 ```
@@ -19,8 +25,57 @@ python3 -m hccl.tools.diagnosis.run_diagnosis run.json -o replay
 通过语义和图检查后才输出诊断 JSON/CSV、节点本地关键路径及 execution/waits/resource HTML。
 正常样例没有异常基线时不硬报根因；跨节点无时钟校准时不累计全局路径。
 已有正常参考可通过 `--baseline-dir` 传入，基线须是相同 workload 配置。
+传入后自动生成 `comparison/index.html`、全量任务增量与源头候选 JSON/CSV、
+以及源头局部的 Baseline/异常交互 HTML 和同尺度 SVG 对比图。
+已有 artifact 也可直接运行 `compare_diagnosis`；规则、阈值与边界见
+[Baseline自动对比说明](baseline-comparison.md)。
 
-诊断链只接受两个事实源：HCOMM `[HcclTaskSemantic]` plog 与 msprof consolidated
+本轮单机21例实验改用 `--iteration-map public-call-map.json`：参考同次运行前5个正式iteration
+同定位任务的均值，不设绝对增量下限，不传外部Baseline。输出在 `rolling/`，规则、调用绑定
+要求和当前设备阻塞状态见[最近五轮诊断](rolling-diagnosis.md)。正常组用于对照/误报检查，
+不作为其他20例的慢化检测参考；注入真值只供独立验收使用。
+当前滚动归因使用v4：从慢Wait的真实生产端回溯，保留已有跨调用路径，源头定位与本地关键
+路径影响分别输出。`rolling/report.json`及`wait_backtraces.csv`包含回溯断点与比较覆盖率；
+未定位不等于没有异常。后台收尾移至测量结束之后；通信worker需重编，尚待新设备验收。
+
+## 从候选开始的传播链
+
+当前滚动诊断自动导出 `propagation/index.html`、`report.json`、`chains.csv`、`steps.csv`和
+`chains.md`。按原候选顺序逐个展开其已报告的“源头任务→中间控制任务→Record→慢Wait”路径，
+包含Node/Rank/stream/task、iter/Block/桶、当前耗时、前5轮均值、增量及每跳证据等级。
+不是重新向前搜索所有下游，也不改变候选排名、诊断阈值或独立评判。
+HTML默认展示主候选的耗时对比及一条带Rank的源头→Record→Wait流程，可切换候选、目标Rank
+和等待分支。仅折叠普通同流中间任务，保留同步端点、变慢任务、跨调用位置和时间警告；
+完整逐跳记录仍可展开。中文文字报告提供同样的精简路径，不再逐条重复全部普通控制任务。
+
+已有通过门禁的v4诊断可只运行导出，不重跑负载或分析器：
+
+```bash
+python3 -m hccl.tools.diagnosis.source_propagation /path/to/passed-diagnosis \
+  -o /path/to/new-propagation
+```
+
+输入为已有执行图、`diagnosis_candidates.csv`及`rolling/task_comparison.csv`，不读取注入真值。
+JSON用真实图节点/边ID保留每条完整路径；CSV分别提供分支摘要和有序逐步记录，HTML可展开阅读。
+缺边、断链及时间不相容明确保留；跨机无时钟校准不计算全局时差。Host准备候选使用每个分支
+实际Record作为设备锚点，不补造Host→设备边。`path_complete`只表示已报告路径能完整展开，
+不等于已证明物理因果或某个Wait增量全由该候选造成，也不保证穷尽所有下游异常。
+精简保存模式保留传播JSON/CSV/文字证据，仍只保留原来的一张依赖HTML，不新增第二张HTML。
+
+## 跨机协议完成区间
+
+多节点诊断额外生成`rdma_timing/index.html`、`report.json`及`transfers.csv`，
+沿真实准备ACK→发送端Payload→数据通知依赖，用接收端自身时钟计算协议完成区间。
+与RDMA提交耗时分开，不冒充纯网络/硬件传输耗时；缺失或歧义时保留未解析。
+已有数据可独立导出，规则、命令和边界见[跨机计时说明](rdma-timing.md)。
+
+新增原生 verbs CQ 完成事件观察器，默认关闭；多节点回放同时导出
+`rdma_completion/index.html`、JSON/CSV，明确区分完成观测、失败/缺失及未绑定 task。
+**当前910C AI_CPU路径尚缺实际成功完成事件，不能称完整传输计时已实现。**
+使用`--require-complete-rdma`进行严格验收时，此缺口会返回非零而不是假通过。
+生产端开关、支持路径与验证范围见[RDMA完成证据](rdma-completion.md)。
+
+诊断链只接受 HCOMM 版本化 plog 与 msprof consolidated
 `msprof_*.db`。Chrome-trace `msprof_*.json` 和 `task_time.csv` 已不再作为生产输入。
 
 ## 数据流

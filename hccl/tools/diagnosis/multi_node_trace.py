@@ -20,8 +20,9 @@ if __package__ in (None, ""):
     from diagnosis.schema import MERGED_FIELDS, write_csv
     from diagnosis.validate_trace import validate_rows
     from diagnosis.validate_dependency_graph import validate_dependency_artifacts
-    from diagnosis.parse_msprof_db import parse_operations
+    from diagnosis.parse_msprof_db import parse_operations, parse_communication_details, COMMUNICATION_DETAIL_FIELDS
     from diagnosis.control_trace import parse_build_spans, BUILD_FIELDS
+    from diagnosis import rdma_completion
 else:
     from . import merge_timeline as merge
     from . import visualize_dependency_graph as execution
@@ -30,8 +31,9 @@ else:
     from .schema import MERGED_FIELDS, write_csv
     from .validate_trace import validate_rows
     from .validate_dependency_graph import validate_dependency_artifacts
-    from .parse_msprof_db import parse_operations
+    from .parse_msprof_db import parse_operations, parse_communication_details, COMMUNICATION_DETAIL_FIELDS
     from .control_trace import parse_build_spans, BUILD_FIELDS
+    from . import rdma_completion
 
 
 UINT32_MAX = (1 << 32) - 1
@@ -60,6 +62,10 @@ def load_manifest(path: Path) -> dict:
                 raise ValueError("input directory reused across nodes: {}".format(source))
             inputs.add(source)
             node[field] = str(source)
+        if "clock_probe_files" in node:
+            if not isinstance(node["clock_probe_files"], list) or not node["clock_probe_files"]:
+                raise ValueError("clock_probe_files must be a nonempty explicit list")
+            node["clock_probe_files"] = [str((path.parent / filename).resolve()) for filename in node["clock_probe_files"]]
     if not nodes:
         raise ValueError("manifest has no nodes")
     ranks = set()
@@ -229,6 +235,30 @@ def build_rdma_notify_edges(rows: list[dict], ranks: dict, operation_evidence: d
     return edges, ambiguities, frozenset(remote_ids)
 
 
+def single_node_sync_connected(rows, edges, ranks):
+    """Require real cross-rank Notify connectivity, not merely local stream edges."""
+    expected = set(ranks)
+    if len(expected) < 2:
+        return False
+    lookup = {row["_graph_id"]: row for row in rows}
+    links = defaultdict(set)
+    for edge in edges:
+        if "notify_sync" not in edge["kind"] or edge.get("confidence") not in {"exact", "observed"}:
+            continue
+        src, dst = lookup[edge["src"]], lookup[edge["dst"]]
+        a, b = src["_user_rank"], dst["_user_rank"]
+        if a != b and a in expected and b in expected and src["_node_id"] == dst["_node_id"]:
+            links[a].add(b)
+            links[b].add(a)
+    seen, queue = set(), [min(expected)]
+    while queue:
+        rank = queue.pop()
+        if rank not in seen:
+            seen.add(rank)
+            queue.extend(links[rank] - seen)
+    return seen == expected
+
+
 def replay_manifest(manifest_path: Path, output_dir: Path, min_match_rate: float = 95.0):
     manifest = load_manifest(manifest_path)
     run_id = manifest["run_id"]
@@ -250,6 +280,8 @@ def replay_manifest(manifest_path: Path, output_dir: Path, min_match_rate: float
         if any(record.node_id != node_id for record in semantics + correlations):
             raise ValueError("plog node_id conflicts with manifest: {}".format(node_id))
         profilers = merge.parse_msprof_inputs(msprof_db_dir=node["msprof_db_dir"], node_id=node_id)
+        write_csv(str(node_dir / "communication_tasks.csv"), COMMUNICATION_DETAIL_FIELDS,
+                  parse_communication_details(node["msprof_db_dir"], run_id + "/" + node_id))
         for operation in parse_operations(node["msprof_db_dir"], node_id):
             local_scope = OperationScopeIdentity(operation.group_name, operation.op_name).stable_id
             scope = bindings.get((node_id, local_scope), stable_id("op", (run_id, node_id, local_scope)))
@@ -267,6 +299,11 @@ def replay_manifest(manifest_path: Path, output_dir: Path, min_match_rate: float
         build_spans = parse_build_spans(merge._semantic_log_paths(node["plog_dir"]), node_id, profilers)
         write_csv(str(node_dir / "build_spans.csv"), BUILD_FIELDS, build_spans)
         stats["build_spans_observed"] = len(build_spans)
+        completion_events = rdma_completion.parse_inputs(
+            merge._semantic_log_paths(node["plog_dir"]), run_id + "/" + node_id)
+        write_csv(str(node_dir / "rdma_completion_events.csv"), rdma_completion.EVENT_FIELDS,
+                  (rdma_completion.asdict(event) for event in completion_events))
+        stats["rdma_completion_events"] = len(completion_events)
         write_csv(str(node_dir / "merged.csv"), MERGED_FIELDS, rows)
         ok, _ = validate_rows([{key: str(value) for key, value in row.items()} for row in rows], min_match_rate)
         if stats["duplicate_graph_correlation_keys"] or stats["ambiguous_semantic"]:
@@ -318,9 +355,12 @@ def replay_manifest(manifest_path: Path, output_dir: Path, min_match_rate: float
     graph_ok, _, _ = validate_dependency_artifacts(
         destination / "dep_graph_summary.csv", destination / "dep_graph_edges.csv",
         destination / "dep_graph_resource_summary.csv", destination / "dep_graph_resource_edges.csv")
-    ready = graph_ok and bool(cross_count) and remote_unresolved == 0 and local_unresolved == 0
+    topology_ok = (bool(cross_count) if len(manifest["nodes"]) > 1 else
+                   single_node_sync_connected(graph_rows, edges, ranks))
+    ready = graph_ok and topology_ok and remote_unresolved == 0 and local_unresolved == 0
     write_csv(str(destination / "run_summary.csv"), ["metric", "value"], [
         {"metric": "graph_gate_passed", "value": int(graph_ok)},
+        {"metric": "topology_sync_gate_passed", "value": int(topology_ok)},
         {"metric": "cross_node_edges", "value": cross_count},
         {"metric": "same_node_rdma_edges", "value": len(remote_edges) - cross_count},
         {"metric": "same_node_rdma_unresolved_channels", "value": local_unresolved},

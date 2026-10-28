@@ -13,6 +13,7 @@
 
 #include "log.h"
 #include "dlibv_function.h"
+#include "rdma_completion_observer.h"
 
 namespace hccl {
 HcclResult hrtIbvPostSrqRecv(struct ibv_srq *srq, struct ibv_recv_wr *wr, struct ibv_recv_wr **badWr)
@@ -32,7 +33,12 @@ HcclResult hrtIbvPostRecv(struct ibv_qp *qp, struct ibv_recv_wr *wr, struct ibv_
 
 HcclResult hrtIbvPostSend(struct ibv_qp *qp, struct ibv_send_wr *wr, struct ibv_send_wr **badWr)
 {
+    const uint64_t traceBegin = RdmaCompletionTraceEnabled() ? RdmaCompletionClockNs() : 0;
     s32 ret = ibv_post_send(qp, wr, badWr);
+    if (traceBegin != 0) {
+        ObserveRdmaPost(qp, wr, ret != 0 && badWr != nullptr ? *badWr : nullptr,
+            ret, traceBegin, RdmaCompletionClockNs());
+    }
     CHK_PRT_RET(ret == ENOMEM, HCCL_WARNING("post send wqe overflow.[%d]", ret), HCCL_E_AGAIN);
     CHK_PRT_RET(ret != 0, HCCL_ERROR("ibv_post_send failed. errno:%d", ret), HCCL_E_NETWORK);
     return HCCL_SUCCESS;
@@ -42,6 +48,9 @@ HcclResult hrtIbvPollCq(struct ibv_cq *cq, int maxNum, struct ibv_wc *wc, s32& n
 {
     int pollNum = 0;
     pollNum = ibv_poll_cq(cq, maxNum, wc);
+    if (RdmaCompletionTraceEnabled() && pollNum > 0 && pollNum <= maxNum) {
+        ObserveRdmaCompletions(cq, wc, pollNum, RdmaCompletionClockNs());
+    }
     num = pollNum;
     CHK_PRT_RET((num < 0), HCCL_ERROR("ibv_poll_cq failed. num:%d", num), HCCL_E_NETWORK);
     return HCCL_SUCCESS;

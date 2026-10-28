@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Iterable
 
 
@@ -85,7 +86,7 @@ class ExecutionIdentity:
     subtask_id: int
     connection_id: int
 
-    @property
+    @cached_property
     def stable_id(self) -> str:
         return stable_id(
             "x",
@@ -109,7 +110,7 @@ class DependencyEdgeIdentity:
     dst_graph_id: str
     relation_id: str = ""
 
-    @property
+    @cached_property
     def stable_id(self) -> str:
         return stable_id(
             "e",
@@ -130,7 +131,7 @@ class OperationScopeIdentity:
     group_name: str
     op_name: str
 
-    @property
+    @cached_property
     def stable_id(self) -> str:
         return stable_id(
             "op",
@@ -145,7 +146,7 @@ class NotifyResourceIdentity:
     node_id: str
     notify_id: int
 
-    @property
+    @cached_property
     def stable_id(self) -> str:
         return stable_id("notify", (self.node_id, self.notify_id))
 
@@ -175,7 +176,7 @@ class DirectNotifyChannelIdentity:
     def complete(self) -> bool:
         return not self.missing_fields
 
-    @property
+    @cached_property
     def stable_id(self) -> str:
         return stable_id(
             "dnc",
@@ -198,7 +199,7 @@ class DirectNotifyRelationIdentity:
     channel: DirectNotifyChannelIdentity
     ordinal: int
 
-    @property
+    @cached_property
     def stable_id(self) -> str:
         return stable_id(
             "dnr",
@@ -235,7 +236,7 @@ class LocalNotifyChannelIdentity:
     def complete(self) -> bool:
         return not self.missing_fields
 
-    @property
+    @cached_property
     def stable_id(self) -> str:
         return stable_id(
             "lnc",
@@ -257,7 +258,7 @@ class LocalNotifyRelationIdentity:
     channel: LocalNotifyChannelIdentity
     ordinal: int
 
-    @property
+    @cached_property
     def stable_id(self) -> str:
         return stable_id(
             "lnr",
@@ -333,7 +334,7 @@ class NotifyRelationIdentity:
     def complete(self) -> bool:
         return not self.missing_fields
 
-    @property
+    @cached_property
     def stable_id(self) -> str:
         return stable_id(
             "nr",

@@ -75,13 +75,14 @@ def _topology(activities):
     return order, outgoing
 
 
-def _forward(order, outgoing, zero_activity=""):
+def _forward(order, outgoing, zero_activity="", reductions=None):
     earliest, predecessor = {SOURCE: 0}, {}
     for event in order:
         if event not in earliest:
             continue
         for activity in outgoing[event]:
-            weight = 0 if activity.activity_id == zero_activity else activity.weight_ns
+            weight = (0 if activity.activity_id == zero_activity else
+                      activity.weight_ns - (reductions or {}).get(activity.activity_id, 0))
             finish = earliest[event] + weight
             previous = predecessor.get(activity.dst)
             if (activity.dst not in earliest or finish > earliest[activity.dst]
@@ -90,6 +91,27 @@ def _forward(order, outgoing, zero_activity=""):
                 earliest[activity.dst] = finish
                 predecessor[activity.dst] = activity
     return earliest, predecessor
+
+
+def execution_reduction_gains(report, reductions):
+    """Local completion sensitivity when ONE measured execution excess is removed.
+
+    Unlike zeroing a Wait, this preserves the Notify join, residual waits,
+    unexplained releases and all other work in the observed schedule.
+    """
+    activities = [Activity(item["activity_id"], (item["src_graph_id"], item["src_event"]),
+                           (item["dst_graph_id"], item["dst_event"]), item["weight_ns"],
+                           item["kind"], item["graph_id"], item["execution_edge_id"])
+                  for item in report["activities"]]
+    order, outgoing = _topology(activities)
+    lookup = {a.graph_id: a for a in activities if a.kind == "task_execution"}
+    result = {}
+    for key, amount in reductions.items():
+        if key not in lookup or type(amount) is not int or not 0 <= amount <= lookup[key].weight_ns:
+            raise ValueError("reduction requires a known execution and bounded integer duration")
+        changed, _ = _forward(order, outgoing, reductions={lookup[key].activity_id: amount})
+        result[key] = report["makespan_ns"] - changed[SINK]
+    return result
 
 
 def analyze_critical_path(rows, edges, *, completion_ids=(), impact_limit=20, issues=()):

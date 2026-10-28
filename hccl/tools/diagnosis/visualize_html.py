@@ -112,11 +112,12 @@ def node_record(row: dict, x: float, y: float, w: float, h: float, fill: str, st
         "reduce_inline": "Inline reduction execution; control/payload role requires algorithm evidence",
         "notify_wait": "Local wait duration; not a measurement of remote execution time",
         "operation": "Device communication operation interval from COMMUNICATION_OP",
+        "protocol": "Receiver-local readiness ACK to data Wait completion; not pure network time or an added hardware task",
     }.get(task_kind, "Device task execution")
     size = str(row.get("profiler_size_bytes", ""))
     size = size if size and size != "-1" else ""
     display = {"rdma": "RDMA submit", "sdma": "Copy", "reduce_inline": "Inline reduce",
-               "notify_wait": "Wait", "operation": "Communication op"}.get(task_kind, label)
+               "notify_wait": "Wait", "operation": "Communication op", "protocol": label}.get(task_kind, label)
     annotation = "Algorithm annotated" if row.get("algorithm") else "No algorithm annotation"
     title = (
         f"node={row.get('_node_id', '')} rank={row.get('_user_rank', row.get('_rank', ''))} "
@@ -156,11 +157,12 @@ def node_record(row: dict, x: float, y: float, w: float, h: float, fill: str, st
         "operationScopeStatus": row.get("_operation_scope_status", ""),
         "confidence": row.get("match_confidence", ""),
         "zeroDuration": row.get("_duration", 0) <= 0,
+        "protocol": row.get("_protocol"),
     }
 
 
 def build_execution_dependency_model(rows: List[dict], edges: List[dict],
-                                     operations: List[dict] = ()) -> dict:
+                                     operations: List[dict] = (), *, alignment=None) -> dict:
     rows = list(rows) + list(operations)
     if not rows:
         raise ValueError("no timed profiler executions to render")
@@ -179,19 +181,36 @@ def build_execution_dependency_model(rows: List[dict], edges: List[dict],
         precise_start = dep.execution_time_order_value(row, "start")
         precise_origins[node] = min(precise_origins.get(node, precise_start), precise_start)
     multi_node = len(node_origins) > 1
+    clock_models, aligned_times = {}, {}
+    if alignment is not None:
+        if __package__ in (None, ""):
+            from diagnosis.clock_alignment import models_from_report
+        else:
+            from .clock_alignment import models_from_report
+        clock_models = models_from_report(alignment)
+        for row in rows:
+            clock = clock_models.get((row["_node_id"], row["_device_id"]))
+            if clock is None:
+                raise ValueError("clock evidence does not cover a displayed device")
+            aligned_times[row["_graph_id"]] = tuple(clock.map_ns(int(dep.execution_time_order_value(row, side) * 1000))
+                                                   for side in ("start", "stop"))
+        common_origin = min(pair[0] for pair in aligned_times.values())
     if multi_node:
         left = 300
     for index, key in enumerate(lanes):
         lane_items.append({
             "key": "|".join(str(value) for value in key),
             "label": (f"{key[0].rsplit('/', 1)[-1]} " if multi_node else "") +
-                     f"dev {key[1]} " + ("operations" if key[2] == -2 else f"stream {key[2]}"),
+                     f"dev {key[1]} " + ({-2: "operations", -3: "cross-node protocols"}.get(key[2], f"stream {key[2]}")),
             "y": top + index * 38,
             "height": 30,
             "taskCount": 0,
         })
     min_start = 0 if multi_node else min(row["_start"] for row in rows)
     max_stop = max(row["_stop"] - (node_origins[row["_node_id"]] if multi_node else 0) for row in rows)
+    if clock_models:
+        min_start = 0
+        max_stop = max((pair[1] - common_origin) / 1000 for pair in aligned_times.values())
     span = max(1.0, max_stop - min_start)
     scale = max(0.06, min(2.0, 28000.0 / span))
     nodes = []
@@ -212,20 +231,27 @@ def build_execution_dependency_model(rows: List[dict], edges: List[dict],
         precise_origin = precise_origins[row["_node_id"]]
         relative_start = float(dep.execution_time_order_value(row, "start") - precise_origin)
         relative_stop = float(dep.execution_time_order_value(row, "stop") - precise_origin)
+        if clock_models:
+            start_ns, stop_ns = aligned_times[row["_graph_id"]]
+            relative_start, relative_stop = (start_ns - common_origin) / 1000, (stop_ns - common_origin) / 1000
         x = left + relative_start * scale
         y = lane_items[lane]["y"] + 6 + slot * 20
-        width = max(4, row["_duration"] * scale)
+        width = max(4, (relative_stop - relative_start) * scale)
         fill, stroke = timeline.row_color({
             "_event": row.get("event", ""),
             "profiler_task_kind": row.get("profiler_task_kind", ""),
         })
         if row.get("_node_kind") == "operation":
             fill, stroke = "#dce9fa", "#4476a5"
+        elif row.get("_node_kind") == "protocol":
+            fill, stroke = ("#ffd9ba", "#b45112") if row["_protocol"]["is_slow"] else ("#e5f2e9", "#45865a")
         label = row.get("event", "") or row.get("event_name", "") or row.get("profiler_task_kind", "")
         record = node_record(row, x, y, width, node_h, fill, stroke, label)
         record["localTimeOrigin"] = origin
         record["relativeStart"] = relative_start
         record["relativeStop"] = relative_stop
+        if clock_models:
+            record["alignmentEstimatedErrorNs"] = clock_models[(row["_node_id"], row["_device_id"])].estimated_error_ns
         nodes.append(record)
         positions[row["_graph_id"]] = record
     y_cursor = top
@@ -275,7 +301,9 @@ def build_execution_dependency_model(rows: List[dict], edges: List[dict],
         })
     return {
         "kind": "dependency", "layout": "time", "timeOrigin": min_start,
-        "clockLabel": "Node-local elapsed time; clocks uncalibrated" if multi_node else "dependency",
+        "clockLabel": ("Estimated aligned time; clock error estimate {:.3f} us".format(alignment["estimated_error_ns"] / 1000)
+                       if clock_models else "Node-local elapsed time; clocks uncalibrated" if multi_node else "dependency"),
+        "clockAlignment": alignment,
         "width": left + span * scale + 100, "height": y_cursor + 70,
         "contentLeft": left, "timeScale": scale, "timeMin": min_start, "timeMax": max_stop,
         "lanes": lane_items, "columns": [], "nodes": nodes, "edges": edge_items,
@@ -443,6 +471,7 @@ PERFETTO_DEPENDENCY_TEMPLATE = r'''<!doctype html>
 #toolbar{height:var(--toolbar);display:flex;flex-wrap:wrap;align-content:center;align-items:center;gap:7px;padding:7px 10px;border-bottom:1px solid var(--border);background:#f8f9fa;overflow:auto}
 #timingNote{flex-basis:100%;font-size:12px;color:#77521a}#waitPanel{max-height:42%;overflow:auto;border-bottom:1px solid #ddd;padding:8px 12px;flex-shrink:0}#waitList button{font-size:11px}#waitPanel summary{font-weight:bold;cursor:pointer}
 #toolbar strong{font-size:14px;margin-right:4px}button,select,input{height:30px;border:1px solid #c8ccd3;border-radius:4px;background:#fff;padding:0 7px;color:#30343b}button{cursor:pointer}button:hover{background:#edf3fc;border-color:#9bb9e8}select{max-width:126px}input{width:112px}#search{width:180px}.sep{width:1px;height:24px;background:#d5d8de;margin:0 2px}.muted{color:var(--muted)}
+input[type=checkbox]{width:auto;height:16px;margin:0 4px 0 0;vertical-align:middle}
 #stage{position:fixed;left:0;right:var(--side);top:var(--toolbar);bottom:0;overflow:hidden;background:#fff}#trace{width:100%;height:100%;display:block;outline:none;cursor:default}
 #side{position:fixed;right:0;top:var(--toolbar);bottom:0;width:var(--side);border-left:1px solid var(--border);background:#fff;display:flex;flex-direction:column;overflow:hidden}
 #side h2{font-size:14px;margin:0;padding:13px 14px 9px;border-bottom:1px solid var(--border)}#details{padding:12px 14px;overflow:auto;flex:1}.empty{color:var(--muted);line-height:1.55;padding-top:4px}
@@ -472,8 +501,8 @@ function edgeVisible(e){return(!controls.edge.value||e.kind===controls.edge.valu
 for(const c of Object.values(controls)){c.addEventListener('input',()=>{requestDraw();renderDetails();renderWaits();renderCandidates()});c.addEventListener('change',()=>{requestDraw();renderDetails();renderWaits();renderCandidates()})}document.getElementById('clearFilters').onclick=()=>{for(const c of Object.values(controls))c.value='';requestDraw();renderDetails();renderWaits();renderCandidates()};
 function sx(x){return LABEL+(x-viewX)*xScale}function wx(x){return viewX+(x-LABEL)/xScale}function sy(y){return y+yPan}function visibleX(){return[viewX,viewX+Math.max(1,canvas.clientWidth-LABEL)/xScale]}
 function resize(){const d=window.devicePixelRatio||1;canvas.width=canvas.clientWidth*d;canvas.height=canvas.clientHeight*d;ctx.setTransform(d,0,0,d,0,0);overview.width=overview.clientWidth*d;overview.height=overview.clientHeight*d;octx.setTransform(d,0,0,d,0,0);requestDraw()}window.addEventListener('resize',resize);
-function bounds(){const xs=model.nodes.filter(nodeVisible);if(!xs.length)return[model.contentLeft,model.width-40];return[Math.min(...xs.map(n=>n.x)),Math.max(...xs.map(n=>n.x+n.w))]}
-function fit(){const [a,b]=bounds();viewX=a;xScale=Math.max(.0005,(canvas.clientWidth-LABEL-16)/Math.max(1,b-a));yPan=RULER+8-(model.lanes[0]?.y||0);requestDraw()}document.getElementById('fit').onclick=fit;
+function bounds(){if(model.initialWindow&&!Object.values(controls).some(c=>c.value))return[model.contentLeft,model.width-16];const xs=model.nodes.filter(nodeVisible);if(!xs.length)return[model.contentLeft,model.width-40];return[Math.min(...xs.map(n=>n.x)),Math.max(...xs.map(n=>n.x+n.w))]}
+function fit(){const [a,b]=bounds();viewX=a;xScale=Math.max(.0005,(canvas.clientWidth-LABEL-16)/Math.max(1,b-a));yPan=RULER+(model.observedHostSource?70:8)-(model.lanes[0]?.y||0);requestDraw()}document.getElementById('fit').onclick=fit;
 function focusNode(n){if(!n)return;xScale=Math.max(xScale,Math.min(12,120/Math.max(4,n.w)));viewX=n.x-(canvas.clientWidth-LABEL)/(2*xScale)+n.w/2;yPan=RULER+80-n.y;requestDraw()}document.getElementById('focus').onclick=()=>focusNode(nodeById.get(selectedId));
 document.getElementById('clearSelection').onclick=()=>setSelected(null);
 function setSelected(id,focus=false,peers=[]){selectedId=id&&nodeById.has(id)?id:null;coincidentIds=selectedId?peers:[];renderDetails();requestDraw();if(focus&&selectedId)focusNode(nodeById.get(selectedId))}
@@ -483,17 +512,29 @@ function selectContext(id){for(const c of Object.values(controls))c.value='';doc
 function renderDetails(){
  details.replaceChildren();const n=nodeById.get(selectedId);
  if(!n){sideTitle.textContent='Task details';details.append(text('div','Select a task or operation. Waits include unresolved endpoints; durations use local clocks.','empty'));return}
+ if(n.nodeKind==='protocol'){
+  sideTitle.textContent='Cross-node protocol interval';const p=n.protocol,box=text('div','','kv');
+  for(const [key,value] of [['sender',`${p.sender_node_id} / Rank ${p.sender_rank}`],['receiver',`${p.receiver_node_id} / Rank ${p.receiver_rank}`],['iteration',p.iteration],['phase / step',`${p.phase} / ${p.step}`],['protocol duration (ns)',p.protocol_duration_ns],['previous-five mean (ns)',p.reference_mean_ns],['increase (ns)',p.delta_ns],['diagnosis',p.diagnosis],['comparison coverage',p.comparison_status]])addKV(box,key,value??'unavailable');
+  details.append(box,text('div',n.timingMeaning,'empty'));
+  for(const id of p.evidence_node_ids||[]){const task=nodeById.get(id),b=text('button',task?`${task.nodeId} / Rank ${task.rank} / ${task.label}`:id,'dep');b.disabled=!task;b.onclick=()=>selectContext(id);details.append(b)}return;
+ }
  sideTitle.textContent=n.nodeKind==='operation'?'Communication operation':`Task ${n.taskId}${n.subtaskId>=0?'.'+n.subtaskId:''}`;
  const kv=text('div','', 'kv');
  for(const [key,value] of [['node',n.nodeId],['device / rank',`${n.device} / ${n.rank}`],['stream',n.stream],['physical task',n.taskId],['task type',n.taskKind],['duration',`${n.duration.toFixed(3)} us`],['timing meaning',n.timingMeaning],['size (bytes)',n.sizeBytes||'unknown'],['operation',n.operationScope||'unbound'],['event',n.event||'—'],['hardware',n.hardware||'—'],['algorithm',n.algorithm||'unannotated'],['phase / step',`${n.phase||'—'} / ${n.step??'—'}`],['semantic',n.semantic||'—'],['match',n.confidence||n.match||'—'],['relative time',`+${(n.relativeStart??(n.start-(n.localTimeOrigin??model.timeMin))).toFixed(3)} – +${(n.relativeStop??(n.stop-(n.localTimeOrigin??model.timeMin))).toFixed(3)} us`]])addKV(kv,key,value??'—');
  details.append(kv);
+ if(n.communication){const c=n.communication,box=text('div','','kv');for(const [key,value] of [['transport',c.transport_type],['RDMA role',c.rdma_type],['reported bandwidth (Byte/s)',c.reported_bandwidth_bytes_per_s],['size/bandwidth estimate (ns)',c.bandwidth_derived_duration_ns],['duration evidence',c.duration_evidence]])addKV(box,key,value||'unavailable');details.append(box)}
  const wait=(model.waits||[]).find(w=>w.wait_graph_id===n.id);
  if(wait){details.append(text('div',`${wait.status}: ${wait.reason}`,'empty'));
   if(wait.classification){details.append(text('div',`${wait.classification} · ${wait.attribution||'local observation'}`,'section'));
    const ids=new Set((wait.candidate_ids||'').split(';'));
    for(const c of model.diagnosis?.candidates||[]){if(!ids.has(c.id))continue;const b=text('button',`Candidate rank ${c.user_rank} · ${c.phase} step ${c.step} · ${(c.duration_ns/1e6).toFixed(3)} ms`,'dep');b.append(text('small',c.evidence));b.onclick=()=>selectContext(c.graph_id);details.append(b)}
-   if(wait.evidence_path_edge_ids){const b=text('button','Show evidence chain');b.onclick=()=>{for(const c of Object.values(controls))c.value='';controls.operation.value=wait.operation_scope;document.getElementById('boundaries').checked=true;const ids=relatedSet();const visible=model.nodes.filter(n=>ids.has(n.id));if(visible.length){const a=Math.min(...visible.map(n=>n.x)),z=Math.max(...visible.map(n=>n.x+n.w));viewX=a;xScale=Math.max(.0005,(canvas.clientWidth-LABEL-16)/Math.max(1,z-a));yPan=RULER+8-Math.min(...visible.map(n=>n.y))}renderWaits();renderCandidates();requestDraw()};details.append(b)}
+   if(wait.evidence_path_edge_ids){const b=text('button','Show evidence chain');b.onclick=()=>{for(const c of Object.values(controls))c.value='';document.getElementById('boundaries').checked=true;const ids=relatedSet();const visible=model.nodes.filter(n=>ids.has(n.id));if(visible.length){const a=Math.min(...visible.map(n=>n.x)),z=Math.max(...visible.map(n=>n.x+n.w));viewX=a;xScale=Math.max(.0005,(canvas.clientWidth-LABEL-16)/Math.max(1,z-a));yPan=RULER+8-Math.min(...visible.map(n=>n.y))}renderWaits();renderCandidates();requestDraw()};details.append(b)}
   }
+ }
+ const trace=(model.diagnosis?.wait_backtraces||[]).find(t=>t.wait_graph_id===n.id);
+ if(trace){details.append(text('div',`Wait backtrace: ${trace.status}`,'section'));
+  for(const boundary of trace.boundaries||[]){const b=text('button',boundary.reason,'dep');b.append(text('small',boundary.graph_id));b.disabled=!nodeById.has(boundary.graph_id);b.onclick=()=>selectContext(boundary.graph_id);details.append(b)}
+  if(trace.traversal_truncated)details.append(text('div','Traversal limit reached; unresolved branches remain.','empty'));
  }
  if(n.nodeKind==='operation'){
   const button=text('button','Focus this operation');button.onclick=()=>{for(const c of Object.values(controls))c.value='';controls.operation.value=n.operationScope;fit();renderWaits()};details.append(button);
@@ -524,26 +565,46 @@ function renderWaits(){
  document.getElementById('moreWaits').hidden=waits.length<=waitLimit;
 }
 function renderCandidates(){
- const panel=document.getElementById('diagnosisPanel'),list=document.getElementById('candidateList');panel.hidden=!model.diagnosis;if(panel.hidden)return;list.replaceChildren();
- const cs=(model.diagnosis.candidates||[]).filter(c=>!controls.operation.value||c.operation_scope===controls.operation.value);
- list.append(text('div',cs.length?`${cs.length} observed candidates; not all are proven root causes`:'No candidate exceeds the configured thresholds. This is not proof of absence.','empty'));
- for(const c of cs.slice(0,24)){const b=text('button',`rank ${c.user_rank} · ${c.phase} step ${c.step} · ${(c.duration_ns/1e6).toFixed(3)} ms`,'dep');b.append(text('small',`${c.category}: ${c.evidence}`));b.disabled=!nodeById.has(c.graph_id);b.onclick=()=>selectContext(c.graph_id);list.append(b)}
+ const protocols=model.nodes.filter(n=>n.nodeKind==='protocol'&&n.protocol?.is_slow&&nodeVisible(n));
+ const panel=document.getElementById('diagnosisPanel'),list=document.getElementById('candidateList');panel.hidden=!model.diagnosis&&!protocols.length;if(panel.hidden)return;list.replaceChildren();
+ const diagnosis=model.diagnosis||{},cs=(diagnosis.candidates||[]).filter(c=>!controls.operation.value||c.operation_scope===controls.operation.value);
+ list.append(text('div',cs.length?`${cs.length} observed candidates; not all are proven root causes`:`No supported source localized (${diagnosis.diagnosis_status||'not_localized'}). This is not proof of absence.`,'empty'));
+ const coverage=diagnosis.coverage;if(coverage)list.append(text('div',`Capture comparison coverage: ${coverage.comparable_task_count??'unknown'} / ${coverage.history_eligible_task_count??'unknown'} history-eligible tasks`,'empty'));
+ for(const c of cs.slice(0,24)){const b=text('button',`rank ${c.user_rank} · ${c.phase} step ${c.step} · ${(c.duration_ns/1e6).toFixed(3)} ms`,'dep');b.append(text('small',`${c.category}: ${c.evidence}`));if(c.impact_status)b.append(text('small',`Impact: ${c.impact_status}; local modeled gain ${c.modeled_execution_gain_ns??'unavailable'} ns`));b.disabled=!nodeById.has(c.graph_id);b.onclick=()=>selectContext(c.graph_id);list.append(b)}
+ if(protocols.length)list.append(text('div',`${protocols.length} slow cross-node protocol intervals; physical cause unknown`,'section'));
+ for(const n of protocols.slice(0,24)){const p=n.protocol,b=text('button',`Rank ${p.sender_rank} → ${p.receiver_rank} · iter ${p.iteration} · ${(p.protocol_duration_ns/1e6).toFixed(3)} ms`,'dep');b.append(text('small',`${p.diagnosis}; previous-five mean ${p.reference_mean_ns} ns`));b.onclick=()=>selectContext(n.id);list.append(b)}
 }
 controls.operation.addEventListener('change',fit);
 controls.phase.addEventListener('change',fit);
 document.getElementById('boundaries').onchange=()=>{requestDraw();renderWaits()};
 renderCandidates();
 document.getElementById('waitOrder').onchange=()=>{waitLimit=100;renderWaits()};document.getElementById('moreWaits').onclick=()=>{waitLimit+=100;renderWaits()};
-document.getElementById('timingNote').textContent=`RDMA blocks show doorbell submission, not transfer completion. ${model.issueCount==null?'Graph completeness not supplied':`${model.issueCount} unresolved Notify issue entries`}. Operation lanes use COMMUNICATION_OP; node clocks are not aligned. ${model.nodes.filter(n=>n.nodeKind==='boundary').length} control boundaries (not missing executions).`;
+document.getElementById('timingNote').textContent=`RDMA blocks show doorbell submission, not transfer completion. ${model.issueCount==null?'Graph completeness not supplied':`${model.issueCount} unresolved Notify issue entries`}. Operation lanes use COMMUNICATION_OP; ${model.clockAlignment?'estimated clock alignment from independent network probes':'node clocks are not aligned'}. Protocol lanes are display intervals, not added hardware tasks. ${model.nodes.filter(n=>n.nodeKind==='boundary').length} control boundaries (not missing executions).`;
+if(model.caseNote)document.getElementById('timingNote').textContent+=' '+model.caseNote;
 
-function selectedEdges(){const w=(model.waits||[]).find(w=>w.wait_graph_id===selectedId),ids=new Set((w?.evidence_path_edge_ids||'').split(';'));return [...new Set([...(incident.get(selectedId)||[]),...model.edges.filter(e=>ids.has(e.id))])].filter(edgeVisible)}
+function selectedEdges(){const w=(model.waits||[]).find(w=>w.wait_graph_id===selectedId),ids=new Set((w?.evidence_path_edge_ids||'').split(';'));if(selectedId===model.initialSelection)for(const id of model.focusEdgeIds||[])ids.add(id);return [...new Set([...(incident.get(selectedId)||[]),...model.edges.filter(e=>ids.has(e.id))])].filter(edgeVisible)}
 function relatedSet(){const out=new Set(selectedId?[selectedId]:[]);for(const e of selectedEdges()){out.add(e.src);out.add(e.dst)}const w=(model.waits||[]).find(w=>w.wait_graph_id===selectedId);for(const id of (w?.candidate_graph_ids||'').split(';'))if(nodeById.has(id))out.add(id);return out}
 function requestDraw(){if(dirty)return;dirty=true;requestAnimationFrame(()=>{dirty=false;draw()})}
 function niceStep(raw){const p=10**Math.floor(Math.log10(Math.max(raw,1e-9))),r=raw/p;return(r<=1?1:r<=2?2:r<=5?5:10)*p}function xToTime(x){return model.timeMin+(x-LABEL)/model.timeScale}function timeToX(t){return LABEL+(t-model.timeMin)*model.timeScale}function timeLabel(us,step){if(Math.abs(us)>=1e6)return(us/1e6).toFixed(step<1e4?4:2)+' s';if(Math.abs(us)>=1e3)return(us/1e3).toFixed(step<10?3:step<100?2:1)+' ms';return us.toFixed(step<1?3:step<10?1:0)+' us'}
-function draw(){const W=canvas.clientWidth,H=canvas.clientHeight;ctx.clearRect(0,0,W,H);ctx.fillStyle='#fff';ctx.fillRect(0,0,W,H);drawTracks(W,H);ctx.save();ctx.beginPath();ctx.rect(LABEL,RULER,W-LABEL,H-RULER);ctx.clip();drawTimeGrid(W,H);drawSelectedEdges();drawNodes(W,H);ctx.restore();drawRuler(W);drawLabels(H);drawOverview()}
+function drawGapHighlights(){for(const n of model.nodes){if(n.gapHighlightUs==null||!nodeVisible(n))continue;const w=n.gapHighlightUs*model.timeScale*xScale;ctx.save();ctx.strokeStyle='#c62828';ctx.lineWidth=2;ctx.setLineDash([4,3]);ctx.strokeRect(sx(n.x)-w,sy(n.y)-3,w,n.h+6);ctx.restore()}}
+function draw(){const W=canvas.clientWidth,H=canvas.clientHeight;ctx.clearRect(0,0,W,H);ctx.fillStyle='#fff';ctx.fillRect(0,0,W,H);drawTracks(W,H);ctx.save();ctx.beginPath();ctx.rect(LABEL,RULER,W-LABEL,H-RULER);ctx.clip();drawTimeGrid(W,H);drawHostPreparation(W,H);drawGapHighlights();drawSelectedEdges();drawNodes(W,H);ctx.restore();drawRuler(W);drawLabels(H);drawOverview()}
+function drawHostPreparation(W,H){
+ const s=model.observedHostSource;if(!s)return;
+ const base=model.graphView==='comparison'?0:model.timeMin;
+ const a=sx(timeToX(base+s.startUs)),b=sx(timeToX(base+s.stopUs)),left=Math.max(LABEL,a),right=Math.min(W,b);
+ if(right<=left)return;ctx.save();ctx.fillStyle='#c6282812';
+ const prefix=`${s.nodeId}|${s.device}|`;
+ for(const lane of model.lanes){if(lane.key.startsWith(prefix))ctx.fillRect(left,sy(lane.y),right-left,lane.height)}
+ ctx.strokeStyle='#c62828';ctx.lineWidth=1.5;ctx.setLineDash([4,3]);
+ for(const x of [a,b]){ctx.beginPath();ctx.moveTo(x,RULER+30);ctx.lineTo(x,H);ctx.stroke()}
+ ctx.setLineDash([]);ctx.beginPath();ctx.moveTo(left,RULER+37);ctx.lineTo(left,RULER+30);ctx.lineTo(right,RULER+30);ctx.lineTo(right,RULER+37);ctx.stroke();
+ ctx.font='12px Arial';ctx.textBaseline='top';ctx.fillStyle='#b3261e';
+ const label=`Host preparation / Rank ${s.rank}: ${(s.durationUs/1000).toFixed(3)} ms (observed, not a kernel)`;
+ if(ctx.measureText(label).width<right-left)ctx.fillText(label,left+5,RULER+9);ctx.restore();
+}
 function drawTracks(W,H){for(let i=0;i<model.lanes.length;i++){const l=model.lanes[i],y=sy(l.y);if(y+l.height<RULER||y>H)continue;ctx.fillStyle=i%2?'#fbfcfe':'#f5f7fa';ctx.fillRect(0,y,W,l.height);ctx.strokeStyle='#e4e7eb';ctx.beginPath();ctx.moveTo(0,y+l.height+.5);ctx.lineTo(W,y+l.height+.5);ctx.stroke()}}
 function drawTimeGrid(W,H){const [a,b]=visibleX(),usPerPx=1/(model.timeScale*xScale),step=niceStep(usPerPx*120),ta=xToTime(a),tb=xToTime(b),first=Math.ceil(ta/step)*step;ctx.strokeStyle='#e1e5ea';ctx.lineWidth=1;for(let t=first;t<=tb;t+=step){const x=sx(timeToX(t));ctx.beginPath();ctx.moveTo(x,RULER);ctx.lineTo(x,H);ctx.stroke()}}
-function drawRuler(W){ctx.fillStyle='#f8f9fa';ctx.fillRect(0,0,W,RULER);ctx.strokeStyle='#cfd4dc';ctx.beginPath();ctx.moveTo(0,RULER-.5);ctx.lineTo(W,RULER-.5);ctx.stroke();const [a,b]=visibleX(),step=niceStep(1/(model.timeScale*xScale)*120),ta=xToTime(a),tb=xToTime(b),first=Math.ceil(ta/step)*step;ctx.fillStyle='#4c5562';ctx.font='11px Arial';ctx.textBaseline='top';for(let t=first;t<=tb;t+=step){const x=sx(timeToX(t));ctx.fillRect(x,25,1,8);ctx.fillText(timeLabel(t-model.timeMin,step),x+4,7)}ctx.fillStyle='#eef1f5';ctx.fillRect(0,0,LABEL,RULER);ctx.fillStyle='#4c5562';ctx.fillText('Tracks',12,10)}
+function drawRuler(W){ctx.fillStyle='#f8f9fa';ctx.fillRect(0,0,W,RULER);ctx.strokeStyle='#cfd4dc';ctx.beginPath();ctx.moveTo(0,RULER-.5);ctx.lineTo(W,RULER-.5);ctx.stroke();const [a,b]=visibleX(),step=niceStep(1/(model.timeScale*xScale)*120),ta=xToTime(a),tb=xToTime(b),first=Math.ceil(ta/step)*step;ctx.fillStyle='#4c5562';ctx.font='11px Arial';ctx.textBaseline='top';for(let t=first;t<=tb;t+=step){const x=sx(timeToX(t));ctx.fillRect(x,25,1,8);ctx.fillText(timeLabel(model.graphView==='comparison'?t:t-model.timeMin,step),x+4,7)}ctx.fillStyle='#eef1f5';ctx.fillRect(0,0,LABEL,RULER);ctx.fillStyle='#4c5562';ctx.fillText('Tracks',12,10)}
 function drawLabels(H){ctx.fillStyle='#f8f9fa';ctx.fillRect(0,RULER,LABEL,H-RULER);ctx.strokeStyle='#cfd4dc';ctx.beginPath();ctx.moveTo(LABEL-.5,0);ctx.lineTo(LABEL-.5,H);ctx.stroke();ctx.font='12px Arial';ctx.textBaseline='middle';for(const l of model.lanes){const y=sy(l.y);if(y+l.height<RULER||y>H)continue;ctx.fillStyle='#30343b';ctx.fillText(l.label,12,y+Math.min(18,l.height/2));ctx.fillStyle='#7a828e';ctx.font='10px Arial';ctx.fillText(`${l.taskCount||0} tasks`,12,y+Math.min(34,l.height-6));ctx.font='12px Arial'}}
 function projectedDurationWidth(n){return Math.max(0,n.duration||0)*model.timeScale*xScale}function markerNode(n){return n.zeroDuration||projectedDurationWidth(n)<2}
 function drawNodes(W,H){const [a,b]=visibleX(),related=relatedSet(),hasSelection=!!selectedId;ctx.font='10px Arial';ctx.textBaseline='middle';for(const n of model.nodes){if(!nodeVisible(n)||n.x+n.w<a||n.x>b)continue;const y=sy(n.y);if(y+n.h<RULER||y>H)continue;const x=sx(n.x),isMarker=markerNode(n),w=projectedDurationWidth(n),isSel=n.id===selectedId,isRel=related.has(n.id);ctx.globalAlpha=hasSelection&&!isRel?.18:1;ctx.fillStyle=n.fill;ctx.strokeStyle=isSel?'#111':isRel?'#1967d2':n.stroke;ctx.lineWidth=isSel?3:isRel?2:1;if(isMarker){const cy=y+n.h/2,r=isSel?6:4;ctx.beginPath();ctx.moveTo(x,cy-r);ctx.lineTo(x+r,cy);ctx.lineTo(x,cy+r);ctx.lineTo(x-r,cy);ctx.closePath();ctx.fill();ctx.stroke()}else{ctx.fillRect(x,y,w,n.h);ctx.strokeRect(x+.5,y+.5,Math.max(1,w-1),n.h-1);if(w>42){ctx.fillStyle='#202124';ctx.fillText(n.label,x+4,y+n.h/2)}}ctx.globalAlpha=1}}
@@ -553,7 +614,7 @@ canvas.onmousedown=e=>{canvas.focus();drag={x:e.clientX,y:e.clientY,lastX:e.clie
 canvas.onwheel=e=>{e.preventDefault();const r=canvas.getBoundingClientRect(),mx=e.clientX-r.left;if(e.ctrlKey){const anchor=wx(mx),factor=e.deltaY<0?1.18:.84;xScale=Math.max(.0005,Math.min(24,xScale*factor));viewX=anchor-(mx-LABEL)/xScale}else if(e.shiftKey){viewX+=e.deltaY/xScale}else{viewX+=e.deltaX/xScale;yPan-=e.deltaY}requestDraw()};canvas.onkeydown=e=>{if(e.key==='f'){fit();e.preventDefault()}else if(e.key==='Escape'){setSelected(null)}else if(e.key==='ArrowLeft'){viewX-=80/xScale;requestDraw()}else if(e.key==='ArrowRight'){viewX+=80/xScale;requestDraw()}else if(e.key==='ArrowUp'){yPan+=50;requestDraw()}else if(e.key==='ArrowDown'){yPan-=50;requestDraw()}};
 function drawOverview(){const W=overview.clientWidth,H=overview.clientHeight,[a,b]=bounds(),span=Math.max(1,b-a);octx.clearRect(0,0,W,H);octx.fillStyle='#fafbfc';octx.fillRect(0,0,W,H);const step=Math.max(1,Math.ceil(model.nodes.length/7000));octx.fillStyle='#6584ad88';for(let i=0;i<model.nodes.length;i+=step){const n=model.nodes[i];if(!nodeVisible(n))continue;const x=(n.x-a)/span*W;octx.fillRect(x,10,Math.max(1,n.w/span*W),H-20)}const[v0,v1]=visibleX();octx.strokeStyle='#d93025';octx.lineWidth=2;octx.strokeRect((v0-a)/span*W,2,Math.max(2,(v1-v0)/span*W),H-4)}overview.onmousedown=e=>{const r=overview.getBoundingClientRect(),[a,b]=bounds(),world=a+(e.clientX-r.left)/r.width*(b-a);viewX=world-(canvas.clientWidth-LABEL)/(2*xScale);requestDraw()};
 const colors={direct_stream_order_observed:'#444',ffts_logical_stream_order:'#5c6bc0',ffts_notify_sync_observed:'#2b8a3e',direct_notify_sync_exact:'#7b3fb3',local_notify_sync_exact:'#d9488b',resource_stream_order_observed:'#444',resource_ffts_order_observed:'#5c6bc0',resource_notify_sync_observed:'#2b8a3e',resource_notify_sync_exact:'#7b3fb3',resource_local_notify_sync_exact:'#d9488b',cross_node_notify_sync_observed:'#007c91',resource_cross_node_notify_sync_observed:'#007c91',resource_cross_node_notify_sync_semantic:'#007c91',same_node_rdma_notify_sync_observed:'#b05b00',resource_same_node_rdma_notify_sync_observed:'#b05b00',resource_same_node_rdma_notify_sync_semantic:'#b05b00'},legend=document.getElementById('legend');for(const k of model.edgeKinds){const s=text('span','', 'swatch');s.style.background=colors[k]||'#777';legend.append(s,text('span',k.replaceAll('_',' ')))}
-resize();const initialSelection=decodeURIComponent(location.hash.slice(1));if(initialSelection&&nodeById.has(initialSelection)){controls.operation.value=nodeById.get(initialSelection).operationScope||'';setSelected(initialSelection,true);renderCandidates()}else fit();renderDetails();renderWaits();
+resize();const initialSelection=decodeURIComponent(location.hash.slice(1));if(initialSelection&&nodeById.has(initialSelection)){controls.operation.value=nodeById.get(initialSelection).operationScope||'';setSelected(initialSelection,true);renderCandidates()}else{fit();if(model.initialSelection)setSelected(model.initialSelection)}renderDetails();renderWaits();
 </script></body></html>'''
 
 
