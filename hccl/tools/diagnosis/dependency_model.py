@@ -10,7 +10,7 @@ from functools import cached_property
 from typing import Iterable
 
 
-GRAPH_SCHEMA_VERSION = 6
+GRAPH_SCHEMA_VERSION = 7
 
 OPERATION_SCOPE_UNIQUE = "unique"
 OPERATION_SCOPE_MISSING = "missing"
@@ -75,8 +75,9 @@ def stable_id(prefix: str, parts: Iterable[object]) -> str:
 class ExecutionIdentity:
     """Single-node physical execution identity.
 
-    Timing and CSV position are deliberately excluded: both are observations of
-    an execution, not its identity.
+    New DB captures retain the vendor TaskIndex (globalTaskId, startNs).
+    Its timestamp is an exact DB key, not a temporal matching heuristic.
+    Older artifacts keep their original physical identity.
     """
 
     node_id: str
@@ -85,9 +86,13 @@ class ExecutionIdentity:
     task_id: int
     subtask_id: int
     connection_id: int
+    profiler_task_index: str = ""
 
     @cached_property
     def stable_id(self) -> str:
+        if self.profiler_task_index:
+            return stable_id("x", (self.node_id, self.device_id,
+                                   "msprof_task_index", self.profiler_task_index))
         return stable_id(
             "x",
             (

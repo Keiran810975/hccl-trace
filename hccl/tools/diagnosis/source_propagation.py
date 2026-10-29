@@ -25,7 +25,7 @@ else:
 
 
 METRIC_FIELDS = ("comparison_status", "reference_count", "reference_iterations", "reference_mean_ns",
-                 "delta_ns", "slowdown_factor", "duration_slow", "role")
+                 "reference_value_ns", "reference_metric", "delta_ns", "slowdown_factor", "duration_slow", "role")
 SOURCE_FIELDS = ("root_id", "component", "node_id", "user_rank", "device_id", "stream_id", "task_id",
                  "source_activity_id",
                  "operation_scope", "iteration", "block", "bucket", "phase", "step", "event", "observed_start_ns",
@@ -33,6 +33,7 @@ SOURCE_FIELDS = ("root_id", "component", "node_id", "user_rank", "device_id", "s
                  "reference_iterations", "reference_count", "reason",
                  "physical_cause", "modeled_execution_gain_ns", "impact_status", "traversal_truncated",
                  "other_backtrace_branches_truncated")
+SOURCE_FIELDS += ("group_id", "call_site", "occurrence", "reference_value_ns", "reference_metric", "baseline_median_ns")
 LIMITS = [
     "Paths start at reported candidates, not at independently inferred physical faults.",
     "Only existing reported evidence paths are expanded; downstream descendants are not exhaustively searched.",
@@ -52,6 +53,7 @@ def node_fact(row, comparison):
         task_kind=row.get("profiler_task_kind", ""), event=row.get("event") or row.get("event_name", ""),
         phase=row.get("phase", ""), step=row.get("step", ""), slice=row.get("slice", ""),
         iteration=comparison.get("iteration"), block=comparison.get("block"), bucket=comparison.get("bucket"),
+        group_id=comparison.get("group_id"), call_site=comparison.get("call_site"), occurrence=comparison.get("occurrence"),
         start_ns=start, stop_ns=stop, duration_ns=stop-start,
         comparison={k:comparison.get(k) for k in METRIC_FIELDS})
 
@@ -72,7 +74,7 @@ def timing_check(edge, src, dst):
     return "producer_observed_during_wait"
 
 
-def build_report(rows, edges, candidates, comparisons=(), *, primary_source_candidate_id=None):
+def build_report(rows, edges, candidates, comparisons=(), *, primary_source_candidate_id=None, reference=None):
     nodes = {r["_graph_id"]:r for r in rows}
     links = {e["edge_id"]:e for e in edges}
     if len(nodes) != len(rows) or len(links) != len(edges):
@@ -157,7 +159,8 @@ def build_report(rows, edges, candidates, comparisons=(), *, primary_source_cand
             complete_chain_count=sum(c["path_complete"] for c in chains),
             chain_status_counts=dict(Counter(c["status"] for c in chains))),
         candidates=exported, nodes=facts, limits=LIMITS, candidate_order_changed=False,
-        exhaustive_downstream_search=False, physical_causation_proven=False)
+        exhaustive_downstream_search=False, physical_causation_proven=False,
+        reference=reference or dict(kind="previous_five_measured", statistic="mean", window=5))
 
 
 def export_report(report, directory):

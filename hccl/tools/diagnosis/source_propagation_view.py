@@ -55,12 +55,19 @@ def factor(value):
     return "不可比" if value is None or str(value) == "" else "{:.2f}×".format(Decimal(str(value)))
 
 
+def reference_value(item):
+    return item.get("reference_value_ns") if item.get("reference_value_ns") is not None else item.get("reference_mean_ns")
+
+
 def location(value):
     return "{} · Rank {} · stream {} · task {}".format(value["node_id"].rsplit("/", 1)[-1],
         value["user_rank"], value["stream_id"], value["task_id"])
 
 
 def coordinate(value):
+    if value.get("group_id") is not None:
+        return "iter {} / {} / {} / occurrence {} · {} / step {}".format(
+            *[value.get(k, "?") for k in ("iteration", "group_id", "call_site", "occurrence", "phase", "step")])
     return "iter {} / Block {} / bucket {} · {} / step {}".format(
         *[value.get(k) if value.get(k) is not None else "?" for k in
           ("iteration", "block", "bucket", "phase", "step")])
@@ -115,7 +122,7 @@ def build_view_model(report):
         nodes[identifier] = dict(node, start_ns=str(node["start_ns"]), stop_ns=str(node["stop_ns"]),
             event_label=EVENT_LABELS.get(node["event"], node["event"] or node["task_kind"]),
             location=location(node), coordinate=coordinate(node), duration=duration(node["duration_ns"]),
-            reference=duration(metrics.get("reference_mean_ns")), delta=duration(metrics.get("delta_ns"), signed=True),
+            reference=duration(reference_value(metrics)), delta=duration(metrics.get("delta_ns"), signed=True),
             factor=factor(metrics.get("slowdown_factor")),
             relative="{} – {}".format(duration(node["start_ns"]-origins[node["node_id"]]),
                                        duration(node["stop_ns"]-origins[node["node_id"]])))
@@ -133,7 +140,7 @@ def build_view_model(report):
         candidates.append(dict(root, source=display_source, chains=chains, source_label=source_label, coordinate=coordinate(source),
             source_location=("{} · Rank {} · Host 观测区间".format(source["node_id"].rsplit("/", 1)[-1], source["user_rank"])
                              if source["component"] == "host_preparation" else location(source)),
-            duration=duration(source["duration_ns"]), reference=duration(source["reference_mean_ns"]),
+            duration=duration(source["duration_ns"]), reference=duration(reference_value(source)),
             delta=duration(source["delta_ns"], signed=True), factor=factor(source["slowdown_factor"]),
             model_gain=duration(source.get("modeled_execution_gain_ns")),
             wait_ranks=sorted({nodes[c["target_wait_graph_id"]]["user_rank"] for c in chains
@@ -196,13 +203,25 @@ def render_markdown(report):
     return "\n".join(lines) + "\n"
 
 
-def render_html(report):
+def render_html(report, *, standalone=False):
     # Absolute nanoseconds travel as strings; the browser never rounds profiler timestamps.
     data = json.dumps(build_view_model(report), ensure_ascii=False, separators=(",", ":"))
     for value, escaped in (("&", "\\u0026"), ("<", "\\u003c"), (">", "\\u003e"),
                            ("\u2028", "\\u2028"), ("\u2029", "\\u2029")):
         data = data.replace(value, escaped)
-    return PAGE.replace("__MODEL__", data)
+    page = PAGE.replace("__MODEL__", data)
+    if report.get("reference", {}).get("statistic") == "median":
+        page = page.replace("参考为同一次运行前5个正式 iteration 的同定位任务均值，不是外部 baseline。",
+                            "参考为独立正常采集的可比任务中位数（Baseline）；结构参考不代表跨采集任务身份。")
+        page = page.replace("前5轮均值", "Baseline 中位数").replace("参考均值", "参考中位数")
+    if standalone:
+        start = page.index('<nav class="downloads"')
+        stop = page.index('</nav>', start) + len('</nav>')
+        page = page[:start] + ('<nav class="downloads" aria-label="诊断结果"><a href="root_causes.json">根因候选 JSON</a>'
+                              '<a href="execution.html">执行依赖图</a></nav>') + page[stop:]
+        page = page.replace('${esc(id)}</code><br><small>',
+                            '${esc(id)}</code> <a href="execution.html#${encodeURIComponent(id)}">定位任务</a><br><small>')
+    return page
 
 
 PAGE = r"""<!doctype html>

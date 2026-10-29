@@ -20,6 +20,7 @@ if __package__ in (None, ""):
     from diagnosis import visualize_html as view
     from diagnosis import source_events
     from diagnosis import wait_backtrace
+    from diagnosis.workload_coordinates import position, location_fields
     from diagnosis.schema import write_csv
 else:
     from . import compare_diagnosis as comparison
@@ -28,6 +29,7 @@ else:
     from . import visualize_html as view
     from . import source_events
     from . import wait_backtrace
+    from .workload_coordinates import position, location_fields
     from .schema import write_csv
 
 
@@ -52,7 +54,8 @@ class RollingOptions:
 
 def validate_coordinates(records):
     result, slots = {}, set()
-    allowed = {"operation_scope", "stage", "iteration", "block", "bucket", "evidence"}
+    allowed = {"operation_scope", "stage", "iteration", "block", "bucket", "evidence",
+               "group_id", "call_site", "occurrence"}
     for item in records:
         if set(item) - allowed:
             raise ValueError("call coordinates must contain only public workload binding fields")
@@ -60,11 +63,18 @@ def validate_coordinates(records):
         stage = item.get("stage")
         if not scope or scope in result or stage not in {"warmup", "measured"}:
             raise ValueError("unique scopes and explicit warmup/measured stage required")
-        if any(type(item.get(k)) is not int or item[k] < 0 for k in ("iteration", "block", "bucket")):
+        named = "group_id" in item
+        if named and (any(not isinstance(item.get(k), str) or not item[k].strip() for k in ("group_id", "call_site"))
+                      or any(item.get(k) is not None for k in ("block", "bucket"))):
+            raise ValueError("named locations require group_id/call_site and no legacy block/bucket")
+        if not named and any(k in item for k in ("call_site", "occurrence")):
+            raise ValueError("partial named workload location")
+        if any(type(item.get(k)) is not int or item[k] < 0 for k in
+               (("iteration", "occurrence") if named else ("iteration", "block", "bucket"))):
             raise ValueError("call coordinates must be nonnegative integers")
         if not str(item.get("evidence", "")).strip():
             raise ValueError("workload-to-DB binding needs independent capture evidence")
-        slot = (stage, item["iteration"], item["block"], item["bucket"])
+        slot = (stage, item["iteration"], position(item))
         if slot in slots:
             raise ValueError("more than one operation bound to one workload call")
         slots.add(slot)
@@ -74,8 +84,10 @@ def validate_coordinates(records):
 
 def load_coordinates(path):
     data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
-    if set(data) != {"schema_version", "operations"} or data["schema_version"] != 1:
-        raise ValueError("expected public call map schema 1, without injection information")
+    if set(data) != {"schema_version", "operations"} or data["schema_version"] not in {1, 2}:
+        raise ValueError("expected public call map schema 1/2, without injection information")
+    if any(("group_id" in item) != (data["schema_version"] == 2) for item in data["operations"]):
+        raise ValueError("workload coordinate schema and location fields disagree")
     return validate_coordinates(data["operations"])
 
 
@@ -100,7 +112,7 @@ def compare_tasks(rows, edges, coordinates, options):
         raise ValueError("call map references unknown execution operations")
     for scope, coord in coordinates.items():
         if coord["stage"] == "measured":
-            by_slot[(coord["iteration"], coord["block"], coord["bucket"])] = scope
+            by_slot[(coord["iteration"], position(coord))] = scope
     gaps = comparison.local_gaps(rows, edges)
     origins = {}
     for row in rows:
@@ -126,8 +138,7 @@ def compare_tasks(rows, edges, coordinates, options):
                     start_offset_ns=waits.ns(row, "start") - origins[(scope, row["_node_id"])],
                     reference_start_offset_mean_ns=None, reference_start_offset_mad_ns=None,
                     start_delta_ns=None, start_late=None,
-                    stage=coord["stage"] if coord else "unbound", iteration=coord["iteration"] if coord else None,
-                    block=coord["block"] if coord else None, bucket=coord["bucket"] if coord else None,
+                    **(location_fields(coord) if coord else dict(stage="unbound", iteration=None, block=None, bucket=None)),
                     comparison_status="unbound_operation", reference_iterations=[], reference_graph_ids=[],
                     reference_operation_scopes=[], reference_count=0, reference_mean_ns=None,
                     reference_mad_ns=None, reference_gap_mean_ns=None, reference_gap_mad_ns=None,
@@ -150,7 +161,7 @@ def compare_tasks(rows, edges, coordinates, options):
             task["comparison_status"] = "ambiguous_task_location"
             continue
         iterations = list(range(coord["iteration"] - options.window, coord["iteration"]))
-        history_scopes = [by_slot.get((i, coord["block"], coord["bucket"])) for i in iterations]
+        history_scopes = [by_slot.get((i, position(coord))) for i in iterations]
         if any(s is None for s in history_scopes):
             task["comparison_status"] = "missing_previous_iteration"
             continue

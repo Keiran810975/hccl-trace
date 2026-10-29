@@ -89,12 +89,22 @@ def load_manifest(path: Path) -> dict:
         if not operation.get("evidence", "").strip():
             raise ValueError("operation binding requires capture evidence")
         member_nodes = set()
+        if "participants" in operation:
+            participants = operation["participants"]
+            if (not participants or len(set(participants)) != len(participants)
+                    or any(type(rank) is not int or rank not in ranks for rank in participants)):
+                raise ValueError("operation participants must be explicit known unique global ranks")
         for member in operation["members"]:
-            key = (member["node_id"], member["group_name"], member["op_name"])
-            if (key in seen_members or member["node_id"] in member_nodes
-                    or member["node_id"] not in nodes or not all(key)):
+            device = member.get("device_id")
+            endpoint = (member["node_id"], device)
+            key = (member["node_id"], device, member["group_name"], member["op_name"])
+            if (key in seen_members or endpoint in member_nodes
+                    or member["node_id"] not in nodes or not member["group_name"] or not member["op_name"]
+                    or (device is not None and (type(device) is not int or endpoint not in devices))
+                    or (device is not None and (member["node_id"], None, member["group_name"], member["op_name"]) in seen_members)
+                    or (device is None and any(k[0] == key[0] and k[2:] == key[2:] for k in seen_members))):
                 raise ValueError("operation binding is not one-to-one: {}".format(key))
-            member_nodes.add(member["node_id"])
+            member_nodes.add(endpoint)
             seen_members.add(key)
     return manifest
 
@@ -107,8 +117,45 @@ def operation_bindings(manifest: dict):
         evidence[shared] = operation["evidence"]
         for member in operation["members"]:
             local = OperationScopeIdentity(member["group_name"], member["op_name"]).stable_id
-            bindings[(member["node_id"], local)] = shared
+            key = ((member["node_id"], member["device_id"], local) if "device_id" in member else
+                   (member["node_id"], local))
+            bindings[key] = shared
     return bindings, evidence
+
+
+def operation_sync_connected(rows, edges, ranks, manifest):
+    """Check actual per-operation participants, not a global cross-edge count."""
+    nodes = {row["_graph_id"]: row for row in rows}
+    memberships, links = defaultdict(set), defaultdict(lambda: defaultdict(set))
+    for row in rows:
+        if row["_user_rank"] >= 0 and row.get("_operation_scope"):
+            memberships[row["_operation_scope"]].add(row["_user_rank"])
+    for edge in edges:
+        if "notify_sync" not in edge["kind"] or edge.get("confidence") not in {"exact", "observed"}:
+            continue
+        src, dst = nodes[edge["src"]], nodes[edge["dst"]]
+        scope = src.get("_operation_scope")
+        if scope == dst.get("_operation_scope") and src["_user_rank"] != dst["_user_rank"]:
+            links[scope][src["_user_rank"]].add(dst["_user_rank"])
+            links[scope][dst["_user_rank"]].add(src["_user_rank"])
+    for operation in manifest.get("operations", []):
+        scope = stable_id("op", (manifest["run_id"], operation["operation_id"]))
+        if "participants" in operation:
+            expected = set(operation["participants"])
+            if memberships.get(scope) != expected:
+                return False
+            seen, queue = set(), [next(iter(expected))]
+            while queue:
+                rank = queue.pop()
+                if rank not in seen:
+                    seen.add(rank)
+                    queue.extend(links[scope][rank] - seen)
+            if seen != expected:
+                return False
+    # Legacy manifests can contain several independent subgroups in one scope.
+    # Require evidence for every declared rank; do not invent subgroup membership.
+    covered = {rank for group in links.values() for rank, peers in group.items() if peers}
+    return set(ranks) <= covered
 
 
 def build_cross_node_edges(rows: list[dict], ranks: dict, operation_evidence: dict):
@@ -284,7 +331,8 @@ def replay_manifest(manifest_path: Path, output_dir: Path, min_match_rate: float
                   parse_communication_details(node["msprof_db_dir"], run_id + "/" + node_id))
         for operation in parse_operations(node["msprof_db_dir"], node_id):
             local_scope = OperationScopeIdentity(operation.group_name, operation.op_name).stable_id
-            scope = bindings.get((node_id, local_scope), stable_id("op", (run_id, node_id, local_scope)))
+            scope = bindings.get((node_id, operation.device_id, local_scope),
+                bindings.get((node_id, local_scope), stable_id("op", (run_id, node_id, local_scope))))
             operation_times.append({
                 "node_id": run_id + "/" + node_id, "device_id": operation.device_id,
                 "user_rank": device_ranks.get((run_id + "/" + node_id, operation.device_id), -1),
@@ -318,12 +366,15 @@ def replay_manifest(manifest_path: Path, output_dir: Path, min_match_rate: float
                               "profiler_op_id": task.profiler_op_id})
         for row in rows:
             item = dict(row, node_id=run_id + "/" + node_id)
+            declared_rank = device_ranks.get((item["node_id"], row["device_id"]))
+            if declared_rank is not None and int(row["user_rank"]) >= 0 and int(row["user_rank"]) != declared_rank:
+                raise ValueError("semantic/DB rank conflicts with explicit node/device topology")
             if row["match_status"] == "profiler_only" and int(row["user_rank"]) < 0:
                 item["user_rank"] = device_ranks.get((item["node_id"], row["device_id"]), -1)
             local_scope = row["profiler_op_scope"]
             if local_scope:
-                item["profiler_op_scope"] = bindings.get(
-                    (node_id, local_scope), stable_id("op", (run_id, node_id, local_scope)))
+                item["profiler_op_scope"] = bindings.get((node_id, item["device_id"], local_scope),
+                    bindings.get((node_id, local_scope), stable_id("op", (run_id, node_id, local_scope))))
             all_rows.append(item)
     write_csv(str(destination / "merge_summary.csv"), ["node_id", "metric", "value"], summaries)
     inventory_fields = ["node_id", "device_id", "group_name", "op_name", "profiler_op_id"]
@@ -355,8 +406,7 @@ def replay_manifest(manifest_path: Path, output_dir: Path, min_match_rate: float
     graph_ok, _, _ = validate_dependency_artifacts(
         destination / "dep_graph_summary.csv", destination / "dep_graph_edges.csv",
         destination / "dep_graph_resource_summary.csv", destination / "dep_graph_resource_edges.csv")
-    topology_ok = (bool(cross_count) if len(manifest["nodes"]) > 1 else
-                   single_node_sync_connected(graph_rows, edges, ranks))
+    topology_ok = operation_sync_connected(graph_rows, edges, ranks, manifest)
     ready = graph_ok and topology_ok and remote_unresolved == 0 and local_unresolved == 0
     write_csv(str(destination / "run_summary.csv"), ["metric", "value"], [
         {"metric": "graph_gate_passed", "value": int(graph_ok)},

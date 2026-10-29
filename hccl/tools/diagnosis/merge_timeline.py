@@ -147,13 +147,20 @@ def merge_records(
             exact_matches = _exact_matches(profiler_exact_by_key, semantic)
             if exact_matches:
                 matches = exact_matches
-                match_method = "task_id"
+                match_method = "task_id_batch" if exact_matches[0].batch_id >= 0 else "task_id"
                 match_confidence = "exact"
                 stats["task_id_matches"] += 1
+                if exact_matches[0].batch_id >= 0:
+                    stats["task_batch_matches"] += 1
             elif semantic.ffts_ctx_id >= 0:
                 stats["ffts_semantic_missing_correlation"] += 1
 
         matched_profiler = matches[0] if matches else None
+        if len(matches) > 1:
+            stats["ambiguous_profiler"] += 1
+            rows.append(_merged_row("ambiguous_profiler", semantic, None,
+                                    duplicate_semantic, True))
+            continue
         duplicate_profiler = (
             profiler_execution_counts[matched_profiler.execution_key] > 1
             if matched_profiler else False
@@ -248,6 +255,7 @@ def merge_records(
     stats["invalid_matches"] = (
         stats.get("ffts_ctx_kind_mismatches", 0)
         + stats.get("notify_metadata_mismatch", 0)
+        + stats.get("ambiguous_profiler", 0)
     )
     stats["match_rate_percent"] = round(
         stats.get("matched", 0) * 100.0 / len(semantic_list), 2
@@ -578,6 +586,8 @@ def _merged_row(status: str, semantic: SemanticRecord, profiler: ProfilerTask, d
         "profiler_size_bytes": profiler.profiler_size_bytes if profiler else "",
         "profiler_stream_id": profiler.stream_id if profiler else "",
         "profiler_task_id": profiler.task_id if profiler else "",
+        "profiler_batch_id": profiler.batch_id if profiler else "",
+        "profiler_task_index": profiler.task_index if profiler else "",
         "task_start": profiler.task_start if profiler else "",
         "task_stop": profiler.task_stop if profiler else "",
         "duration": profiler.duration if profiler else "",

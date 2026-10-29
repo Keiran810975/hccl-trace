@@ -25,3 +25,5 @@ third_party/
 deploy/
 out/
 new_out/
+dist/
+*.egg-info/

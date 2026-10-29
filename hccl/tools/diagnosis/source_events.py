@@ -10,6 +10,7 @@ from . import analyze_waits as waits
 from . import compare_diagnosis as comparison
 from . import critical_path as critical
 from .dependency_model import stable_id
+from .workload_coordinates import position, location_fields
 
 
 def statistics(values):
@@ -36,18 +37,18 @@ def operation_events(rows, coordinates, options):
         start = min(waits.ns(r, "start") for r in group)
         stop = max(waits.ns(r, "stop") for r in group)
         event = dict(event_id=stable_id("event", (node, scope)), operation_scope=scope, node_id=node,
-                     **{k: coord[k] for k in ("stage", "iteration", "block", "bucket")},
+                     **location_fields(coord),
                      observed_start_ns=start, observed_stop_ns=stop, duration_ns=stop - start,
                      reference_iterations=[], reference_mean_ns=None, reference_mad_ns=None,
                      delta_ns=None, is_slow=False, shape_id=comparison.operation_shape(group),
                      comparison_status="insufficient_history")
         events.append(event)
-        slots[(node, coord["stage"], coord["iteration"], coord["block"], coord["bucket"])] = event
+        slots[(node, coord["stage"], coord["iteration"], position(coord))] = event
     for event in events:
         if event["stage"] != "measured" or event["iteration"] < options.window:
             continue
         iterations = list(range(event["iteration"] - options.window, event["iteration"]))
-        history = [slots.get((event["node_id"], "measured", i, event["block"], event["bucket"])) for i in iterations]
+        history = [slots.get((event["node_id"], "measured", i, position(event))) for i in iterations]
         if any(item is None for item in history):
             event["comparison_status"] = "missing_previous_iteration"
             continue
@@ -105,7 +106,7 @@ def preparation_sources(records, rows, edges, coordinates, tasks, options):
     slots = {}
     for item in records:
         coord = coordinates[item["operation_scope"]]
-        slots[(item["node_id"], item["user_rank"], coord["stage"], coord["iteration"], coord["block"], coord["bucket"])] = item
+        slots[(item["node_id"], item["user_rank"], coord["stage"], coord["iteration"], position(coord))] = item
     syncs = defaultdict(list)
     producer_counts = Counter(e["dst"] for e in edges if "notify_sync" in e["kind"])
     for edge in edges:
@@ -122,7 +123,7 @@ def preparation_sources(records, rows, edges, coordinates, tasks, options):
         if coord["stage"] != "measured" or coord["iteration"] < options.window:
             continue
         iterations = list(range(coord["iteration"] - options.window, coord["iteration"]))
-        history = [slots.get((item["node_id"], item["user_rank"], "measured", i, coord["block"], coord["bucket"])) for i in iterations]
+        history = [slots.get((item["node_id"], item["user_rank"], "measured", i, position(coord))) for i in iterations]
         if any(h is None for h in history):
             continue
         center, mad = statistics([h["stop_ns"] - h["start_ns"] for h in history])
@@ -154,7 +155,7 @@ def preparation_sources(records, rows, edges, coordinates, tasks, options):
             graph_id=anchor_row["_graph_id"], anchor_graph_id=anchor_row["_graph_id"],
             source_activity_id=stable_id("host_prepare", (item["node_id"], item["user_rank"], item["operation_scope"])),
             node_id=item["node_id"], user_rank=item["user_rank"], device_id=item["device_id"], stream_id=None, task_id=None,
-            operation_scope=item["operation_scope"], **{k: coord[k] for k in ("stage", "iteration", "block", "bucket")},
+            operation_scope=item["operation_scope"], **location_fields(coord),
             algorithm="host", phase="call_preparation", step="", event="prepare_collective", task_kind="host_interval",
             observed_start_ns=item["start_ns"], observed_stop_ns=item["stop_ns"], duration_ns=duration,
             component="host_preparation", status="dependency_supported_candidate" if supported else "unresolved_host_preparation",

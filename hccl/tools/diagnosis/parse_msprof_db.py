@@ -22,6 +22,8 @@ else:
 UINT32_MAX = 0xFFFFFFFF
 UINT64_MODULUS = 1 << 64
 SUPPORTED_DB_SCHEMA_VERSIONS = frozenset(("1.2.0",))
+TASK_BATCH_TABLE = "HCCL_TRACE_TASK_BATCH"
+TASK_BATCH_ENCODING = "cann-8.5.1-flip16"
 REQUIRED_COLUMNS = {
     "META_DATA": ("name", "value"),
     "STRING_IDS": ("id", "value"),
@@ -146,6 +148,39 @@ def _validate_contract(connection: sqlite3.Connection, path: str) -> str:
     return version
 
 
+def _task_index(global_task_id: int, start_ns: int) -> str:
+    return "{}:{}".format(int(global_task_id), int(start_ns))
+
+
+def _task_batches(connection: sqlite3.Connection) -> dict[tuple[int, int], int]:
+    if not _table_columns(connection, TASK_BATCH_TABLE):
+        return {}
+    if _table_columns(connection, TASK_BATCH_TABLE) != {"globalTaskId", "startNs", "batchId"}:
+        raise MsprofDbError("unsupported exported task batch columns")
+    metadata = dict(connection.execute("SELECT name,value FROM META_DATA WHERE name LIKE 'HCCL_TRACE_TASK_BATCH_%'"))
+    if (metadata.get("HCCL_TRACE_TASK_BATCH_SCHEMA") != "1"
+            or metadata.get("HCCL_TRACE_TASK_BATCH_ENCODING") != TASK_BATCH_ENCODING):
+        raise MsprofDbError("unsupported exported task batch schema/encoding")
+    batches = {}
+    for row in connection.execute("SELECT globalTaskId,startNs,batchId FROM " + TASK_BATCH_TABLE):
+        key = int(row[0]), int(row[1])
+        batch = int(row[2])
+        if key in batches or not 0 <= batch <= 65535:
+            raise MsprofDbError("duplicate/invalid exported task batch identity")
+        batches[key] = batch
+    orphan = connection.execute("SELECT 1 FROM " + TASK_BATCH_TABLE + " b LEFT JOIN TASK t "
+        "ON b.globalTaskId=t.globalTaskId AND b.startNs=t.startNs WHERE t.globalTaskId IS NULL LIMIT 1").fetchone()
+    if orphan is not None:
+        raise MsprofDbError("exported task batch has no exact TASK endpoint")
+    missing = connection.execute("SELECT 1 FROM TASK t JOIN COMMUNICATION_TASK_INFO c "
+        "ON c.globalTaskId=t.globalTaskId LEFT JOIN " + TASK_BATCH_TABLE + " b "
+        "ON b.globalTaskId=t.globalTaskId AND b.startNs=t.startNs "
+        "WHERE b.globalTaskId IS NULL LIMIT 1").fetchone()
+    if missing is not None:
+        raise MsprofDbError("incomplete exported communication task batches")
+    return batches
+
+
 def _device_ids(connection: sqlite3.Connection) -> Sequence[int]:
     return tuple(int(row["deviceId"]) for row in connection.execute(
         "SELECT DISTINCT deviceId FROM TASK ORDER BY deviceId"
@@ -157,6 +192,7 @@ def parse_file(path: str, default_node_id: str = "") -> List[ProfilerTask]:
     connection = _readonly_connection(path)
     try:
         _validate_contract(connection, path)
+        batches = _task_batches(connection)
         device_ids = _device_ids(connection)
         if len(device_ids) != 1:
             raise MsprofDbError(
@@ -250,6 +286,8 @@ def parse_file(path: str, default_node_id: str = "") -> List[ProfilerTask]:
                 connection_id=int(row["connection_id"]),
                 model_id=int(row["model_id"]),
                 global_task_id=int(row["global_task_id"]),
+                batch_id=batches.get((int(row["global_task_id"]), start_ns), -1),
+                task_index=_task_index(row["global_task_id"], start_ns),
                 op_name=str(row["op_name"] or ""),
                 group_name=str(row["group_name"] or ""),
                 profiler_op_id=_optional_int(row["profiler_op_id"]),
@@ -371,7 +409,8 @@ def parse_communication_details(path: str, node_id: str = "") -> List[dict]:
                 context = int(row["contextId"])
                 context = -1 if context == UINT32_MAX else context
                 identity = ExecutionIdentity(node_id, int(row["deviceId"]), int(row["streamId"]),
-                    int(row["taskId"]), context, int(row["connectionId"])).stable_id
+                    int(row["taskId"]), context, int(row["connectionId"]),
+                    _task_index(row["globalTaskId"], row["startNs"])).stable_id
                 if identity in identities:
                     raise MsprofDbError("duplicate physical communication task identity")
                 identities.add(identity)

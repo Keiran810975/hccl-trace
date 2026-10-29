@@ -1,5 +1,13 @@
 # HCCL fine-grained trace diagnosis
 
+## 用户诊断入口
+
+安装后用 `hccl-diag analyze --capture DIR --mode rolling --output RESULTS`，或
+`--mode baseline --baseline NORMAL`，一条命令执行完整离线诊断。默认最终仅保留
+`execution.html`、`root_causes.json`、`propagation.html`；临时分析自动清理，原始输入只读。
+通用 SDK、任意实际节点/Rank/设备配置、双模式规则及已知边界见
+[诊断工具使用说明](../../../文档/诊断工具使用说明.md)。旧开发/实验入口继续兼容。
+
 开发入口：[活动任务](task.md)、[实现规格](spec.md)、[阶段归档](arch-94a1ab31c3ee.md)。
 双机配置、容器、运行和样例验收见[910C运行指南](../../../文档/910C双机实验运行与验收指南.md)。
 `nf` 已整合 `codex/ring-nhr-diagnosis@6312667` 的 AI_CPU、控制事实、同机/跨机 RDMA

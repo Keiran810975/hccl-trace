@@ -201,6 +201,7 @@ def read_execution_rows(path: Path) -> List[dict]:
                 task_id=task_id,
                 subtask_id=to_int(row.get("subtask_id")),
                 connection_id=to_int(row.get("connection_id")),
+                profiler_task_index=row.get("profiler_task_index", ""),
             )
             if identity in seen_identities:
                 raise ValueError(

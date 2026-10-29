@@ -8,6 +8,7 @@ import json
 
 from . import source_events
 from .schema import write_csv
+from .workload_coordinates import position, location_fields
 
 
 def analyze(protocol, rows, edges, coordinates, options, *, rolling_report=None, communication_tasks=(), operations=()):
@@ -27,8 +28,7 @@ def analyze(protocol, rows, edges, coordinates, options, *, rolling_report=None,
                     reference_mad_ns=None, is_slow=False, diagnosis="not_compared", source_root_ids=[],
                     physical_cause="unknown")
         coord = coordinates.get(item["operation_scope"]) if coordinates is not None else None
-        item.update(stage=coord["stage"] if coord else "unbound", iteration=coord["iteration"] if coord else None,
-                    block=coord["block"] if coord else None, bucket=coord["bucket"] if coord else None)
+        item.update(location_fields(coord) if coord else dict(stage="unbound", iteration=None, block=None, bucket=None))
         segments.append(item)
         if transfer["status"] != "protocol_interval_observed":
             item["comparison_status"] = "unresolved_protocol_path"
@@ -43,12 +43,12 @@ def analyze(protocol, rows, edges, coordinates, options, *, rolling_report=None,
                          for key in item["evidence_node_ids"]))
         item["_signature"] = signature
         if coord is not None:
-            slots[(coord["stage"], coord["iteration"], coord["block"], coord["bucket"], signature)].append(item)
+            slots[(coord["stage"], coord["iteration"], position(coord), signature)].append(item)
     roots = (rolling_report or {}).get("root_causes", [])
     for item in segments:
         if "_signature" not in item or item["stage"] == "unbound":
             continue
-        key = (item["stage"], item["iteration"], item["block"], item["bucket"], item["_signature"])
+        key = (item["stage"], item["iteration"], position(item), item["_signature"])
         if len(slots[key]) != 1:
             item["comparison_status"] = "ambiguous_protocol_position"
             continue
@@ -56,7 +56,7 @@ def analyze(protocol, rows, edges, coordinates, options, *, rolling_report=None,
             item["comparison_status"] = "insufficient_measured_history"
             continue
         iterations = list(range(item["iteration"] - 5, item["iteration"]))
-        history = [slots.get(("measured", iteration, item["block"], item["bucket"], item["_signature"]), [])
+        history = [slots.get(("measured", iteration, position(item), item["_signature"]), [])
                    for iteration in iterations]
         if any(len(group) != 1 for group in history):
             item["comparison_status"] = "missing_or_ambiguous_previous_protocol"
@@ -116,9 +116,9 @@ def analyze(protocol, rows, edges, coordinates, options, *, rolling_report=None,
                     comparison_status="iteration_binding_required")
         coord = coordinates.get(operation["operation_scope"]) if coordinates is not None else None
         if coord is not None:
-            item.update(**{key: coord[key] for key in ("stage", "iteration", "block", "bucket")})
+            item.update(location_fields(coord))
             item["comparison_status"] = "insufficient_measured_history"
-            key = (item["node_id"], str(item["device_id"]), coord["stage"], coord["iteration"], coord["block"], coord["bucket"])
+            key = (item["node_id"], str(item["device_id"]), coord["stage"], coord["iteration"], position(coord))
             if key in operation_slots:
                 raise ValueError("duplicate per-device communication operation position")
             operation_slots[key] = item
@@ -126,7 +126,7 @@ def analyze(protocol, rows, edges, coordinates, options, *, rolling_report=None,
     for item in operation_records:
         if item.get("stage") != "measured" or item["iteration"] < 5:
             continue
-        history = [operation_slots.get((item["node_id"], str(item["device_id"]), "measured", iteration, item["block"], item["bucket"]))
+        history = [operation_slots.get((item["node_id"], str(item["device_id"]), "measured", iteration, position(item)))
                    for iteration in range(item["iteration"] - 5, item["iteration"])]
         if any(row is None for row in history):
             item["comparison_status"] = "missing_previous_operation"

@@ -1,5 +1,19 @@
 # HCOMM 8.5.0 步骤语义与依赖诊断实现规格
 
+> 2026-10-29 nf 用户入口：新增 `hccl-diag analyze` 和 `hccl_trace.Trace` 公共观测SDK。
+> 新入口隔离临时分析并原子发布 execution.html/root_causes.json/propagation.html；不删除输入。
+> SDK调用通过具名API connectionId，或HOST launch connectionId与相同globalTid/startNs/endNs，
+> 加公开边界及类型/大小唯一关联；HOST编号回绕时在临时空间复用权威batch导出，不改原始DB。
+> 位置schema v2使用group/call_site/occurrence，保留旧v1坐标与manifest兼容。
+> operation成员可显式指定device，拓扑门禁核验已声明参与关系；不猜跨机身份或设备编号。
+> Baseline中位数与Rolling前5轮均值仅统一输出，不混用公式、改排名或补边。
+> 支持范围、缺证据行为和验证记录见[使用说明](../../../文档/诊断工具使用说明.md)。
+
+> 2026-10-29 nf 长采集身份补充：merged CSV为45列、graph artifact为v7。
+> CANN 8.5.1 HOST可由独立导出步骤保留官方batch_id，按已验证的Runtime编码精确匹配；
+> 新采集保留DB TaskIndex，解决重复占位任务身份。原始DB只读、不取模猜配、门禁不变。
+> 旧输入与原始身份仍兼容；范围和验证状态见[长采集身份](long-capture-identity.md)。
+
 > 2026-10-22 nf 集成：已引入 `6312667` 的 AI_CPU sidecar、控制任务 anchor 和等待诊断，
 > 当前 merged CSV 为43列、graph artifact 为v6；原始DB只读。控制元数据规则见
 > [Ring/NHR实现记录](ring-nhr-diagnosis.md)，不与下文历史v4 artifact混用。

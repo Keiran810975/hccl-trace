@@ -53,6 +53,8 @@ PROFILER_FIELDS = (
     "subtask_id",
     "connection_id",
     "model_id",
+    "batch_id",
+    "task_index",
 )
 
 
@@ -78,6 +80,8 @@ MERGED_FIELDS = (
     "match_method",
     "match_confidence",
     "profiler_size_bytes",
+    "profiler_batch_id",
+    "profiler_task_index",
 )
 
 
@@ -154,13 +158,24 @@ class ProfilerTask:
     profiler_src_rank: int = -1
     profiler_dst_rank: int = -1
     profiler_size_bytes: int = -1
+    batch_id: int = -1
+    task_index: str = ""
 
     @property
     def merge_key(self):
-        return (self.node_id, self.device_id, self.stream_id, self.task_id)
+        task_id = self.task_id
+        if self.batch_id >= 0:
+            # CANN 8.5.1 GetFlipTaskId: taskId | (flipNum << 16).
+            # batch_id must come from the verified exporter, never stream order.
+            if not 0 <= task_id < 65535 or not 0 <= self.batch_id <= 65535:
+                raise ValueError("invalid CANN flip/task identity")
+            task_id |= self.batch_id << 16
+        return (self.node_id, self.device_id, self.stream_id, task_id)
 
     @property
     def execution_key(self):
+        if self.task_index:
+            return (self.node_id, self.device_id, "msprof_task_index", self.task_index)
         return self.merge_key + (self.subtask_id, self.connection_id)
 
     def to_row(self) -> Dict[str, object]:
