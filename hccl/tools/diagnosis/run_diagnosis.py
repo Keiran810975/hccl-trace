@@ -39,9 +39,13 @@ else:
 
 
 def attach_rolling_sources(diagnosis, rolling_report):
-    sources = [r for r in rolling_report["root_causes"]
-               if r["status"] in {"dependency_supported_candidate", "isolated_slow_task"}
-               and (rolling_report.get("source_policy_version", 1) < 3 or r.get("primary_eligible", False))]
+    if rolling_report.get("source_policy_version", 1) >= 6:
+        sources = [r for r in rolling_report["root_causes"]
+                   if r.get("diagnosis_category") in {"communication_source_candidate", "external_anomaly_clue"}]
+    else:
+        sources = [r for r in rolling_report["root_causes"]
+                   if r["status"] in {"dependency_supported_candidate", "isolated_slow_task"}
+                   and (rolling_report.get("source_policy_version", 1) < 3 or r.get("primary_eligible", False))]
     diagnosis["reference_mode"] = rolling_report["reference_mode"]
     diagnosis["source_policy_version"] = rolling_report.get("source_policy_version", 1)
     diagnosis["diagnosis_status"] = rolling_report.get("diagnosis_status", "legacy_candidates")
@@ -79,11 +83,12 @@ def _run_pipeline(manifest: Path, output: Path, *, baseline: Path | None = None,
                   min_match_rate: float = 95.0, comparison_options=comparison.ComparisonOptions(),
                   operation_map: Path | None = None, iteration_map: Path | None = None, preparation_map: Path | None = None,
                   rolling_options=rolling.RollingOptions(),
-                  html_views=("execution", "waits", "resource"), include_critical_path=True):
+                  html_views=("execution", "waits", "resource"), include_critical_path=True, allow_uncalibrated_clock=False):
     directory, ready = replay_manifest(manifest, output, min_match_rate)
     return _analyze_replayed(directory, ready, baseline=baseline, comparison_options=comparison_options,
                              operation_map=operation_map, iteration_map=iteration_map, preparation_map=preparation_map,
-                             rolling_options=rolling_options, html_views=html_views, include_critical_path=include_critical_path)
+                             rolling_options=rolling_options, html_views=html_views, include_critical_path=include_critical_path,
+                             allow_uncalibrated_clock=allow_uncalibrated_clock)
 
 
 def _stage(name):
@@ -93,7 +98,7 @@ def _stage(name):
 
 def _analyze_replayed(directory, ready, *, baseline=None, comparison_options=comparison.ComparisonOptions(),
                       operation_map=None, iteration_map=None, preparation_map=None, rolling_options=rolling.RollingOptions(),
-                      html_views=("execution", "waits", "resource"), include_critical_path=True):
+                      html_views=("execution", "waits", "resource"), include_critical_path=True, allow_uncalibrated_clock=False):
     _stage("read_artifacts")
     result = dict(status="failed", replay_gate_passed=ready, analysis_completed=False,
                   global_critical_path_available=False)
@@ -101,25 +106,35 @@ def _analyze_replayed(directory, ready, *, baseline=None, comparison_options=com
         rows = graph.read_graph_artifact_nodes(directory / "dep_graph_nodes.csv")
         edges = graph.read_graph_artifact_edges(directory / "dep_graph_edges.csv")
         alignment_path = directory / "clock_alignment.json"
-        if alignment_path.is_file():
-            alignment = json.loads(alignment_path.read_text(encoding="utf-8-sig"))
-            clock_alignment.models_from_report(alignment)
-        else:
-            inputs = json.loads((directory / "inputs.json").read_text(encoding="utf-8-sig"))
-            alignment = clock_alignment.build(inputs, max_error_ns=inputs.get("clock_alignment_max_error_ns", 1000000))
+        clock_error = None
+        try:
+            if alignment_path.is_file():
+                alignment = json.loads(alignment_path.read_text(encoding="utf-8-sig"))
+                clock_alignment.models_from_report(alignment)
+            else:
+                inputs = json.loads((directory / "inputs.json").read_text(encoding="utf-8-sig"))
+                alignment = clock_alignment.build(inputs, max_error_ns=inputs.get("clock_alignment_max_error_ns", 1000000))
             if alignment is not None:
+                clocks = clock_alignment.models_from_report(alignment)
+                for row in rows:
+                    clock = clocks.get((row["_node_id"], row["_device_id"]))
+                    if clock is None:
+                        raise ValueError("clock evidence does not cover every execution device")
+                    for side in ("start", "stop"):
+                        clock.map_ns(waits.ns(row, side))
                 alignment_path.write_text(json.dumps(alignment, indent=2) + "\n", encoding="utf-8")
+        except (OSError, ValueError, KeyError, ArithmeticError) as error:
+            if not allow_uncalibrated_clock:
+                raise
+            alignment, clock_error = None, str(error)
+            # A rejected estimate must never be picked up by the HTML exporter.
+            if alignment_path.exists():
+                alignment_path.unlink()
         result.update(clock_alignment_available=alignment is not None,
                       clock_alignment_status=alignment["status"] if alignment else "uncalibrated",
-                      clock_alignment_estimated_error_ns=alignment["estimated_error_ns"] if alignment else None)
-        if alignment is not None:
-            clocks = clock_alignment.models_from_report(alignment)
-            for row in rows:
-                clock = clocks.get((row["_node_id"], row["_device_id"]))
-                if clock is None:
-                    raise ValueError("clock evidence does not cover every execution device")
-                for side in ("start", "stop"):
-                    clock.map_ns(waits.ns(row, side))
+                      clock_alignment_estimated_error_ns=alignment["estimated_error_ns"] if alignment else None,
+                      clock_alignment_error=clock_error,
+                      profiler_clock_validation=alignment.get("profiler_calibrations", []) if alignment else [])
         issues = waits.read_csv(directory / "dep_graph_notify_ambiguities.csv")
         spans = [row for path in sorted(directory.glob("*/build_spans.csv")) for row in waits.read_csv(path)]
         reference = graph.read_graph_artifact_nodes(baseline / "dep_graph_nodes.csv") if baseline else []
@@ -131,7 +146,7 @@ def _analyze_replayed(directory, ready, *, baseline=None, comparison_options=com
         if iteration_map is not None:
             _stage("rolling_compare_and_sources")
             rolling_report = rolling.analyze(rows, edges, rolling.load_coordinates(iteration_map), rolling_options,
-                                            preparations=rolling.source_events.load_preparations(preparation_map))
+                                            preparations=rolling.source_events.load_preparations(preparation_map), alignment=alignment)
             _stage("attach_rolling_sources")
             attach_rolling_sources(diagnosis, rolling_report)
         _stage("export_wait_analysis")
@@ -243,7 +258,7 @@ def _analyze_replayed(directory, ready, *, baseline=None, comparison_options=com
     return directory, ready
 
 
-def resume_replay_analysis(source, output, *, iteration_map, preparation_map=None, rolling_options=rolling.RollingOptions(), html_views=(), include_critical_path=True):
+def resume_replay_analysis(source, output, *, iteration_map, preparation_map=None, rolling_options=rolling.RollingOptions(), html_views=(), include_critical_path=True, allow_uncalibrated_clock=False):
     """Resume consumers only after revalidating a complete previously passed replay."""
     source, output = Path(source).resolve(), Path(output).resolve()
     if output.exists():
@@ -276,7 +291,8 @@ def resume_replay_analysis(source, output, *, iteration_map, preparation_map=Non
     (output / "resumed-from.json").write_text(json.dumps(dict(source=str(source),
         workload_rerun=False, replay_revalidated=True), indent=2) + "\n")
     return _analyze_replayed(output, True, iteration_map=iteration_map, preparation_map=preparation_map,
-                             rolling_options=rolling_options, html_views=html_views, include_critical_path=include_critical_path)
+                             rolling_options=rolling_options, html_views=html_views, include_critical_path=include_critical_path,
+                             allow_uncalibrated_clock=allow_uncalibrated_clock)
 
 
 def run_pipeline(manifest: Path, output: Path, *, baseline: Path | None = None,
@@ -284,7 +300,9 @@ def run_pipeline(manifest: Path, output: Path, *, baseline: Path | None = None,
                  operation_map: Path | None = None, iteration_map: Path | None = None, preparation_map: Path | None = None,
                  rolling_options=rolling.RollingOptions(),
                  html_views=("execution", "waits", "resource"), include_critical_path=True,
-                 require_complete_rdma=False, require_clock_alignment=False):
+                 require_complete_rdma=False, require_clock_alignment=False, allow_uncalibrated_clock=False):
+    if require_clock_alignment and allow_uncalibrated_clock:
+        raise ValueError("required alignment and explicit local-clock fallback are mutually exclusive")
     if len(set(html_views)) != len(html_views) or set(html_views) - {"execution", "waits", "resource"}:
         raise ValueError("invalid HTML view selection")
     if iteration_map is not None and (baseline is not None or operation_map is not None):
@@ -298,7 +316,7 @@ def run_pipeline(manifest: Path, output: Path, *, baseline: Path | None = None,
         directory, ready = _run_pipeline(manifest, output, baseline=baseline, min_match_rate=min_match_rate,
                              comparison_options=comparison_options, operation_map=operation_map,
                              iteration_map=iteration_map, preparation_map=preparation_map, rolling_options=rolling_options, html_views=html_views,
-                             include_critical_path=include_critical_path)
+                             include_critical_path=include_critical_path, allow_uncalibrated_clock=allow_uncalibrated_clock)
         if require_complete_rdma:
             result_path = directory / "pipeline_result.json"
             result = json.loads(result_path.read_text(encoding="utf-8"))

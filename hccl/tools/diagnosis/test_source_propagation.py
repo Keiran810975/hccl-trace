@@ -18,7 +18,7 @@ from .test_wait_backtrace import cross_call_capture
 def diagnosed(host=False):
     rows, edges, coordinates, preparations = capture(host_delay=host, execution_delay=not host)
     result = rolling.analyze(rows,edges,coordinates,preparations=preparations if host else ())
-    roots = [r for r in result["root_causes"] if r["primary_eligible"]]
+    roots = [r for r in result["root_causes"] if r["diagnosis_category"] != "unresolved_observation"]
     return rows,edges,roots,result["tasks"],result["primary_source_candidate_id"]
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 import json
+from .task_classifier import CATEGORY_LABELS, INTERNAL, EXTERNAL
 
 
 TIMING_LABELS = {
@@ -127,6 +128,7 @@ def build_view_model(report):
             relative="{} – {}".format(duration(node["start_ns"]-origins[node["node_id"]]),
                                        duration(node["stop_ns"]-origins[node["node_id"]])))
     candidates = []
+    category_ranks = {}
     for root in report["candidates"]:
         source = root["source"]
         chains = [dict(chain, segments=compact_path(report, chain), sentence=branch_summary(report, chain),
@@ -137,7 +139,10 @@ def build_view_model(report):
         for key in ("observed_start_ns", "observed_stop_ns"):
             if display_source.get(key) is not None:
                 display_source[key] = str(display_source[key])
-        candidates.append(dict(root, source=display_source, chains=chains, source_label=source_label, coordinate=coordinate(source),
+        category = root.get("diagnosis_category", EXTERNAL if source["component"] == "host_preparation" else INTERNAL)
+        category_ranks[category] = category_ranks.get(category, 0) + 1
+        candidates.append(dict(root, diagnosis_category=category, category_label=CATEGORY_LABELS[category],
+            category_rank=category_ranks[category], source=display_source, chains=chains, source_label=source_label, coordinate=coordinate(source),
             source_location=("{} · Rank {} · Host 观测区间".format(source["node_id"].rsplit("/", 1)[-1], source["user_rank"])
                              if source["component"] == "host_preparation" else location(source)),
             duration=duration(source["duration_ns"]), reference=duration(reference_value(source)),
@@ -146,6 +151,7 @@ def build_view_model(report):
             wait_ranks=sorted({nodes[c["target_wait_graph_id"]]["user_rank"] for c in chains
                                if c["target_wait_graph_id"] in nodes}, key=str)))
     return dict(summary=report["summary"], candidates=candidates, nodes=nodes,
+                unresolved_observations=report.get("unresolved_observations", []),
                 origins={node:str(value) for node, value in origins.items()},
                 timing_labels=TIMING_LABELS, boundary_labels=BOUNDARY_LABELS)
 
@@ -156,7 +162,7 @@ def render_markdown(report):
 
     lines = ["# 异常传播链", "", "{candidate_count} 个候选源头，{chain_count} 条已报告路径，"
              "{unique_target_wait_count} 个不同目标 Wait。".format(**report["summary"]), "",
-             "参考为同次运行前5个正式 iteration 的同定位任务均值；候选排序保持原序。",
+             "参考为同次运行前5个正式 iteration 的同定位任务均值；各类别保持分析器分类排序。",
              "路径连通不等于物理因果已证明；Wait 增量不能相加为 workload 损失。",
              "完整节点、依赖边和精确时间见 report.json / steps.csv。", ""]
     if not report["candidates"]:
@@ -164,7 +170,8 @@ def render_markdown(report):
     for root in report["candidates"]:
         source = root["source"]
         label = "Host 准备区间" if source["component"] == "host_preparation" else source.get("event") or "执行任务"
-        lines.extend(["## 候选 {}{}：Rank {} / {}".format(root["candidate_rank"],
+        category = root.get("diagnosis_category", EXTERNAL if source["component"] == "host_preparation" else INTERNAL)
+        lines.extend(["## {} {}{}：Rank {} / {}".format(CATEGORY_LABELS[category], root["candidate_rank"],
             "（主候选）" if root["primary"] else "", source["user_rank"], cell(label)), "",
             coordinate(source), "",
             "前5轮均值 {} → 当前 {}；增量 {}；慢化 {}。".format(duration(source["reference_mean_ns"]),
@@ -249,7 +256,8 @@ details{border-top:1px solid #d9dde2;margin-top:20px;padding-top:12px}summary{cu
 </style></head><body>
 <header><div><h1>异常传播诊断</h1><div id="report-counts" class="muted"></div></div>
 <nav class="downloads" aria-label="诊断数据"><a href="report.json">完整 JSON</a><a href="chains.csv">分支 CSV</a><a href="steps.csv">逐跳 CSV</a><a href="chains.md">文字报告</a></nav></header>
-<div class="layout" id="layout"><aside><label for="search">候选源头</label><input id="search" type="search" placeholder="Rank / iter / 任务名" autocomplete="off"><nav id="candidates" aria-label="候选源头列表"></nav><p id="no-matches" class="muted" hidden>没有匹配的候选</p></aside>
+<details id="unresolved-section" style="margin:16px 24px"><summary id="unresolved-title">未归因观测</summary><p>没有完整证据的慢任务或等待，不作为通信内部根因。</p><div id="unresolved-items"></div></details>
+<div class="layout" id="layout"><aside><label for="search">按类别查看</label><input id="search" type="search" placeholder="Rank / iter / 任务名" autocomplete="off"><nav id="candidates" aria-label="分类诊断结果"></nav><p id="no-matches" class="muted" hidden>没有匹配的结果</p></aside>
 <main id="main"><section aria-labelledby="source-title"><div class="source-top"><div><h2 id="source-title"></h2><p id="source-location"></p><p id="source-coordinate" class="muted"></p></div><span id="primary-tag" class="tag"></span></div>
 <div id="source-metrics" class="metrics"></div><div id="scope" class="scope"></div><p id="source-limit" class="limit"></p><p id="truncation" class="warning" hidden></p></section>
 <div class="controls"><div><label for="rank-filter">目标 Rank</label><select id="rank-filter"></select></div><div><label for="branch-select">等待分支</label><select id="branch-select"></select></div></div>
@@ -257,7 +265,7 @@ details{border-top:1px solid #d9dde2;margin-top:20px;padding-top:12px}summary{cu
 <details id="evidence"><summary>完整逐跳证据 <span id="edge-count"></span></summary><div class="table-wrap"><table class="evidence-table"><thead><tr><th>步骤</th><th>任务定位 / 图节点</th><th>任务耗时 / 参考均值 / 增量</th><th>进入此任务的依赖证据</th></tr></thead><tbody id="evidence-rows"></tbody></table></div><p id="time-origins" class="node-meta"></p></details></section>
 <details id="wait-details"><summary>关联 Wait 明细 <span id="wait-count"></span></summary><div class="table-wrap"><table class="wait-table"><thead><tr><th>Rank / stream / task</th><th>Wait</th><th>前5轮均值</th><th>当前耗时</th><th>增量</th><th>路径状态</th></tr></thead><tbody id="wait-rows"></tbody></table></div></details>
 <details id="limitations"><summary>诊断边界与关键路径影响</summary><p id="impact"></p><p>候选源头沿已报告的真实依赖关联到慢 Wait，不等于已证明物理故障类型，也不代表该 Wait 的全部增量由此源头造成。多个并发 Wait 的增量不能相加为整个 workload 的损失。</p><p>这里只展开分析器已经报告的路径，不穷尽全部下游。缺边不补边；跨节点时钟未校准时不计算全局时差或全局关键路径。</p><p>参考为同一次运行前5个正式 iteration 的同定位任务均值，不是外部 baseline。</p></details>
-<footer>候选排序保持诊断器原序；不使用异常注入位置生成或筛选传播路径。</footer></main></div>
+<footer>各类别保持诊断器分类排序；不使用异常注入位置生成或筛选传播路径。</footer></main></div>
 <script id="propagation-data" type="application/json">__MODEL__</script><script>
 "use strict";
 const model=JSON.parse(document.getElementById("propagation-data").textContent);
@@ -268,9 +276,11 @@ let activeBranch=0;
 const target=chain=>model.nodes[chain.target_wait_graph_id];
 const edgeLabel=hop=>hop.kind==="direct_stream_order_observed"?"同流顺序":hop.kind.includes("notify_sync")?"Record → Wait 通知配对":hop.kind;
 const metric=(label,value,extra="")=>`<div class="metric"><span>${esc(label)}</span><strong class="${extra}">${esc(value)}</strong></div>`;
-$("report-counts").textContent=`${model.summary.candidate_count} 个候选源头 · ${model.summary.chain_count} 条已报告路径 · ${model.summary.unique_target_wait_count} 个不同目标 Wait`;
+$("report-counts").textContent=`${model.summary.communication_source_count??model.summary.candidate_count} 个通信内部候选 · ${model.summary.external_clue_count??0} 个外部线索 · ${model.summary.chain_count} 条已报告路径`;
+$("unresolved-title").textContent=`未归因观测（${model.unresolved_observations.length}）`;
+$("unresolved-items").innerHTML=model.unresolved_observations.map(item=>`<p><strong>${esc(item.status)}</strong> · ${esc(item.node_id)} · Rank ${esc(item.user_rank)} · iter ${esc(item.iteration)} · ${esc(item.graph_id||item.wait_graph_id)}<br>${esc(item.reason||JSON.stringify(item.boundary_reason_counts||{}))}</p>`).join("");
 function renderNavigation(){
-  $("candidates").innerHTML=model.candidates.map((root,i)=>`<button type="button" class="candidate" data-root="${i}" aria-pressed="${i===selected}"><strong>候选 ${root.candidate_rank}${root.primary?" · 主候选":""} · Rank ${esc(root.source.user_rank)}</strong><span>${esc(root.source_label)}</span><small>iter ${esc(root.source.iteration)} · ${esc(root.delta)} · ${esc(root.factor)}</small></button>`).join("");
+  $("candidates").innerHTML=["communication_source_candidate","external_anomaly_clue"].map(category=>`<h3>${category==="communication_source_candidate"?"通信内部源头候选":"外部异常线索"}</h3>`+model.candidates.map((root,i)=>root.diagnosis_category!==category?"":`<button type="button" class="candidate" data-root="${i}" aria-pressed="${i===selected}"><strong>${root.category_rank}${root.primary?" · 主候选":""} · Rank ${esc(root.source.user_rank)}</strong><span>${esc(root.source_label)}</span><small>iter ${esc(root.source.iteration)} · ${esc(root.delta)} · ${esc(root.factor)}</small></button>`).join("")).join("");
   applySearch();
 }
 function applySearch(){
@@ -280,14 +290,14 @@ function applySearch(){
 }
 function renderRoot(){
   const root=model.candidates[selected];activeBranch=0;
-  $("source-title").textContent=`候选 ${root.candidate_rank} · ${root.source_label}`;
+  $("source-title").textContent=`${root.category_label} ${root.category_rank} · ${root.source_label}`;
   $("source-location").textContent=root.source_location;
   $("source-coordinate").textContent=`${root.coordinate} · ${root.source.event||root.source_label} · 参考轮次 ${(root.source.reference_iterations||[]).join(", ")||"未知"}`;
-  $("primary-tag").textContent=root.primary?"主候选":"其他候选";$("primary-tag").className=`tag${root.primary?" primary":""}`;
+  $("primary-tag").textContent=root.primary?"通信内部主候选":root.category_label;$("primary-tag").className=`tag${root.primary?" primary":""}`;
   $("source-metrics").innerHTML=metric("前5轮均值",root.reference)+metric("当前耗时",root.duration)+metric("耗时增量",root.delta,"increase")+metric("慢化倍数",root.factor);
   const complete=root.chains.filter(c=>c.path_complete).length;
   $("scope").innerHTML=`<span>关联 Wait <strong>${root.chains.length}</strong></span><span>已连通路径 <strong>${complete}</strong></span><span>目标 Rank <strong>${esc(root.wait_ranks.join(" / ")||"无")}</strong></span>`;
-  $("source-limit").textContent=`物理原因：${root.source.physical_cause==="unknown"||!root.source.physical_cause?"尚未确定":root.source.physical_cause}。路径连通与任务变慢是观测证据，不等于源头独占的完成时间损失。`;
+  $("source-limit").textContent=`${root.source.reason||""} 物理原因：${root.source.physical_cause==="unknown"||!root.source.physical_cause?"尚未确定":root.source.physical_cause}。外部线索不等于通信内部根因，路径连通不等于个体因果贡献。`;
   const truncated=root.source.traversal_truncated||root.source.other_backtrace_branches_truncated;
   $("truncation").hidden=!truncated;$("truncation").textContent="分析器的回溯存在截断，当前分支列表并非完整影响范围。";
   $("rank-filter").innerHTML='<option value="all">全部 Rank</option>'+root.wait_ranks.map(rank=>`<option value="${esc(rank)}">Rank ${esc(rank)}</option>`).join("");

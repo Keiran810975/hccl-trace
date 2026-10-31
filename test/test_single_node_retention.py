@@ -43,11 +43,14 @@ class RetentionTests(unittest.TestCase):
     def test_diagnosed_host_interval_is_an_annotation_not_a_fabricated_task(self):
         rows, edges, coords, preparations = capture(host_delay=True)
         report = rolling.analyze(rows, edges, coords, preparations=preparations)
-        primary = next(r for r in report["root_causes"] if r["root_id"] == report["primary_source_candidate_id"])
+        self.assertIsNone(report["primary_source_candidate_id"])
+        primary = next(r for r in report["root_causes"] if r["root_id"] == report["primary_external_clue_id"])
         case = dict(case_id="synthetic-host", injection=dict(kind="progress_delay", iteration=5, block=0, bucket=0))
         windows = [dict(node_id="run/node0", target_ranks=[0], start_ns=primary["observed_start_ns"], stop_ns=primary["observed_stop_ns"])]
         diagnosis = dict(schema_version=1, waits=view.build_wait_inventory(rows, edges), candidates=[])
         model, summary = build_excerpt(rows, edges, [], list(coords.values()), report, diagnosis, case, windows)
+        self.assertIsNone(summary["primary_source"])
+        self.assertEqual(summary["primary_external_clue"]["root_id"], primary["root_id"])
         self.assertEqual(model["observedHostSource"]["durationUs"], 100)
         self.assertEqual(model["observedHostSource"]["rank"], 0)
         self.assertEqual(model["observedHostSource"]["startUs"], (primary["observed_start_ns"] - summary["chart_origin_ns"]) / 1000)

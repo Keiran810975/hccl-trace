@@ -94,6 +94,24 @@ def hashes(root):
 
 
 class ToolCliTests(unittest.TestCase):
+    def test_schema_two_publication_and_legacy_report_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            capture = sdk_capture(root / "capture", iterations=2)
+            before = hashes(capture)
+            result = analyze_capture(capture, root / "report", mode="rolling")
+            self.assertEqual(result["schema_version"], 2)
+            self.assertEqual(result["candidates"], result["communication_source_candidates"])
+            self.assertEqual(result["external_anomaly_clues"], [])
+            self.assertEqual(set(p.name for p in (root / "report").iterdir()), FINAL_FILES)
+            self.assertEqual(hashes(capture), before)
+            # Existing v1 reports remain readable; input captures are never upgraded in place.
+            path = root / "report/root_causes.json"
+            data = json.loads(path.read_text())
+            data["schema_version"] = 1
+            path.write_text(json.dumps(data))
+            validate_final(root / "report")
+
     def test_uneven_nodes_and_independent_groups_share_one_code_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -256,6 +274,41 @@ class ToolCliTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ambiguous"):
             _unique_assignment({0: {0, 1}, 1: {0, 1}})
         self.assertEqual(_unique_assignment({0: {0, 1}, 1: {1}}), {1: 1, 0: 0})
+
+    def test_long_capture_realtime_drift_keeps_strict_public_api_boundaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            capture = sdk_capture(root / "capture", iterations=20)
+            for node in (capture / "nodes").iterdir():
+                if not node.is_dir():
+                    continue
+                path = node / "db/msprof_fixture.db"
+                with sqlite3.connect(path) as db:
+                    for iteration in range(20):
+                        delta = iteration * (5000000000 - 100000)
+                        for table in ("TASK", "COMMUNICATION_OP", "CANN_API"):
+                            db.execute("UPDATE " + table + " SET startNs=startNs+?,endNs=endNs+? WHERE connectionId=?",
+                                       (delta, delta, 100 + iteration))
+                write_json(node / "db/host/end_info", dict(collectionTimeEnd=(10**12 + 99996250000) // 1000,
+                                                           clockMonotonicRaw=100000000000))
+                for public in (node / "calls").glob("*.jsonl"):
+                    events = [json.loads(line) for line in public.read_text().splitlines()]
+                    for event in events:
+                        if event["event"] == "call":
+                            delta = event["iteration"] * (5000000000 - 100000)
+                            for name in ("before", "after"):
+                                event[name]["raw_ns"] += delta
+                                raw = event[name]["raw_ns"]
+                                event[name]["unix_ns"] = 10**12 + raw - raw * 375 // 10000000
+                        elif event["event"] == "completion":
+                            event["clocks"]["raw_ns"] += event["sequences"][0] * (5000000000 - 100000)
+                    public.write_text("\n".join(map(json.dumps, events)) + "\n")
+            bound = bind_capture(discover_capture(capture, root / "discovery"), root / "bound", mode="rolling")
+            self.assertEqual(bound.evidence["sdk_bound_calls"], 40)
+            with sqlite3.connect(capture / "nodes/node0/db/msprof_fixture.db") as db:
+                db.execute("UPDATE CANN_API SET startNs=? WHERE connectionId=101", (10**12 + 5000000000 + 99,))
+            with self.assertRaisesRegex(ValueError, r"node=node0 rank=3 device=6 unmatched public sequences=\[1\]"):
+                bind_capture(discover_capture(capture, root / "bad-discovery"), root / "bad-bound", mode="rolling")
 
     def test_missing_completion_fails_and_cannot_fall_back_to_baseline(self):
         with tempfile.TemporaryDirectory() as tmp:

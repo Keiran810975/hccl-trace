@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from fractions import Fraction
+from collections import defaultdict
 import hashlib
 import json
 from pathlib import Path
@@ -53,6 +54,58 @@ def _anchor(samples):
     return local, reference, (width + 1) // 2
 
 
+def _validation_samples(manifest, node):
+    """Check public identities/coverage; realtime pairs do not calibrate DB time."""
+    samples, evidence = defaultdict(list), []
+    files = node.get("clock_validation_files")
+    if files is None:
+        folder = Path(node.get("calls_dir", str(Path(node["plog_dir"]).parent / "calls")))
+        files = sorted(folder.glob("rank-*.jsonl"))
+    declared = {(r["user_rank"], r["device_id"]) for r in manifest.get("ranks", []) if r["node_id"] == node["node_id"]}
+    for filename in files:
+        path = Path(filename)
+        records = [json.loads(line) for line in path.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
+        if not records:
+            raise ValueError("empty public clock validation file")
+        header = records[0]
+        if (header.get("event") != "runtime" or header.get("schema_version") != 1
+                or header.get("run_id") != manifest["run_id"] or header.get("node_id") != node["node_id"]
+                or (header.get("user_rank"), header.get("device_id")) not in declared):
+            raise ValueError("public clock validation identity mismatch")
+        for record in records:
+            for name in ("before", "after", "clocks"):
+                value = record.get(name)
+                if isinstance(value, dict) and "unix_ns" in value and "raw_ns" in value:
+                    samples[header["device_id"]].append((_integer(value, "unix_ns"), _integer(value, "raw_ns")))
+        evidence.append(dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
+    return samples, evidence
+
+
+def profiler_conversion(start, stop, samples):
+    """CANN encodes raw event time using the start offset, not realtime drift."""
+    p0, p1 = _integer(start, "collectionTimeBegin") * 1000, _integer(stop, "collectionTimeEnd") * 1000
+    r0, r1 = _integer(start, "clockMonotonicRaw"), _integer(stop, "clockMonotonicRaw")
+    if p1 <= p0 or r1 <= r0:
+        raise ValueError("profiler clock anchors are reversed")
+    offset = p0 - r0
+    if any(not r0 <= r <= r1 for _, r in samples):
+        raise ValueError("public clock samples fall outside profiler session")
+    audit = dict(model="cann_start_offset", time_domain="monotonic_raw_plus_start_offset",
+        offset_ns=offset, public_sample_count=len(samples), metadata_quantization_ns=1000,
+        realtime_offset_change_ns=(p1 - r1) - offset,
+        max_public_realtime_offset_change_ns=max((abs(p - r - offset) for p, r in samples), default=0))
+    return offset, 1000, audit
+
+
+def raw_to_profiler(raw, start, stop=None):
+    p0, r0 = _integer(start, "collectionTimeBegin") * 1000, _integer(start, "clockMonotonicRaw")
+    if type(raw) is not int or raw < 0:
+        raise ValueError("invalid raw timestamp")
+    if stop is not None and not r0 <= raw <= _integer(stop, "clockMonotonicRaw"):
+        raise ValueError("raw timestamp outside profiler calibration coverage")
+    return raw + p0 - r0
+
+
 def build(manifest, *, max_error_ns=1000000):
     if type(max_error_ns) is not int or max_error_ns <= 0:
         raise ValueError("clock error tolerance must be positive")
@@ -84,8 +137,10 @@ def build(manifest, *, max_error_ns=1000000):
     reference_node, = references
     if reference_node not in probes:
         raise ValueError("reference clock node absent")
-    models = []
+    models, calibrations = [], []
     for node in nodes:
+        validation, validation_sources = _validation_samples(manifest, node)
+        sources.extend(validation_sources)
         evidence = probes[node["node_id"]]
         is_reference = node["node_id"] == reference_node
         if is_reference:
@@ -124,7 +179,8 @@ def build(manifest, *, max_error_ns=1000000):
             if tuple(session[0]) != (epoch_start, epoch_stop) or not first <= raw_start < raw_stop <= last:
                 raise ValueError("clock probes do not bracket this actual profiler session")
             offset = epoch_start - raw_start
-            conversion_error = abs((epoch_stop - raw_stop) - offset) + 1000
+            offset, conversion_error, audit = profiler_conversion(start, stop, validation.get(devices[0], []))
+            calibrations.append(dict(node_id=node["node_id"], device_id=devices[0], **audit))
             error = network_error + conversion_error
             if error > max_error_ns:
                 raise ValueError("estimated clock alignment error exceeds configured tolerance")
@@ -132,21 +188,30 @@ def build(manifest, *, max_error_ns=1000000):
                 x0, y0, rate.numerator, rate.denominator, first, last, error))
             for path in (start_path, stop_path):
                 sources.append(dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
-    return dict(schema_version=1, status="network_probe_estimate", capture_id=next(iter(capture_ids)),
+    return dict(schema_version=3, status="network_probe_estimate", capture_id=next(iter(capture_ids)),
                 reference_node=manifest["run_id"] + "/" + reference_node,
                 estimated_error_ns=max(model.estimated_error_ns for model in models),
-                models=[asdict(model) for model in models], evidence=sources,
+                models=[asdict(model) for model in models], evidence=sources, profiler_calibrations=calibrations,
                 limits=["Affine interpolation between before/after raw-clock probes; not hardware PTP synchronization.",
-                        "Error is an estimate from network-delay bounds and profiler metadata drift; unmodelled nonlinearity and device/Host synchronization error may remain.",
-                        "Display mapping only; raw timestamps, task durations, graph edges and local critical paths are unchanged."])
+                        "CANN DB event time is monotonic raw plus the fixed start_info offset. Realtime end_info/SDK drift is audited, not applied to DB timestamps.",
+                        "Error estimates combine network-delay bounds and start metadata quantization; unsampled network nonlinearity and device/Host synchronization error may remain. This is not a hardware-verified error bound.",
+                        "Mapping supports display and estimated cross-node Host/Wait overlap checks; raw timestamps, task durations, graph edges and local critical paths are unchanged."])
 
 
 def models_from_report(report):
     if report is None:
         return {}
-    if report.get("schema_version") != 1 or report.get("status") != "network_probe_estimate":
+    if report.get("schema_version") not in {1, 2, 3} or report.get("status") != "network_probe_estimate":
         raise ValueError("unsupported clock alignment artifact")
-    models = [DeviceClock(**row) for row in report["models"]]
+    models = []
+    for source in report["models"]:
+        row = dict(source)
+        legacy = tuple(row.pop(name, default) for name, default in (
+            ("profiler_anchor_ns", None), ("profiler_stop_ns", None),
+            ("profiler_rate_numerator", 1), ("profiler_rate_denominator", 1)))
+        if legacy != (None, None, 1, 1):
+            raise ValueError("retired realtime-affine DB clock model; replay the retained capture")
+        models.append(DeviceClock(**row))
     for model in models:
         if (model.rate_numerator <= 0 or model.rate_denominator <= 0 or model.device_id < 0
                 or model.estimated_error_ns < 0 or model.valid_start_ns >= model.valid_stop_ns

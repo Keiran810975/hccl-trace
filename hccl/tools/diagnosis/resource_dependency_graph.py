@@ -148,8 +148,11 @@ def _frontiers(
     rows_by_id: Dict[str, dict],
     reverse: bool,
     stop_at_start: bool = True,
+    reachable: set[str] | None = None,
 ) -> Dict[str, dict]:
     """Return first reachable resource tasks and every retained control path."""
+    if reachable is not None and start_id not in reachable:
+        return {}
     if (
         stop_at_start
         and start_id in rows_by_id
@@ -176,6 +179,8 @@ def _frontiers(
             next_controls = control_ids + (node_id,)
         for edge in adjacency.get(node_id, []):
             successor = edge["src"] if reverse else edge["dst"]
+            if reachable is not None and successor not in reachable:
+                continue
             next_edge_ids = (
                 (edge["edge_id"],) + edge_ids
                 if reverse
@@ -194,6 +199,20 @@ def _frontiers(
             else:
                 stack.append((successor, next_edge_ids, next_controls))
     return result
+
+
+def _resource_reachable(seeds, adjacency, *, reverse):
+    """Exact order-graph reachability; no path/edge evidence is synthesized."""
+    reached = set(seeds)
+    pending = list(reached)
+    while pending:
+        current = pending.pop()
+        for edge in adjacency.get(current, ()):
+            neighbor = edge["src"] if reverse else edge["dst"]
+            if neighbor not in reached:
+                reached.add(neighbor)
+                pending.append(neighbor)
+    return reached
 
 
 def _boundary_row(
@@ -343,6 +362,8 @@ def build_resource_graph(
         values.sort(key=lambda item: item["edge_id"])
     for values in reverse.values():
         values.sort(key=lambda item: item["edge_id"])
+    reaches_downstream_resource = _resource_reachable(resource_nodes, reverse, reverse=True)
+    reaches_upstream_resource = _resource_reachable(resource_nodes, forward, reverse=False)
 
     resource_edges: List[dict] = []
     ambiguities: List[dict] = []
@@ -450,6 +471,7 @@ def build_resource_graph(
             rows_by_id,
             reverse=False,
             stop_at_start=False,
+            reachable=reaches_downstream_resource,
         )
         for dst_id, path in frontiers.items():
             if dst_id == src_id:
@@ -490,10 +512,10 @@ def build_resource_graph(
         if source_edge["kind"] not in contract_kinds:
             continue
         upstream = _frontiers(
-            source_edge["src"], reverse, rows_by_id, reverse=True
+            source_edge["src"], reverse, rows_by_id, reverse=True, reachable=reaches_upstream_resource
         )
         downstream = _frontiers(
-            source_edge["dst"], forward, rows_by_id, reverse=False
+            source_edge["dst"], forward, rows_by_id, reverse=False, reachable=reaches_downstream_resource
         )
         control_ids = set()
         for item in list(upstream.values()) + list(downstream.values()):

@@ -21,7 +21,7 @@ def read_jsonl(path):
     return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def bind(directory, run_id):
+def bind(directory, run_id, *, ddp_capture=False, preserve_task_batches=False):
     directory = Path(directory)
     public = {int(p.stem.split("-")[-1]): read_jsonl(p) for p in (directory / "public").glob("rank-*.jsonl")}
     if set(public) != set(range(4)):
@@ -32,6 +32,19 @@ def bind(directory, run_id):
             raise ValueError("public call sequence missing or duplicated")
         if any(c["rank"] != rank or c["dtype"] != "fp32" or c["reduction"] != "sum" for c in calls):
             raise ValueError("invalid public call identity")
+        if ddp_capture:
+            signatures = {}
+            for c in calls:
+                if not c.get("bucket_signature"):
+                    raise ValueError("DDP calls need independently recorded parameter bucket signatures")
+                if c["stage"] == "measured":
+                    key = c["block"], c["bucket"]
+                    value = c["bucket_signature"], c["count"]
+                    if key in signatures and signatures[key] != value:
+                        raise ValueError("DDP measured bucket structure changed")
+                    signatures[key] = value
+            if [c["bucket_signature"] for c in calls] != [c["bucket_signature"] for c in public[0]]:
+                raise ValueError("DDP parameter bucket order differs across ranks")
         done = read_jsonl(directory / "public" / ("boundaries-rank-{}.jsonl".format(rank)))
         indexed = {(r["stage"], r["iteration"]): r for r in done}
         if (len(indexed) != len(done) or set(indexed) != {(c["stage"], c["iteration"]) for c in calls}
@@ -55,7 +68,8 @@ def bind(directory, run_id):
             for rank, calls in public.items():
                 device = calls[0]["runtime_device_id"]
                 for group in groups:
-                    selected = [r for r in operations if r["group_name"] == group and r["deviceId"] == device]
+                    selected = [r for r in operations if r["group_name"] == group and r["deviceId"] == device
+                                and (not ddp_capture or COUNTER.fullmatch(r["op_name"]))]
                     if len(selected) != len(calls):
                         continue
                     counters = {}
@@ -64,8 +78,10 @@ def bind(directory, run_id):
                         if not match or int(match[1]) in counters:
                             break
                         counters[int(match[1])] = op
-                    if set(counters) != set(range(len(calls))):
+                    if len(counters) != len(calls) or (not ddp_capture and set(counters) != set(range(len(calls)))):
                         continue
+                    if ddp_capture:
+                        counters = dict(enumerate(counters[k] for k in sorted(counters)))
                     if any(counters[c["sequence"]]["count"] != c["count"] or counters[c["sequence"]]["dataType"] != 4
                            for c in calls):
                         continue
@@ -99,10 +115,17 @@ def bind(directory, run_id):
     selected_dir.mkdir(exist_ok=False)
     evidence = []
     for rank, entry in found.items():
-        shutil.copy2(entry["path"], selected_dir / ("msprof_rank-{}-".format(rank) + entry["path"].name))
+        selected = selected_dir / ("msprof_rank-{}-".format(rank) + entry["path"].name)
+        identity_export = None
+        if preserve_task_batches:
+            from diagnosis.export_msprof_identity import export_identity
+            identity_export = export_identity(entry["path"], entry["path"].parent, selected)
+        else:
+            shutil.copy2(entry["path"], selected)
         evidence.append(dict(rank=rank, runtime_device_id=entry["device"], source_db=str(entry["path"]),
                              call_count=entry["api_count"], clock_info=str(entry["info_path"]),
-                             raw_to_profiler_offset_ns=entry["offset"], api_containment_verified=True))
+                             raw_to_profiler_offset_ns=entry["offset"], api_containment_verified=True,
+                             task_identity_export=identity_export))
     bindings = []
     for call in public[0]:
         seq = call["sequence"]
@@ -118,7 +141,7 @@ def bind(directory, run_id):
                                             msprof_db_dir=str(selected_dir))],
                     ranks=[dict(node_id="node0", device_id=found[r]["device"], user_rank=r) for r in range(4)])
     for filename, data in (("manifest.json", manifest), ("iteration-map.json", dict(schema_version=1, operations=bindings)),
-                           ("binding-evidence.json", dict(schema_version=1, ranks=evidence,
+                           ("binding-evidence.json", dict(schema_version=1, binding_kind="ddp_gradient_buckets" if ddp_capture else "explicit_collectives", ranks=evidence,
                                                           noncommunication_inputs=noncommunication_inputs))):
         (directory / filename).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     has_preparations = ["preparation_before" in call for calls in public.values() for call in calls]
@@ -177,5 +200,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument("--ddp-capture", action="store_true")
+    parser.add_argument("--preserve-task-batches", action="store_true", help="Export verified CANN 8.5.1 HOST batch identities.")
     args = parser.parse_args()
-    bind(args.directory.resolve(), args.run_id)
+    bind(args.directory.resolve(), args.run_id, ddp_capture=args.ddp_capture,
+         preserve_task_batches=args.preserve_task_batches)

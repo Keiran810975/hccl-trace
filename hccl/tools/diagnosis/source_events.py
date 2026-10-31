@@ -10,7 +10,9 @@ from . import analyze_waits as waits
 from . import compare_diagnosis as comparison
 from . import critical_path as critical
 from .dependency_model import stable_id
+from .clock_alignment import models_from_report
 from .workload_coordinates import position, location_fields
+from .task_classifier import classify_task, source_category, CATEGORIES, INTERNAL
 
 
 def statistics(values):
@@ -92,11 +94,12 @@ def load_preparations(path):
     return data["preparations"]
 
 
-def preparation_sources(records, rows, edges, coordinates, tasks, options):
+def preparation_sources(records, rows, edges, coordinates, tasks, options, *, alignment=None):
     """Host preparation is an observed interval, never a fabricated device task."""
     if not records:
         return []
     validate_preparations(records, rows, coordinates)
+    clocks = models_from_report(alignment)
     lookup = {r["_graph_id"]: r for r in rows}
     rank_rows = defaultdict(list)
     for row in rows:
@@ -110,11 +113,15 @@ def preparation_sources(records, rows, edges, coordinates, tasks, options):
     syncs = defaultdict(list)
     producer_counts = Counter(e["dst"] for e in edges if "notify_sync" in e["kind"])
     for edge in edges:
-        if "notify_sync" not in edge["kind"] or edge.get("confidence") != "exact" or producer_counts[edge["dst"]] != 1:
+        if "notify_sync" not in edge["kind"] or producer_counts[edge["dst"]] != 1:
             continue
         src, dst = lookup[edge["src"]], lookup[edge["dst"]]
-        if (src["_node_id"] == dst["_node_id"] and src.get("_operation_scope") == dst.get("_operation_scope")
-                and src.get("profiler_task_kind") == "notify_record" and dst.get("profiler_task_kind") == "notify_wait"
+        local = (src["_node_id"] == dst["_node_id"] and edge.get("confidence") == "exact"
+                 and src.get("profiler_task_kind") == "notify_record")
+        remote = (src["_node_id"] != dst["_node_id"] and edge["kind"] == "cross_node_notify_sync_observed"
+                  and edge.get("confidence") == "observed" and src.get("profiler_task_kind") in {"rdma", "notify_record"})
+        if ((local or remote) and src.get("_operation_scope") == dst.get("_operation_scope")
+                and dst.get("profiler_task_kind") == "notify_wait"
                 and src["_user_rank"] != dst["_user_rank"]):
             syncs[(src.get("_operation_scope"), src["_node_id"], src["_user_rank"])].append(edge)
     roots = []
@@ -130,22 +137,39 @@ def preparation_sources(records, rows, edges, coordinates, tasks, options):
         duration = item["stop_ns"] - item["start_ns"]
         if not slow(duration, center, mad, options):
             continue
-        supported = []
+        supported, overlaps, clock_errors = [], {}, []
         for edge in syncs[(item["operation_scope"], item["node_id"], item["user_rank"])]:
             src, dst = lookup[edge["src"]], lookup[edge["dst"]]
             changed = task_by_id.get(edge["dst"], {})
-            # Host preparation must still be running AFTER the peer Wait began.
-            # Record is an actual endpoint of this exact call, after its verified API.
-            if (changed.get("duration_slow") and src["_device_id"] == item["device_id"]
-                    and waits.ns(dst, "start") < item["stop_ns"] <= item["api_start_ns"] <= waits.ns(src, "start")
-                    and waits.ns(src, "stop") <= waits.ns(dst, "stop")):
+            if (not changed.get("duration_slow") or src["_device_id"] != item["device_id"]
+                    or not item["stop_ns"] <= item["api_start_ns"] <= waits.ns(src, "start")):
+                continue
+            if src["_node_id"] == dst["_node_id"]:
+                if not waits.ns(dst, "start") < item["stop_ns"] or waits.ns(src, "stop") > waits.ns(dst, "stop"):
+                    continue
+                overlap = max(0, min(item["stop_ns"], waits.ns(dst, "stop")) - max(item["start_ns"], waits.ns(dst, "start")))
+            else:
+                sender = clocks.get((src["_node_id"], src["_device_id"]))
+                receiver = clocks.get((dst["_node_id"], dst["_device_id"]))
+                if sender is None or receiver is None:
+                    continue
+                hs, he = (sender.map_ns(item[k]) for k in ("start_ns", "stop_ns"))
+                ws, we = (receiver.map_ns(waits.ns(dst, side)) for side in ("start", "stop"))
+                es, er = sender.estimated_error_ns, receiver.estimated_error_ns
+                # The protocol edge supplies the dependency, not an RDMA hardware
+                # completion timestamp. Require overlap beyond both clock margins.
+                if he - es <= ws + er or he + es > we - er:
+                    continue
+                overlap = max(0, min(he - es, we - er) - max(hs + es, ws + er))
+                clock_errors.append(es + er)
+            if overlap:
                 supported.append(edge)
+                overlaps[edge["dst"]] = overlap
         anchor = min(supported, key=lambda e: (waits.ns(lookup[e["src"]], "start"), e["edge_id"])) if supported else None
         candidates = rank_rows[(item["operation_scope"], item["node_id"], item["user_rank"])]
         anchor_row = lookup[anchor["src"]] if anchor else min(candidates, key=lambda r: (waits.ns(r, "start"), r["_graph_id"]))
         affected = sorted({e["dst"] for e in supported})
-        overlap = max((max(0, min(item["stop_ns"], waits.ns(lookup[k], "stop")) -
-                               max(item["start_ns"], waits.ns(lookup[k], "start"))) for k in affected), default=0)
+        overlap = max(overlaps.values(), default=0)
         references = []
         for previous in history:
             anchors = [r for r in rank_rows[(previous["operation_scope"], previous["node_id"], previous["user_rank"])]
@@ -159,13 +183,16 @@ def preparation_sources(records, rows, edges, coordinates, tasks, options):
             algorithm="host", phase="call_preparation", step="", event="prepare_collective", task_kind="host_interval",
             observed_start_ns=item["start_ns"], observed_stop_ns=item["stop_ns"], duration_ns=duration,
             component="host_preparation", status="dependency_supported_candidate" if supported else "unresolved_host_preparation",
-            reason="Observed Host preparation grew and overlapped a peer Wait before this call's exact Notify producer; graph_id is a device anchor, not the Host activity",
+            reason=("Observed Host preparation grew before this call's bound Notify producer and overlaps a slow peer Wait; cross-node support uses an observed protocol dependency and estimated clock-error margins, not RDMA hardware completion; graph_id is a device anchor, not the Host activity"
+                    if supported else "Observed Host preparation grew, but no unique late Notify producer/slow peer Wait overlap is established with available clock evidence"),
             reference_iterations=iterations, reference_graph_ids=[], reference_preparations=references, reference_count=5,
             reference_operation_scopes=[h["operation_scope"] for h in history], reference_mean_ns=str(center), reference_mad_ns=str(mad),
             delta_ns=str(Decimal(duration) - center), affected_wait_graph_ids=affected,
             evidence_paths={k: [e["edge_id"] for e in supported if e["dst"] == k] for k in affected},
             host_call_evidence=item["evidence"], upstream_slow_graph_ids=[], traversal_truncated=False,
-            observed_wait_overlap_ns=overlap, physical_cause="unknown"))
+            observed_wait_overlap_ns=overlap, time_alignment_estimated_error_ns=max(clock_errors, default=None),
+            physical_cause="unknown"))
+        roots[-1].update(task_domain="host_preparation", task_domain_evidence="public_preparation_and_bound_api")
     return roots
 
 
@@ -182,16 +209,20 @@ def rank_sources(roots, rows, edges, coordinates, options):
             grouped_edges[(src.get("_operation_scope"), src["_node_id"])].append(edge)
     candidates = defaultdict(list)
     for root in roots:
+        root.setdefault("task_domain", classify_task(lookup[root["graph_id"]])["task_domain"])
+        root["diagnosis_category"] = source_category(root, lookup[root["graph_id"]])
         event = by_event.get((root["operation_scope"], root["node_id"]))
         root.update(event_id=event["event_id"] if event else None, event_slow=bool(event and event["is_slow"]),
-                    primary_eligible=root["status"] == "dependency_supported_candidate" and not root["traversal_truncated"],
+                    primary_eligible=root["diagnosis_category"] == INTERNAL and not root["traversal_truncated"],
                     modeled_execution_gain_ns=None, impact_status="not_assessed", impact_scope="source_operation_on_node",
                     selection_reason="Source evidence is evaluated independently of call-span or critical-path impact")
         root["affected_operation_count"] = len({lookup[key].get("_operation_scope") for key in root["affected_wait_graph_ids"]})
         root["affected_rank_count"] = len({lookup[key]["_user_rank"] for key in root["affected_wait_graph_ids"]})
         if root["component"] == "host_preparation":
-            root.update(primary_eligible=root["primary_eligible"] and bool(root["observed_wait_overlap_ns"]),
-                        selection_reason="Measured Host interval plus actual late producer-to-peer-Wait evidence; physical cause unknown")
+            root.update(external_clue_supported=root["status"] == "dependency_supported_candidate" and bool(root["observed_wait_overlap_ns"]),
+                        selection_reason=("Measured Host interval plus actual late producer-to-peer-Wait evidence; physical cause unknown"
+                                          if root["status"] == "dependency_supported_candidate" else
+                                          "Measured Host preparation growth only; downstream attribution remains unsupported"))
         elif root["component"] == "execution" and root["status"] in {"dependency_supported_candidate", "isolated_slow_task"}:
             candidates[(root["operation_scope"], root["node_id"])].append(root)
     for key, group in candidates.items():
@@ -211,8 +242,12 @@ def rank_sources(roots, rows, edges, coordinates, options):
                 root.update(impact_detail="Local critical path unavailable: " + str(error), critical_path_status="unavailable", impact_status="unavailable")
     def priority(root):
         gain = root.get("modeled_execution_gain_ns") or root.get("observed_wait_overlap_ns", 0)
-        return (not root["primary_eligible"], -root["affected_operation_count"], -root["affected_rank_count"],
+        return (CATEGORIES.index(root["diagnosis_category"]), not root["primary_eligible"], -root["affected_operation_count"], -root["affected_rank_count"],
                 -len(root["affected_wait_graph_ids"]), -gain, -Decimal(root["delta_ns"]), root["root_id"])
     roots.sort(key=priority)
+    ranks = Counter()
+    for root in roots:
+        ranks[root["diagnosis_category"]] += 1
+        root["category_rank"] = ranks[root["diagnosis_category"]]
     primary = next((r["root_id"] for r in roots if r["primary_eligible"]), None)
     return events, primary

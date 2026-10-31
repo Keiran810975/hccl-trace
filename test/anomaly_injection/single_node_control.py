@@ -100,7 +100,7 @@ class SingleControl:
                 raise TimeoutError("background worker did not signal {}".format(name))
             time.sleep(.005)
 
-    def prepare(self):
+    def prepare(self, *, environment=None):
         kind = self.inj["kind"]
         if not self.owner or kind in {"normal", "progress_delay"}:
             return
@@ -123,7 +123,8 @@ class SingleControl:
                 command += ["--buffer-mib", str(self.inj["buffer_mib"])]
             else:
                 command += ["--matrix-size", str(self.inj["matrix_size"]), "--gemm-backend", self.gemm_backend]
-        env = dict(os.environ, HCCL_STEP_TRACE="0", HCCL_TASK_SEMANTIC_TRACE="0")
+        env = dict(os.environ if environment is None else environment,
+                   HCCL_STEP_TRACE="0", HCCL_TASK_SEMANTIC_TRACE="0")
         if kind == "communication_contention":
             # The foreground keeps its original ports. Separate only this process's
             # bootstrap and transport listeners on the same physical devices.
@@ -144,20 +145,25 @@ class SingleControl:
             return
         slot = step * 12 + block * 3 + bucket
         if slot == self.inj["start_call"]:
-            if self.started:
-                raise RuntimeError("the selected injection call occurred more than once")
-            self.started = True
-            self.record("injection_start", call=slot)
-            if self.inj["kind"] == "progress_delay":
-                time.sleep(self.inj["delay_ms"] / 1000)
-                self.record("injection_stop", call=slot, actual_hit=True)
-                self.stopped = True
-            else:
-                (self.directory / "start").touch()
-                self.wait("active")
-                self.record("background_active_confirmed")
+            self.start(slot)
         if self.inj["kind"] != "progress_delay" and slot == self.inj["start_call"] + self.inj["duration_calls"]:
             self.stop()
+
+    def start(self, call):
+        if not self.owner:
+            return
+        if self.started:
+            raise RuntimeError("the selected injection call occurred more than once")
+        self.started = True
+        self.record("injection_start", call=call)
+        if self.inj["kind"] == "progress_delay":
+            time.sleep(self.inj["delay_ms"] / 1000)
+            self.record("injection_stop", call=call, actual_hit=True)
+            self.stopped = True
+        else:
+            (self.directory / "start").touch()
+            self.wait("active")
+            self.record("background_active_confirmed")
 
     def stop(self):
         if self.started and not self.stopped and not self.stop_requested:

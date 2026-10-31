@@ -54,10 +54,12 @@ def build_excerpt(rows, edges, operations, coordinates, report, diagnosis, case,
     scopes = {r.get("_operation_scope") for r in rows if overlaps(r, lower, upper)} - {"", None}
     scopes.add(anchor_scope)
     primary = next((r for r in report["root_causes"] if r["root_id"] == report["primary_source_candidate_id"]), None)
+    external = next((r for r in report["root_causes"] if r["root_id"] == report.get("primary_external_clue_id")), None)
+    focus = primary or external
     path_ids, path_nodes = set(), set()
-    if primary:
-        scopes.add(primary["operation_scope"])
-        path_ids = {edge_id for path in primary["evidence_paths"].values() for edge_id in path}
+    if focus:
+        scopes.add(focus["operation_scope"])
+        path_ids = {edge_id for path in focus["evidence_paths"].values() for edge_id in path}
         path_nodes = {key for edge in edges if edge["edge_id"] in path_ids for key in (edge["src"], edge["dst"])}
         scopes.update(r.get("_operation_scope") for r in rows if r["_graph_id"] in path_nodes and r.get("_operation_scope"))
     selected = [r for r in rows if r.get("_operation_scope") in scopes
@@ -101,15 +103,16 @@ def build_excerpt(rows, edges, operations, coordinates, report, diagnosis, case,
     model["caseInfo"] = dict(case_id=case["case_id"], injection=injection, injection_locations=locations,
                              chart_origin_ns=origin, primary_source_candidate_id=report["primary_source_candidate_id"],
                              complete_workload_graph=False, clipped_edge_count=len(edges) - len(links))
-    if primary:
-        model["initialSelection"] = primary["graph_id"]
-        model["focusEdgeIds"] = list(dict.fromkeys(e for path in primary["evidence_paths"].values() for e in path))
-        if primary["component"] == "host_preparation":
-            model["observedHostSource"] = dict(nodeId=primary["node_id"], rank=primary["user_rank"], device=primary["device_id"],
-                startUs=(primary["observed_start_ns"] - origin) / 1000,
-                stopUs=(primary["observed_stop_ns"] - origin) / 1000, durationUs=primary["duration_ns"] / 1000)
+    if focus:
+        model["initialSelection"] = focus["graph_id"]
+        model["focusEdgeIds"] = list(dict.fromkeys(e for path in focus["evidence_paths"].values() for e in path))
+        if focus["component"] == "host_preparation":
+            model["observedHostSource"] = dict(nodeId=focus["node_id"], rank=focus["user_rank"], device=focus["device_id"],
+                startUs=(focus["observed_start_ns"] - origin) / 1000,
+                stopUs=(focus["observed_stop_ns"] - origin) / 1000, durationUs=focus["duration_ns"] / 1000)
             model["caseNote"] += ". Red bracket = diagnosed public Host preparation interval, not a device kernel; selected task is its device dependency anchor."
     summary = dict(injection_locations=locations, chart_origin_ns=origin, primary_source=primary,
+                   primary_external_clue=external,
                    original_node_count=len(rows), retained_node_count=len(selected), retained_edge_count=len(links),
                    anchor_operation_scope=anchor_scope, complete_workload_graph=False,
                    baseline_display_iteration=display_iteration)

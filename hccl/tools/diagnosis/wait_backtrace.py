@@ -5,6 +5,7 @@ from collections import Counter, defaultdict, deque
 from . import analyze_waits as waits
 from . import compare_diagnosis as comparison
 from .dependency_model import stable_id
+from .task_classifier import classify_task
 
 
 WORK_KINDS = frozenset({"sdma", "reduce_inline", "kernel_mix_aic", "kernel_mix_aiv", "kernel_aivec"})
@@ -40,6 +41,8 @@ def trace_sources(rows, edges, tasks, options):
                     reason="Observed execution overrun reached by tracing a slow Wait through its actual producer and prerequisites; physical cause unknown",
                     affected_wait_graph_ids=[], evidence_paths={}, upstream_slow_graph_ids=[], traversal_truncated=False,
                     source_policy="wait_driven", physical_cause="unknown")
+            roots[root_id]["cross_operation"] = (roots[root_id].get("cross_operation", False)
+                                                   or item["operation_scope"] != seed["operation_scope"])
             confidence = min((edge_by_id[e]["confidence"] for e in path), key=lambda c: {"observed": 0, "exact": 1}[c])
             root = roots[root_id]
             root["evidence_confidence"] = "observed" if root.get("evidence_confidence") == "observed" else confidence
@@ -71,6 +74,12 @@ def trace_sources(rows, edges, tasks, options):
             kind = row.get("profiler_task_kind", "")
             if item.get("stage") == "warmup":
                 boundary(key, path, "warmup_boundary")
+                continue
+            if item.get("iteration") is None or item.get("stage") != "measured":
+                boundary(key, path, "missing_iteration_identity")
+                continue
+            if item["iteration"] != seed["iteration"]:
+                boundary(key, path, "iteration_boundary")
                 continue
             if kind == "notify_wait":
                 if mode == "wait_duration" or item["duration_slow"]:
@@ -109,7 +118,8 @@ def trace_sources(rows, edges, tasks, options):
                     else:
                         follow_order(key, path)
                 continue
-            intrinsic = item["duration_slow"] and kind in WORK_KINDS
+            intrinsic = (item["duration_slow"] and kind in WORK_KINDS
+                         and classify_task(row)["task_domain"] == "hccl_internal")
             if intrinsic:
                 source(key, path)
                 # Execution growth and late release can coexist; preserve both routes.

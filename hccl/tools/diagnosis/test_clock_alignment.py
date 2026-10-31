@@ -6,6 +6,8 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from fractions import Fraction
+from unittest.mock import patch
 
 from . import clock_alignment as clock
 from .multi_node_trace import load_manifest
@@ -48,6 +50,97 @@ def calibrated_fixture(root):
 
 
 class ClockAlignmentTests(unittest.TestCase):
+    def long_clock(self, root, *, jump=False):
+        folder = root / "db"
+        (folder / "host").mkdir(parents=True)
+        p0, duration, r0 = 1000000000000, 40000000000, 100000000
+        r1 = r0 + duration + 1500000
+        with sqlite3.connect(folder / "msprof_fixture.db") as db:
+            db.execute("CREATE TABLE TASK(deviceId INTEGER)")
+            db.execute("INSERT INTO TASK VALUES(7)")
+            db.execute("CREATE TABLE SESSION_TIME_INFO(startTimeNs INTEGER,endTimeNs INTEGER)")
+            db.execute("INSERT INTO SESSION_TIME_INFO VALUES(?,?)", (p0, p0 + duration))
+        (folder / "host/start_info").write_text(json.dumps(dict(collectionTimeBegin=p0 // 1000, clockMonotonicRaw=r0)))
+        (folder / "host/end_info").write_text(json.dumps(dict(collectionTimeEnd=(p0 + duration) // 1000, clockMonotonicRaw=r1)))
+        probe = root / "probe.json"
+        probe.write_text(json.dumps(dict(schema_version=1, clock="CLOCK_MONOTONIC_RAW", capture_id="long", node_id="node0",
+            reference_node="node0", before_raw_ns=r0 - 10000, after_raw_ns=r1 + 10000)))
+        samples = root / "clocks.jsonl"
+        header = dict(event="runtime", schema_version=1, run_id="long", node_id="node0", user_rank=11, device_id=7)
+        records = [header]
+        for i in range(1, 40):
+            p = p0 + i * 1000000000
+            r = r0 + round(Fraction(i * 1000000000 * (r1 - r0), duration))
+            if jump and i == 20:
+                r += 2000000
+            records.append(dict(event="call", before=dict(unix_ns=p, raw_ns=r)))
+        samples.write_text("\n".join(map(json.dumps, records)))
+        manifest = dict(run_id="long", ranks=[dict(node_id="node0", user_rank=11, device_id=7)],
+            nodes=[dict(node_id="node0", plog_dir=str(root / "plog"), msprof_db_dir=str(folder),
+                        clock_probe_files=[str(probe)], clock_validation_files=[str(samples)])])
+        return manifest, p0, duration, r0, r1
+
+    def test_realtime_drift_does_not_rescale_cann_db_event_time(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest, p0, duration, r0, r1 = self.long_clock(Path(directory))
+            report = clock.build(manifest)
+            self.assertEqual(report["schema_version"], 3)
+            self.assertLessEqual(report["estimated_error_ns"], 1001)
+            model = next(iter(clock.models_from_report(report).values()))
+            self.assertEqual(model.map_ns(p0), r0)
+            self.assertEqual(model.map_ns(p0 + duration), r0 + duration)
+            self.assertEqual(model.map_ns(p0 + r1 - r0), r1)
+            self.assertEqual(report["profiler_calibrations"][0]["model"], "cann_start_offset")
+            self.assertEqual(report["profiler_calibrations"][0]["realtime_offset_change_ns"], -1500000)
+            manifest["nodes"][0]["clock_validation_files"] = []
+            self.assertEqual(clock.build(manifest)["models"], report["models"])
+
+    def test_public_realtime_disagreement_is_audited_not_applied_to_db(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest, p0, _, r0, _ = self.long_clock(Path(directory), jump=True)
+            report = clock.build(manifest)
+            self.assertGreater(report["profiler_calibrations"][0]["max_public_realtime_offset_change_ns"], 2000000)
+            model = next(iter(clock.models_from_report(report).values()))
+            self.assertEqual(model.map_ns(p0 + 20000000000), r0 + 20000000000)
+
+    def test_original_failed_call_boundary_is_exact_with_start_offset(self):
+        start = dict(collectionTimeBegin=1793385338476754, clockMonotonicRaw=189447326123510)
+        stop = dict(collectionTimeEnd=1793385377336754, clockMonotonicRaw=189486184584970)
+        raw = 189476639218840
+        expected = raw + 1793385338476754000 - 189447326123510
+        self.assertEqual(clock.raw_to_profiler(raw, start, stop), expected)
+        with self.assertRaisesRegex(ValueError, "coverage"):
+            clock.raw_to_profiler(189486184584971, start, stop)
+
+    def test_retired_realtime_affine_artifact_requires_offline_replay(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            report = clock.build(load_manifest(calibrated_fixture(Path(temporary))))
+            report["schema_version"] = 2
+            report["models"][0].update(profiler_anchor_ns=100000, profiler_stop_ns=110000,
+                                       profiler_rate_numerator=99999, profiler_rate_denominator=100000)
+            with self.assertRaisesRegex(ValueError, "retired realtime-affine"):
+                clock.models_from_report(report)
+
+    def test_explicit_uncalibrated_fallback_keeps_execution_gates_and_marks_the_axis(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = calibrated_fixture(root)
+            manifest = json.loads(path.read_text())
+            probe = Path(manifest["nodes"][1]["clock_probe_files"][0])
+            data = json.loads(probe.read_text())
+            data["after"] = data["before"]
+            probe.write_text(json.dumps(data))
+            out, ready = run_pipeline(path, root / "local", allow_uncalibrated_clock=True,
+                                      html_views=(), include_critical_path=False)
+            self.assertTrue(ready)
+            result = json.loads((out / "pipeline_result.json").read_text())
+            self.assertFalse(result["clock_alignment_available"])
+            self.assertTrue(result["clock_alignment_error"])
+            self.assertFalse((out / "clock_alignment.json").exists())
+            with patch("hccl.tools.diagnosis.multi_node_trace.operation_sync_connected", return_value=False):
+                _, ready = run_pipeline(path, root / "bad-graph", allow_uncalibrated_clock=True, html_views=())
+                self.assertFalse(ready)
+
     def test_independent_probes_map_clocks_without_changing_raw_graph(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -62,7 +62,9 @@ def _baseline_pairs(current, baseline, work):
 
 def analyze_capture(capture, output, *, mode, baseline=None, topology=None, manifest=None,
                     min_match_rate=95.0, require_clock_alignment=False, keep_debug=False,
-                    debug_dir=None, verbose=False):
+                    debug_dir=None, verbose=False, allow_uncalibrated_clock=False):
+    if require_clock_alignment and allow_uncalibrated_clock:
+        raise DiagnosisError(2, "required alignment and explicit local-clock fallback are mutually exclusive")
     if mode not in {"rolling", "baseline"} or (mode == "baseline") != (baseline is not None):
         raise DiagnosisError(2, "baseline mode requires --baseline; rolling forbids it")
     if not 0 < min_match_rate <= 100:
@@ -104,13 +106,14 @@ def analyze_capture(capture, output, *, mode, baseline=None, topology=None, mani
                     if baseline is not None:
                         reference, ready = run_pipeline(base.manifest, work / "reference",
                             min_match_rate=min_match_rate, html_views=(), include_critical_path=False,
-                            require_clock_alignment=require_clock_alignment)
+                            require_clock_alignment=require_clock_alignment, allow_uncalibrated_clock=allow_uncalibrated_clock)
                         _gate(reference, ready)
                     directory, ready = run_pipeline(current.manifest, work / "analysis", baseline=reference,
                         operation_map=pair_map if baseline is not None else None,
                         iteration_map=current.iteration_map if mode == "rolling" else None,
                         preparation_map=current.preparation_map if mode == "rolling" else None,
                         min_match_rate=min_match_rate, require_clock_alignment=require_clock_alignment,
+                        allow_uncalibrated_clock=allow_uncalibrated_clock,
                         comparison_options=comparison.ComparisonOptions(max_figures=0),
                         rolling_options=rolling.RollingOptions(max_figures=0), html_views=(), include_critical_path=False)
                 pipeline = _gate(directory, ready)
@@ -150,6 +153,7 @@ def main(argv=None):
     analyze.add_argument("--manifest", type=Path)
     analyze.add_argument("--min-match-rate", type=float, default=95.0)
     analyze.add_argument("--require-clock-alignment", action="store_true")
+    analyze.add_argument("--allow-uncalibrated-clock", action="store_true", help="on rejected display calibration, retain node-local axes and report the reason; semantic/graph gates remain required")
     analyze.add_argument("--keep-debug", action="store_true")
     analyze.add_argument("--debug-dir", type=Path)
     analyze.add_argument("--verbose", action="store_true")

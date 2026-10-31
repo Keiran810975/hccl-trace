@@ -30,6 +30,7 @@ def fixture():
     )):
         row = execution_row(index, 45, index + 10, start, kind=kind, rank=rank, event=event)
         row.update(_node_id="run/node" + str(rank), _operation_scope="anomaly-op",
+                   match_status="matched", semantic="fixture_hccl_semantics",
                    algorithm="ring", phase="allgather", step="0", slice="0",
                    profiler_size_bytes="67108864" if kind == "sdma" else "",
                    _stop=start + length, _duration=length)

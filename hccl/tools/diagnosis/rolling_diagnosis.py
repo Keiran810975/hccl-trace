@@ -20,6 +20,7 @@ if __package__ in (None, ""):
     from diagnosis import visualize_html as view
     from diagnosis import source_events
     from diagnosis import wait_backtrace
+    from diagnosis.task_classifier import classify_task, source_category, INTERNAL, EXTERNAL
     from diagnosis.workload_coordinates import position, location_fields
     from diagnosis.schema import write_csv
 else:
@@ -29,6 +30,7 @@ else:
     from . import visualize_html as view
     from . import source_events
     from . import wait_backtrace
+    from .task_classifier import classify_task, source_category, INTERNAL, EXTERNAL
     from .workload_coordinates import position, location_fields
     from .schema import write_csv
 
@@ -145,6 +147,7 @@ def compare_tasks(rows, edges, coordinates, options):
                     reference_graph_id="", reference_operation_scope="", reference_evidence="",
                     delta_ns=None, gap_delta_ns=None, slowdown_factor=None,
                     duration_slow=False, gap_slow=False, is_slow=False)
+        task.update(classify_task(row))
         tasks.append(task)
         if not coord:
             continue
@@ -198,13 +201,13 @@ def compare_tasks(rows, edges, coordinates, options):
     return tasks
 
 
-def analyze(rows, edges, coordinates, options=RollingOptions(), *, preparations=()):
+def analyze(rows, edges, coordinates, options=RollingOptions(), *, preparations=(), alignment=None):
     options.validate()
     coordinates = validate_coordinates(list(coordinates.values()))
     comparison.evidence_adjacency(rows, edges)
     tasks = compare_tasks(rows, edges, coordinates, options)
     roots, traces = wait_backtrace.trace_sources(rows, edges, tasks, options)
-    host_roots = source_events.preparation_sources(preparations, rows, edges, coordinates, tasks, options)
+    host_roots = source_events.preparation_sources(preparations, rows, edges, coordinates, tasks, options, alignment=alignment)
     roots.extend(host_roots)
     traces_by_wait = {t["wait_graph_id"]: t for t in traces}
     for root in host_roots:
@@ -212,14 +215,15 @@ def analyze(rows, edges, coordinates, options=RollingOptions(), *, preparations=
             continue
         for key in root["affected_wait_graph_ids"]:
             trace = traces_by_wait[key]
-            trace["source_root_ids"] = sorted(set(trace["source_root_ids"]) | {root["root_id"]})
+            trace.setdefault("external_clue_ids", []).append(root["root_id"])
             trace.setdefault("host_activity_ids", []).append(root["source_activity_id"])
-            trace["status"] = "source_candidates_found"
+            if not trace["source_root_ids"]:
+                trace["status"] = "external_clue_found"
     events, primary = source_events.rank_sources(roots, rows, edges, coordinates, options)
     compared = sum(t["reference_count"] == 5 for t in tasks)
-    return dict(schema_version=1, source_policy_version=4, reference_mode="previous_five_iteration_mean", options=asdict(options),
+    return dict(schema_version=1, source_policy_version=6, reference_mode="previous_five_iteration_mean", options=asdict(options),
                 status="analyzed" if compared else "no_comparable_history",
-                diagnosis_status="localized_candidate" if primary else "no_comparable_history" if not compared else "unresolved_slow_event" if any(e["is_slow"] for e in events) else "unresolved_waits" if traces else "no_slow_event",
+                diagnosis_status="localized_candidate" if primary else "external_clues" if host_roots else "no_comparable_history" if not compared else "unresolved_slow_event" if any(e["is_slow"] for e in events) else "unresolved_waits" if traces else "no_slow_event",
                 events=events, slow_event_count=sum(e["is_slow"] for e in events),
                 wait_backtraces=traces, coverage=wait_backtrace.coverage(tasks, traces),
                 public_preparation_count=len(preparations),
@@ -231,14 +235,18 @@ def analyze(rows, edges, coordinates, options=RollingOptions(), *, preparations=
                 supported_host_candidate_count=sum(r["status"] == "dependency_supported_candidate" and r["component"] == "host_preparation" for r in roots),
                 source_status_counts=dict(Counter(r["status"] for r in roots)),
                 primary_source_candidate_id=primary, tasks=tasks, root_causes=roots,
+                primary_external_clue_id=next((r["root_id"] for r in roots if r["diagnosis_category"] == EXTERNAL), None),
+                category_counts=dict(Counter(r["diagnosis_category"] for r in roots)),
                 limits=["Only the preceding five measured iterations are used; warmup, current and future iterations are excluded.",
                         "The reference is an arithmetic mean; MAD is median absolute deviation around the five-sample median.",
                         "No absolute increase floor; a zero reference requires strictly positive observed increase.",
                         "Missing or nonunique semantic task locations stay uncomparable; no ordinal matching.",
                         "Root candidates require actual dependency evidence; temporal overlap alone does not prove physical causation.",
+                        "Internal execution sources, external preparation clues and unresolved observations are ranked separately. Unknown mixed kernels are not assumed external compute.",
+                        "Backtraces may cross calls only within the same verified measured iteration; missing iteration identity is an explicit boundary.",
                         "Source localization follows a slow Wait's actual producer and observed prerequisites across calls; no guessed edges or gap roots.",
                         "Call-span growth and critical-path gain are impact annotations, not mandatory source-localization thresholds.",
-                        "Host sources need public preparation intervals, independently verified call/API bindings and an exact late producer-to-peer-Wait relation; the device graph anchor is not a Host task.",
+                        "Host sources need public preparation intervals and independently bound call/API identities. Same-node support requires an exact Notify relation; cross-node support requires a unique observed protocol Notify relation and overlap beyond estimated independent clock-error margins. An RDMA submission is not hardware transfer completion; the device graph anchor is not a Host task.",
                         "Event and critical-path effects are local to the selected call and node, not a calibrated global workload gain; fixed releases can conceal real effects.",
                         "Absent public preparation observations cannot be reconstructed from injection truth or arbitrary idle gaps; GEMM/device completion ownership may remain unresolved.",
                         "No injection truth or external baseline is consumed. Rolling references may adapt to a sustained slowdown.",

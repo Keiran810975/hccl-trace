@@ -1,5 +1,24 @@
 # HCOMM 8.5.0 步骤语义与依赖诊断实现规格
 
+> 2026-10-31 source policy6：新增保守任务归属，拆分通信内部源头候选、外部异常线索、未归因观测。
+> 内部主候选须可信HCCL归属、执行慢化及到慢Notify Wait的真实路径；孤立慢任务不再进入公共候选列表。
+> Host准备区间保留原支持/未支持状态，单独展示，不与内部候选混排。仅有mixed AIC类型不证明外部计算。
+> 允许同一已验证正式Iteration内跨CollOp回溯；缺Iteration身份或跨轮时明确停止，不删除原图边。
+> 公共root_causes.json和传播报告升级schema v2，candidates仅为communication_source_candidates的兼容别名；
+> external_anomaly_clues及unresolved_observations独立输出，primary_candidate_id仅指内部候选。
+> 统计阈值、原始解析/Notify构图及采集生产端不变。本轮代码回归不代表设备准确率提高。
+
+> 2026-10-31 source policy5：Host准备区间可沿现有唯一observed跨机协议Notify关系形成候选，
+> 前提是独立校时可用、API身份已绑定、下游Wait确实慢，且时间重叠超出双方估计误差余量。
+> 不添加/提升图边，不把RDMA提交当硬件完成；缺证据仍未归因。单机仍要求exact通知。
+> 校时映射除显示外用于这一保守重叠判断；原始时间、task时长和本地关键路径保持不变。
+
+> 2026-10-31 nf 时钟域更正：CANN DB事件时间采用`CLOCK_MONOTONIC_RAW + start_info固定偏移`。
+> 公开调用绑定、注入窗口评测及显示映射共用此规则，不能用墙钟首尾/SDK墙钟漂移缩放DB事件。
+> 网络RAW探针之间的仿射映射仍只用于显示；新校时artifact为v3，旧非恒等realtime-affine
+> 模型拒绝使用，须对留存输入离线重放。严格地址、API/完成边界和唯一配对门禁不变。
+> 更正依据和原始092回放进度见[双机记录](node03-gpt2-validation-20261029.md)。
+
 > 2026-10-29 nf 用户入口：新增 `hccl-diag analyze` 和 `hccl_trace.Trace` 公共观测SDK。
 > 新入口隔离临时分析并原子发布 execution.html/root_causes.json/propagation.html；不删除输入。
 > SDK调用通过具名API connectionId，或HOST launch connectionId与相同globalTid/startNs/endNs，

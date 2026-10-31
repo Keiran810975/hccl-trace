@@ -55,8 +55,13 @@ def validate_final(directory):
     if {p.name for p in directory.iterdir()} != FINAL_FILES:
         raise ValueError("final report must contain exactly three files")
     result = read_json(directory / "root_causes.json")
-    if result.get("schema_version") != 1 or not isinstance(result.get("candidates"), list):
+    if result.get("schema_version") not in {1, 2} or not isinstance(result.get("candidates"), list):
         raise ValueError("invalid normalized root-cause report")
+    if result["schema_version"] == 2:
+        if (result.get("communication_source_candidates") != result["candidates"]
+                or not isinstance(result.get("external_anomaly_clues"), list)
+                or not isinstance(result.get("unresolved_observations"), list)):
+            raise ValueError("schema 2 requires separate internal, external and unresolved results")
     for name in ("execution.html", "propagation.html"):
         text = (directory / name).read_text(encoding="utf-8")
         if "<!doctype html>" not in text.lower() or "<script" not in text:
@@ -71,14 +76,16 @@ def publish_final_report(directory, output, normalized, roots, comparisons):
     rows = graph.read_graph_artifact_nodes(directory / "dep_graph_nodes.csv")
     edges = graph.read_graph_artifact_edges(directory / "dep_graph_edges.csv")
     report = propagation.build_report(rows, edges, roots, comparisons,
-        primary_source_candidate_id=normalized["primary_candidate_id"], reference=normalized["reference"])
+        primary_source_candidate_id=normalized["primary_candidate_id"], reference=normalized["reference"],
+        unresolved_observations=normalized["unresolved_observations"])
     by_id = {c["candidate_id"]: c for c in report["candidates"]}
-    for candidate in normalized["candidates"]:
+    for candidate in normalized["candidates"] + normalized.get("external_anomaly_clues", []):
         candidate["chain_ids"] = [c["chain_id"] for c in by_id[candidate["id"]]["chains"]]
     normalized["propagation"] = dict(report["summary"], exhaustive_downstream_search=False,
                                      physical_causation_proven=False)
     diagnosis = read_json(directory / "diagnosis.json")
     diagnosis.update(candidates=[dict(r, id=r["root_id"], category=r["component"], evidence=r["reason"]) for r in roots],
+                     result_categories=normalized.get("category_counts", {}),
                      coverage=normalized["coverage"], diagnosis_status=normalized["diagnosis_status"],
                      primary_source_candidate_id=normalized["primary_candidate_id"])
     related = {}
@@ -100,6 +107,8 @@ def publish_final_report(directory, output, normalized, roots, comparisons):
     normalized["quality"]["notify_ambiguity_count"] = model["issueCount"]
     view.attach_diagnosis(model, diagnosis, diagnosis["waits"], "execution")
     model["waits"] = diagnosis["waits"]
+    model["resultCategories"] = normalized.get("category_counts", {})
+    classifications = {t["graph_id"]: t.get("task_domain", "unknown") for t in comparisons}
     node_roles, paths = {}, {}
     for root in report["candidates"]:
         anchor = root["anchor_graph_id"]
@@ -111,6 +120,7 @@ def publish_final_report(directory, output, normalized, roots, comparisons):
             node_roles[chain["target_wait_graph_id"]] = "wait"
         node_roles[anchor] = "host_anchor" if root["source"]["component"] == "host_preparation" else "candidate"
     for node in model["nodes"]:
+        node["taskDomain"] = classifications.get(node["id"], "unknown")
         if node["id"] in node_roles:
             node["diagnosisRole"] = node_roles[node["id"]]
     model["candidatePathEdges"] = {key: list(dict.fromkeys(value)) for key, value in paths.items()}

@@ -135,6 +135,8 @@ def discover_capture(source, work, *, topology=None, manifest_path=None):
         if ids and ids != {run_id}:
             raise ValueError("capture run_id disagrees with SDK runtime observations")
         manifest = dict(run_id=_name(run_id), nodes=nodes, ranks=ranks, operations=metadata.get("operations", []))
+        if "sdk_auxiliary_operation_types" in metadata:
+            manifest["sdk_auxiliary_operation_types"] = metadata["sdk_auxiliary_operation_types"]
     if topology:
         explicit = read_json(topology)
         if "ranks" not in explicit:
