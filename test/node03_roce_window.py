@@ -86,11 +86,12 @@ class Window:
         self.snapshot = self.directory / "snapshot.json"
 
     def run(self, command, check=True):
+        started = raw_ns()
         result = subprocess.run(command, text=True, capture_output=True, timeout=20)
         if self.directory.is_dir():
             with (self.directory / "commands.jsonl").open("a") as stream:
                 stream.write(json.dumps(dict(command=command, returncode=result.returncode, stdout=result.stdout,
-                    stderr=result.stderr, raw_ns=raw_ns())) + "\n")
+                    stderr=result.stderr, started_raw_ns=started, raw_ns=raw_ns())) + "\n")
         if check and result.returncode:
             raise RuntimeError("network guard command failed: " + result.stderr[-800:] + result.stdout[-800:])
         return result.stdout
@@ -183,21 +184,44 @@ class Window:
                 raise RuntimeError("port settings changed before apply")
             if (self.control / "stop").exists():
                 raise RuntimeError("network window elapsed during pre-apply checks")
+            if (self.control / "abort").exists():
+                raise RuntimeError("network injection was cancelled before apply")
             result["apply_started_raw_ns"] = raw_ns()
             self.set(DEVICE, LIMIT)
+            result["apply_returned_raw_ns"] = raw_ns()
             if self.shaping(DEVICE)["limit_mbps"] != LIMIT or self.shaping(SIBLING) != original[str(SIBLING)]:
                 raise RuntimeError("requested port limit or sibling isolation did not verify")
-            result.update(applied_verified=True, started_raw_ns=raw_ns(), before=self.query())
+            before = self.query()
+            if (self.control / "abort").exists() or (self.control / "stop").exists():
+                raise RuntimeError("network injection was cancelled while confirming apply")
+            result.update(applied_verified=True, started_raw_ns=raw_ns(), before=before)
+            write(self.control / "network-active.json", dict(schema_version=1, case_id=json.loads(
+                (self.root / "input/case.json").read_text())["case_id"], device=DEVICE, limit_mbps=LIMIT,
+                applied_verified=True, started_raw_ns=result["started_raw_ns"]))
             while not (self.control / "stop").exists():
                 if (self.control / "abort").exists() or time.monotonic() > deadline:
                     raise TimeoutError("network injection stop never arrived")
                 time.sleep(.01)
             result.update(finished_raw_ns=raw_ns(), after=self.query())
+            if (result["after"]["mac_tx_total_oct_num"] <= before["mac_tx_total_oct_num"]
+                    or result["after"]["roce_tx_all_pkt_num"] <= before["roce_tx_all_pkt_num"]):
+                raise ValueError("no outgoing RoCE foreground traffic in the verified limited window")
+            measured = json.loads((self.control / "network-measured-window.json").read_text())
+            first = measured.get("first_full_iteration")
+            if (measured.get("schema_version") != 1 or measured.get("case_id") != json.loads(
+                    (self.root / "input/case.json").read_text())["case_id"] or type(first) is not int
+                    or measured.get("requested_iteration") != config["iteration"] or first < config["iteration"]
+                    or first + config["duration_iters"] > json.loads((self.root / "input/case.json").read_text())["workload"]["iters"]
+                    or measured.get("completed_iterations") != list(range(first, first + config["duration_iters"]))):
+                raise ValueError("network limit did not cover the configured full measured iterations")
+            result["measurement_window"] = measured
         except BaseException as error:
             result["error"] = str(error)
             raise
         finally:
+            result["restore_started_raw_ns"] = raw_ns()
             self.restore()
+            result["restore_verified_raw_ns"] = raw_ns()
             result["restored_verified"] = True
             write(self.control / "network-result.json", result)
             (self.control / "network-restored").touch()

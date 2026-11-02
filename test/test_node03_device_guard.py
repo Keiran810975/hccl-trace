@@ -1,13 +1,30 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from test.node03_device_guard import CARDS, Guard, policy, scope, own_transition
 
 
 class DeviceGuardTests(unittest.TestCase):
+    def test_new_producer_probe_is_node0_and_three_whole_cards_only(self):
+        root = Path('/home/commTeam/zjy/zjy-new-workspace/semantic-coverage-20261102')
+        self.assertEqual(scope(root, 'liteserver-560t-0'), root.resolve())
+        with self.assertRaises(ValueError):
+            scope(Path('/home/zjy-new/workspace/semantic-coverage-20261102'), 'liteserver-560t-3')
+        receipt = dict(status='built', device_sha256='a'*64, host_sha256='b'*64,
+                       host_libraries={'libhcomm.so':'b'*64, 'libhccl_alg.so':'c'*64, 'libhccl_plf.so':'d'*64})
+        with patch('test.node03_device_guard.scope', return_value=root), patch.object(Path, 'read_text', return_value=json.dumps(receipt)):
+            guard = Guard(root)
+            self.assertEqual(guard.cards, (5, 6, 7))
+            self.assertEqual(len(guard.host_libraries), 3)
+        receipt['host_libraries'].pop('libhccl_alg.so')
+        with patch('test.node03_device_guard.scope', return_value=root), patch.object(Path, 'read_text', return_value=json.dumps(receipt)):
+            with self.assertRaises(ValueError):
+                Guard(root)
+
     def test_scope_does_not_expand_to_other_nodes_or_card_sets(self):
         self.assertEqual(CARDS, (4, 5, 6, 7))
         for host, parent in (("liteserver-560t-0", "/home/commTeam/zjy/zjy-new-workspace"),
@@ -20,6 +37,18 @@ class DeviceGuardTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             scope(Path("/tmp/hccl-diagnose-node03-20261029-006"), "liteserver-560t-0")
 
+    def test_gpt_probe_reuses_attested_build_only_on_node0_four_cards(self):
+        root = Path('/home/commTeam/zjy/zjy-new-workspace/gpt2-semantic-20261102-001')
+        self.assertEqual(scope(root, 'liteserver-560t-0'), root.resolve())
+        with self.assertRaises(ValueError):
+            scope(Path('/home/zjy-new/workspace/gpt2-semantic-20261102-001'), 'liteserver-560t-3')
+        receipt = dict(status='built', device_sha256='a'*64, host_sha256='b'*64,
+                       host_libraries={'libhcomm.so':'b'*64, 'libhccl_alg.so':'c'*64, 'libhccl_plf.so':'d'*64})
+        with patch('test.node03_device_guard.scope', return_value=root), patch.object(Path, 'read_text', return_value=json.dumps(receipt)):
+            guard = Guard(root)
+            self.assertEqual(guard.cards, (4, 5, 6, 7))
+            self.assertEqual(len(guard.host_libraries), 3)
+
     def test_original_policy_requires_both_chips(self):
         enable = "Custom-op-secverify-enable : False\n" * 2
         mode = "Custom-op-secverify-mode : 5\n" * 2
@@ -27,6 +56,15 @@ class DeviceGuardTests(unittest.TestCase):
         for a, b in ((enable.splitlines()[0], mode), (enable, mode.replace("5", "0", 1))):
             with self.assertRaises(ValueError):
                 policy(a, b)
+
+    def test_three_new_gpt_cases_are_node0_only_and_use_attested_build(self):
+        for number in (101, 102, 103):
+            root = Path('/home/commTeam/zjy/zjy-new-workspace/gpt2-three-anomalies-20261102-'+str(number))
+            self.assertEqual(scope(root, 'liteserver-560t-0'), root.resolve())
+            with self.assertRaises(ValueError):
+                scope(Path('/home/zjy-new/workspace')/root.name, 'liteserver-560t-3')
+        with self.assertRaises(ValueError):
+            scope(Path('/home/commTeam/zjy/zjy-new-workspace/gpt2-three-anomalies-20261102-104'), 'liteserver-560t-0')
 
     def test_partial_apply_can_restore_but_unknown_admin_change_is_not_clobbered(self):
         original = dict(enable=False, mode=5)

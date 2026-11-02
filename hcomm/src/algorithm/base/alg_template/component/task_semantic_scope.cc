@@ -35,6 +35,8 @@ TaskSemanticScope::TaskSemanticScope(const TaskSemanticTraceInfo &info)
         return;
     }
     hadPrevious_ = GetTaskSemanticTraceInfo(previousInfo_);
+    hadContext_ = GetTaskSemanticTraceContext(previousContext_);
+    SetTaskSemanticTraceContext(info);
     SetTaskSemanticTraceInfo(info);
     if (GetTaskBuildAnchor(buildAnchor_)) {
         (void)GetTaskSemanticTraceInfo(buildInfo_);
@@ -49,6 +51,11 @@ TaskSemanticScope::~TaskSemanticScope()
     }
     if (!enabled_) {
         return;
+    }
+    if (hadContext_) {
+        SetTaskSemanticTraceContext(previousContext_);
+    } else {
+        ClearTaskSemanticTraceContext();
     }
     if (hadPrevious_) {
         SetTaskSemanticTraceInfo(previousInfo_);

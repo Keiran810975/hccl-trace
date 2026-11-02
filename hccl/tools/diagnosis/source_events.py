@@ -12,7 +12,8 @@ from . import critical_path as critical
 from .dependency_model import stable_id
 from .clock_alignment import models_from_report
 from .workload_coordinates import position, location_fields
-from .task_classifier import classify_task, source_category, CATEGORIES, INTERNAL
+from .task_classifier import classify_task, source_category, INTERNAL
+from .source_ranking import rank_regions
 
 
 def statistics(values):
@@ -196,7 +197,7 @@ def preparation_sources(records, rows, edges, coordinates, tasks, options, *, al
     return roots
 
 
-def rank_sources(roots, rows, edges, coordinates, options):
+def rank_sources(roots, rows, edges, coordinates, options, *, tasks=()):
     events = operation_events(rows, coordinates, options)
     by_event = {(e["operation_scope"], e["node_id"]): e for e in events}
     grouped_rows, grouped_edges = defaultdict(list), defaultdict(list)
@@ -223,7 +224,7 @@ def rank_sources(roots, rows, edges, coordinates, options):
                         selection_reason=("Measured Host interval plus actual late producer-to-peer-Wait evidence; physical cause unknown"
                                           if root["status"] == "dependency_supported_candidate" else
                                           "Measured Host preparation growth only; downstream attribution remains unsupported"))
-        elif root["component"] == "execution" and root["status"] in {"dependency_supported_candidate", "isolated_slow_task"}:
+        elif root["component"] == "execution" and root["status"] in {"dependency_supported_candidate", "isolated_slow_task", "local_completion_supported_candidate"}:
             candidates[(root["operation_scope"], root["node_id"])].append(root)
     for key, group in candidates.items():
         try:
@@ -240,14 +241,10 @@ def rank_sources(roots, rows, edges, coordinates, options):
         except ValueError as error:
             for root in group:
                 root.update(impact_detail="Local critical path unavailable: " + str(error), critical_path_status="unavailable", impact_status="unavailable")
-    def priority(root):
-        gain = root.get("modeled_execution_gain_ns") or root.get("observed_wait_overlap_ns", 0)
-        return (CATEGORIES.index(root["diagnosis_category"]), not root["primary_eligible"], -root["affected_operation_count"], -root["affected_rank_count"],
-                -len(root["affected_wait_graph_ids"]), -gain, -Decimal(root["delta_ns"]), root["root_id"])
-    roots.sort(key=priority)
+    regions = rank_regions(roots, tasks)
     ranks = Counter()
     for root in roots:
         ranks[root["diagnosis_category"]] += 1
         root["category_rank"] = ranks[root["diagnosis_category"]]
     primary = next((r["root_id"] for r in roots if r["primary_eligible"]), None)
-    return events, primary
+    return events, primary, regions

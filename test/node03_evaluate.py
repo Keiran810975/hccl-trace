@@ -8,6 +8,31 @@ import sqlite3
 from hccl.tools.diagnosis.clock_alignment import raw_to_profiler
 
 
+def validate_network_window(data, case, activity):
+    window = activity.get("measurement_window", {})
+    first = window.get("first_full_iteration")
+    injection = case["injection"]
+    if (window.get("schema_version") != 1 or window.get("case_id") != case["case_id"] or type(first) is not int
+            or window.get("requested_iteration") != injection["iteration"] or first < injection["iteration"]
+            or first + injection["duration_iters"] > case["workload"]["iters"]
+            or window.get("completed_iterations") != list(range(first, first + injection["duration_iters"]))):
+        raise ValueError("complete verified network iteration coverage is missing")
+    begin, end = activity["started_raw_ns"], activity["finished_raw_ns"]
+    rank = injection["target_rank"]
+    public = data / "public"
+    calls = [json.loads(s) for s in (public / ("rank-{}.jsonl".format(rank))).read_text().splitlines() if s.strip()]
+    boundaries = [json.loads(s) for s in (public / ("boundaries-rank-{}.jsonl".format(rank))).read_text().splitlines() if s.strip()]
+    for iteration in window["completed_iterations"]:
+        selected = [c for c in calls if c.get("stage") == "measured" and c.get("iteration") == iteration]
+        done = [b for b in boundaries if b.get("stage") == "measured" and b.get("iteration") == iteration]
+        if (not selected or any(c.get("rank") != rank for c in selected) or len(done) != 1
+                or done[0].get("rank") != rank or done[0].get("device_synchronized") is not True
+                or not begin <= min(c["preparation_before"]["raw_ns"] for c in selected)
+                <= done[0]["clocks"]["raw_ns"] <= end):
+            raise ValueError("public calls and device completion do not prove full limited iterations")
+    return window
+
+
 def evaluate(root):
     case = json.loads((root / "input/case.json").read_text())
     report = json.loads((root / "report/root_causes.json").read_text())
@@ -45,6 +70,7 @@ def evaluate(root):
             if filename == "network-result.json":
                 if not all(activity.get(k) for k in ("applied_verified", "restored_verified", "foreground_path_verified")):
                     raise ValueError("real network injection or restoration is unproven")
+                validate_network_window(data, case, activity)
             elif activity.get("operations", 0) <= 0 or activity.get("max_error") != 0:
                 raise ValueError("background activity did not actually execute correctly")
             begin, end = activity["started_raw_ns"], activity["finished_raw_ns"]

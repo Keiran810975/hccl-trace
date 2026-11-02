@@ -31,6 +31,8 @@ private:
     TaskSemanticTraceInfo previousInfo_{};
     bool hadPrevious_{false};
     bool enabled_{false};
+    TaskSemanticTraceInfo previousContext_{};
+    bool hadContext_{false};
     TaskControlAnchor buildAnchor_{};
     TaskSemanticTraceInfo buildInfo_{};
     u64 buildStartNs_{0};

@@ -78,6 +78,9 @@ class SourceEventTests(unittest.TestCase):
         self.assertEqual(primary["modeled_execution_gain_ns"], 30000)
         self.assertEqual(primary["critical_path_slack_ns"], 0)
         self.assertEqual(report["diagnosis_status"], "localized_candidate")
+        self.assertEqual(report["source_ranking_version"], 2)
+        self.assertIn(primary["root_id"], report["recommended_candidate_ids"])
+        self.assertEqual(primary["source_region_rank"], 1)
 
     def test_localization_does_not_require_whole_call_slowdown(self):
         rows, edges, coords, _ = capture(execution_delay=True)
@@ -203,7 +206,7 @@ class SourceEventTests(unittest.TestCase):
             target = Path(temporary) / "report"
             rolling.export_report(report, rows, edges, target)
             saved = json.loads((target / "report.json").read_text())
-            self.assertEqual(saved["source_policy_version"], 6)
+            self.assertEqual(saved["source_policy_version"], 7)
             self.assertTrue((target / "events.csv").is_file())
             page = (target / "focus-001-current.html").read_text()
             model = json.JSONDecoder().raw_decode(page.split("const model=", 1)[1])[0]

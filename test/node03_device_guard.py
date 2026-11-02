@@ -21,6 +21,9 @@ PARENTS = {"liteserver-560t-0": Path("/home/commTeam/zjy/zjy-new-workspace"),
 PACKAGE = "/usr/local/Ascend/cann-8.5.1/opp/built-in/op_impl/aicpu/kernel/aicpu_hcomm.tar.gz"
 DEVICE_HASH = "2b30fbe89be9eaa3c962f139aee162d356e97e1ce2b0788181d649d380f9974f"
 HOST_HASH = "498c951114cff9a2d6cd5e02958a6bf1bc3a90cd661ac93d4b0ba4243430a64e"
+NODE0_BUILD_PROBES = {"semantic-coverage-20261102", "gpt2-semantic-20261102-001",
+    "gpt2-three-anomalies-20261102-101", "gpt2-three-anomalies-20261102-102",
+    "gpt2-three-anomalies-20261102-103"}
 
 
 def write(path, value):
@@ -32,7 +35,8 @@ def write(path, value):
 def scope(root, hostname=None):
     parent = PARENTS.get((hostname or socket.gethostname()).split(".")[0])
     root = root.resolve()
-    if parent is None or root.parent != parent.resolve() or not re.fullmatch(r"hccl-diagnose-node03-[0-9-]+", root.name):
+    semantic_probe = root.name in NODE0_BUILD_PROBES and (hostname or socket.gethostname()).split(".")[0] == "liteserver-560t-0"
+    if parent is None or root.parent != parent.resolve() or not (semantic_probe or re.fullmatch(r"hccl-diagnose-node03-[0-9-]+", root.name)):
         raise ValueError("only the explicitly authorized Node0/Node3 workspace is allowed")
     return root
 
@@ -56,6 +60,23 @@ class Guard:
         self.snapshot = self.directory / "snapshot.json"
         self.registry = self.root.parent / ".hccl-diagnose-device-active.json"
         self.base = "/workspace/" + self.root.name
+        self.cards = CARDS
+        self.device_hash, self.host_hash = DEVICE_HASH, HOST_HASH
+        self.host_library = "/workspace/nf-20261022/deploy/lib64/libhcomm.so"
+        self.host_libraries = {self.host_library: self.host_hash}
+        if self.root.name in NODE0_BUILD_PROBES:
+            build = json.loads((self.root / "build-receipt.json").read_text())
+            if build["status"] != "built" or any(not re.fullmatch(r"[0-9a-f]{64}", build[k]) for k in ("device_sha256", "host_sha256")):
+                raise ValueError("new producer requires a completed matching Host/Device build receipt")
+            self.cards = (5, 6, 7) if self.root.name == "semantic-coverage-20261102" else (4, 5, 6, 7)
+            self.device_hash, self.host_hash = build["device_sha256"], build["host_sha256"]
+            self.host_library = self.base + "/deploy/lib64/libhcomm.so"
+            libraries = build.get("host_libraries", {})
+            if (set(libraries) != {"libhcomm.so", "libhccl_alg.so", "libhccl_plf.so"}
+                    or any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in libraries.values())
+                    or libraries["libhcomm.so"] != self.host_hash):
+                raise ValueError("all three newly built Host libraries must be attested")
+            self.host_libraries = {self.base + "/deploy/lib64/" + name: value for name, value in libraries.items()}
 
     @contextmanager
     def lock(self):
@@ -80,13 +101,13 @@ class Guard:
             raise RuntimeError("rollback timer did not become inactive")
 
     def query(self, card):
-        if card not in CARDS:
+        if card not in self.cards:
             raise ValueError("card outside authorization")
         return policy(self.run(["npu-smi", "info", "-t", "custom-op-secverify-enable", "-i", str(card)]),
                       self.run(["npu-smi", "info", "-t", "custom-op-secverify-mode", "-i", str(card)]))
 
     def set(self, card, kind, value):
-        if card not in CARDS or kind not in {"custom-op-secverify-enable", "custom-op-secverify-mode"}:
+        if card not in self.cards or kind not in {"custom-op-secverify-enable", "custom-op-secverify-mode"}:
             raise ValueError("setting outside authorization")
         self.run(["npu-smi", "set", "-t", kind, "-i", str(card), "-d", str(value)], input_text="Y\n")
 
@@ -98,7 +119,7 @@ class Guard:
             raise ValueError("refusing to replace a host-mounted/shared CANN package")
         if not any(m["Source"] == str(self.root.parent) and m["Destination"] == "/workspace" for m in info["Mounts"]):
             raise ValueError("owned workspace mount changed")
-        if not {"/dev/davinci" + str(d) for d in range(8, 16)} <= {d["PathOnHost"] for d in info["HostConfig"]["Devices"]}:
+        if not {"/dev/davinci" + str(d) for c in self.cards for d in (2*c, 2*c+1)} <= {d["PathOnHost"] for d in info["HostConfig"]["Devices"]}:
             raise ValueError("complete authorized cards are not mapped")
         return info["Id"]
 
@@ -110,7 +131,7 @@ class Guard:
 
     def idle(self):
         from run_tool_smoke import available
-        if not available(self.run(["npu-smi", "info"]), list(CARDS)):
+        if not available(self.run(["npu-smi", "info"]), list(self.cards)):
             raise ValueError("both chips of every authorized card must be idle")
 
     def timer(self, unit, seconds, rehearsal=False):
@@ -125,7 +146,7 @@ class Guard:
         self.container(state["container_id"])
         if self.sha(PACKAGE) != state["official_sha256"]:
             raise RuntimeError("official package hash differs from saved original")
-        actual = {str(c): self.query(c) for c in CARDS}
+        actual = {str(c): self.query(c) for c in self.cards}
         if actual != state["original"]:
             raise RuntimeError("card policies differ from saved originals")
         return actual
@@ -142,14 +163,14 @@ class Guard:
             time.sleep(30)
             self.idle()
             custom = self.base + "/input/aicpu_hcomm.tar.gz"
-            if self.sha(custom) != DEVICE_HASH or self.sha("/workspace/nf-20261022/deploy/lib64/libhcomm.so") != HOST_HASH:
+            if self.sha(custom) != self.device_hash or any(self.sha(path) != value for path, value in self.host_libraries.items()):
                 raise ValueError("the previously validated Host/Device pair is required")
             resolved = self.docker("readlink", "-f", PACKAGE).strip()
             if resolved != PACKAGE:
                 raise ValueError("unexpected package symlink")
-            original = {str(c): self.query(c) for c in CARDS}
+            original = {str(c): self.query(c) for c in self.cards}
             official = self.sha(PACKAGE)
-            if official == DEVICE_HASH:
+            if official == self.device_hash:
                 raise ValueError("custom package is already installed without this lease")
             backup = self.base + "/security/official-device.tar.gz"
             self.docker("cp", "-p", PACKAGE, backup)
@@ -158,8 +179,8 @@ class Guard:
             shutil.copy2(Path(__file__), self.directory / "guard.py")
             # Keep the independent restorer self-contained, including its idle-check import at prepare only.
             state = dict(schema_version=1, phase="prepared", root=str(self.root), container_id=identity,
-                         cards=list(CARDS), original=original, official_sha256=official,
-                         custom_sha256=DEVICE_HASH, custom_container=custom, backup_container=backup,
+                         cards=list(self.cards), original=original, official_sha256=official,
+                         custom_sha256=self.device_hash, custom_container=custom, backup_container=backup,
                          unit="hccl-device-" + self.root.name.removeprefix("hccl-diagnose-"),
                          restore_after_seconds=seconds, created_unix_ns=time.time_ns(), explicit_user_authorization=True)
             write(self.snapshot, state)
@@ -189,13 +210,13 @@ class Guard:
             self.idle()
             state["phase"] = "applying"
             write(self.snapshot, state)
-            for card in CARDS:
+            for card in self.cards:
                 self.set(card, "custom-op-secverify-enable", 1)
                 self.set(card, "custom-op-secverify-mode", 0)
                 if self.query(card) != dict(enable=True, mode=0):
                     raise RuntimeError("temporary policy did not read back")
             self.docker("cp", "-p", state["custom_container"], PACKAGE)
-            if self.sha(PACKAGE) != DEVICE_HASH:
+            if self.sha(PACKAGE) != self.device_hash:
                 raise RuntimeError("custom package did not read back")
             state.update(phase="active", activated_unix_ns=time.time_ns())
             write(self.snapshot, state)
@@ -211,19 +232,19 @@ class Guard:
     def restore(self):
         with self.lock():
             state = json.loads(self.snapshot.read_text())
-            if state["cards"] != list(CARDS) or state["root"] != str(self.root):
+            if state["cards"] != list(self.cards) or state["root"] != str(self.root) or state["custom_sha256"] != self.device_hash:
                 raise ValueError("snapshot scope mismatch")
             errors = []
             try:
                 self.container(state["container_id"])
-                if self.sha(PACKAGE) not in {state["official_sha256"], DEVICE_HASH}:
+                if self.sha(PACKAGE) not in {state["official_sha256"], self.device_hash}:
                     raise RuntimeError("unexpected concurrent package change")
                 self.docker("cp", "-p", state["backup_container"], PACKAGE)
                 if self.sha(PACKAGE) != state["official_sha256"]:
                     raise RuntimeError("official package restoration failed")
             except Exception as error:
                 errors.append(str(error))
-            for card in CARDS:
+            for card in self.cards:
                 try:
                     original, current = state["original"][str(card)], self.query(card)
                     if not own_transition(current, original):

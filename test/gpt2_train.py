@@ -118,7 +118,17 @@ def main():
     torch_npu.npu.manual_seed_all(case["workload_seed"])
     torch.set_num_threads(1)
     output = args.output
-    if store is None:
+    if case.get('experiment_contract', {}).get('profile') == 'gpt-three-anomalies-v1':
+        if store is not None:
+            raise ValueError('the bounded three-anomaly experiment is single-node only')
+        from test.gpt_three_anomaly_control import GptThreeAnomalyControl
+        control = GptThreeAnomalyControl(args.case, output / 'private', rank, devices, args.communication_worker)
+    elif inj.get('finite_copy_burst'):
+        if store is not None:
+            raise ValueError('finite GPT Copy probe is single-node only')
+        from test.short_copy_burst import GptCopyBurstControl
+        control = GptCopyBurstControl(case, output / 'private', rank, devices)
+    elif store is None:
         control = SingleControl(args.case, output / "private", rank, devices, args.communication_worker, "grouped")
     else:
         if __package__:
@@ -166,13 +176,16 @@ def main():
             state["buckets"][index] = (signature, count)
             if (control.owner and step == inj.get("iteration") and index == state["target_bucket"]):
                 control.record("selected_bucket", iteration=step, bucket=index, signature=signature, count=count)
-                control.start(index)
+                if not getattr(control, "communication_scoped", False):
+                    control.start(index)
             recorder.preparation = dict(location=(step, 0, index, count), clocks=state["prepare"])
             recorder.begin(step, 0, index, count)
             recorder.current["bucket_signature"] = signature
             recorder.current["input_buffer_ptr"] = bucket.buffer().data_ptr()
             future = default_hooks.allreduce_hook(dist.group.WORLD, bucket)
             recorder.end()
+            if (getattr(control, "communication_scoped", False) and index == state["target_bucket"]):
+                control.after_collective(recorder.current)
             state["prepare"] = clocks()
             return future
 
@@ -196,7 +209,9 @@ def main():
                 state["stable"] = stable
                 if inj["kind"] != "normal":
                     state["target_bucket"] = random.Random(inj["bucket_selector_seed"]).choice(sorted(stable))
-            if control.owner and inj["kind"] not in {"normal", "progress_delay"} and step == inj["iteration"] + inj["duration_iters"]:
+            if store is not None:
+                control.before_iteration(step, iters)
+            if control.owner and inj["kind"] not in {"normal", "progress_delay", "bandwidth_limit"} and step == inj["iteration"] + inj["duration_iters"]:
                 control.stop()
             offsets = [rng.randrange(len(data) - settings["seq_length"]) for _ in range(settings["batch_per_rank"])]
             batch = torch.stack([data[i:i + settings["seq_length"]] for i in offsets]).to("npu:{}".format(device))
@@ -222,6 +237,8 @@ def main():
                 losses.append(loss_value)
             print(json.dumps(dict(rank=rank, stage="warmup" if step < 0 else "measured", iteration=step,
                                   duration_ms=elapsed / 1e6, loss=loss_value, buckets=len(state["buckets"]))), flush=True)
+            if store is not None or getattr(control, 'finite_copy_burst', False) or getattr(control, 'bounded_interference', False):
+                control.after_iteration(step)
         state["step"] = None
         control.finish()
         sampled = [p.detach().flatten()[:4].float().cpu().tolist() for p in model.parameters()]

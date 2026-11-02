@@ -113,6 +113,10 @@ def publish_final_report(directory, output, normalized, roots, comparisons):
     for root in report["candidates"]:
         anchor = root["anchor_graph_id"]
         paths.setdefault(anchor, [])
+        if root.get("completion_path"):
+            paths[anchor].extend(root["completion_path"]["edge_ids"])
+            for key in root["completion_path"]["node_ids"]:
+                node_roles.setdefault(key, "chain")
         for chain in root["chains"]:
             paths[anchor].extend(chain["edge_ids"])
             for key in chain["node_ids"]:

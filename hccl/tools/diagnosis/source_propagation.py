@@ -37,6 +37,10 @@ SOURCE_FIELDS = ("root_id", "component", "node_id", "user_rank", "device_id", "s
                  "other_backtrace_branches_truncated")
 SOURCE_FIELDS += ("group_id", "call_site", "occurrence", "reference_value_ns", "reference_metric", "baseline_median_ns")
 SOURCE_FIELDS += ("diagnosis_category", "task_domain", "category_rank", "cross_operation")
+SOURCE_FIELDS += ("local_completion_evidence", "dependency_timing", "communication_context")
+SOURCE_FIELDS += ("event_slow",)
+SOURCE_FIELDS += ("source_region_id", "source_region_rank", "source_region_budget_ns", "ranking_execution_budget_ns",
+                  "ranking_metric", "supported_wait_max_excess_ns", "supported_wait_excess_beyond_source_growth_ns")
 LIMITS = [
     "Paths start at reported candidates, not at independently inferred physical faults.",
     "Only existing reported evidence paths are expanded; downstream descendants are not exhaustively searched.",
@@ -140,9 +144,19 @@ def build_report(rows, edges, candidates, comparisons=(), *, primary_source_cand
                         chain["boundaries"].append(dict(reason=reason, edge_id=identifier))
                         break
                     src, dst = fact(edge["src"]), fact(edge["dst"])
+                    timing = root.get("dependency_timing", {}).get(identifier)
+                    valid_timing = (timing and timing.get("wait_graph_id") == dst["graph_id"]
+                                    and timing.get("producer_graph_id") == src["graph_id"]
+                                    and timing.get("timing_domain") == "same_node_monotonic_raw"
+                                    and src["node_id"] == dst["node_id"]
+                                    and timing.get("producer_profiler_interval_ns") == [src["start_ns"], src["stop_ns"]]
+                                    and timing.get("wait_profiler_interval_ns") == [dst["start_ns"], dst["stop_ns"]]
+                                    and "ffts" not in edge["kind"]
+                                    and src["subtask_id"] < 0 and dst["subtask_id"] < 0)
                     chain["hops"].append(dict(edge_id=identifier, src=edge["src"], dst=edge["dst"],
                         kind=edge["kind"], confidence=edge["confidence"], reason=edge.get("reason", ""),
-                        timing_status=timing_check(edge, src, dst)))
+                        timing_status=timing["timing_status"] if valid_timing else timing_check(edge, src, dst),
+                        calibrated_release_evidence=timing if valid_timing else None))
                     chain["edge_ids"].append(identifier)
                     cursor = edge["dst"]
                     seen.add(cursor)
@@ -159,6 +173,21 @@ def build_report(rows, edges, candidates, comparisons=(), *, primary_source_cand
                                "complete_with_timing_limits" if chain["timing_warnings"] else "complete_observed_path")
             item["chains"].append(chain)
         item["chains"].sort(key=lambda c:(len(c["edge_ids"]), c["target_wait_graph_id"]))
+        completion = root.get("local_completion_evidence")
+        if completion:
+            cursor, identifiers = anchor, [anchor]
+            for identifier in completion["edge_ids"]:
+                edge = links[identifier]
+                if edge["src"] != cursor or edge["confidence"] not in {"observed", "exact"}:
+                    raise ValueError("local completion proof is disconnected or unsupported")
+                cursor = edge["dst"]
+                identifiers.append(cursor)
+            if cursor != completion["terminal_graph_id"]:
+                raise ValueError("local completion proof ends at the wrong task")
+            for identifier in identifiers:
+                fact(identifier)
+            item["completion_path"] = dict(node_ids=identifiers, edge_ids=completion["edge_ids"],
+                                           path_complete=True, slow_wait_propagation_claimed=False)
         exported.append(item)
     chains = [c for root in exported for c in root["chains"]]
     return dict(schema_version=2, kind="source_first_dependency_evidence", primary_source_candidate_id=primary_source_candidate_id,

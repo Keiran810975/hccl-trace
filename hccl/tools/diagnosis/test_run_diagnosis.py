@@ -71,6 +71,10 @@ class FullDiagnosisTests(unittest.TestCase):
             resumed, ready = resume_replay_analysis(original, root / "resumed", iteration_map=mapping)
             self.assertTrue(ready)
             self.assertEqual((resumed / "dep_graph_nodes.csv").read_bytes(), (original / "dep_graph_nodes.csv").read_bytes())
+            self.assertNotEqual((resumed / "dep_graph_nodes.csv").stat().st_ino,
+                                (original / "dep_graph_nodes.csv").stat().st_ino)
+            self.assertNotEqual((resumed / "inputs.json").stat().st_ino,
+                                (original / "inputs.json").stat().st_ino)
             self.assertTrue((resumed / "resumed-from.json").is_file())
             again, ready = resume_replay_analysis(resumed, root / "resumed-again", iteration_map=mapping)
             self.assertTrue(ready)

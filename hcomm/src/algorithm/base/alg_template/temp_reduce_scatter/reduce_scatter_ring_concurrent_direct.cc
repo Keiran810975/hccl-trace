@@ -201,6 +201,8 @@ HcclResult ReduceScatterRingConcurrentDirect::SetSlices(const u32 rank, const u3
 
 HcclResult ReduceScatterRingConcurrentDirect::RunInitStep(const u32 rank, const u32 rankSize)
 {
+    TaskSemanticScope location(MakeTaskSemanticTraceInfo("reduce_scatter_init", 0, userRank_,
+        rankSize, 0, nullptr, nullptr, INVALID_VALUE_RANKID, "single_ring_direct", rank));
     // 例如rank[0,1,2,3]中，rank0的rxSliceIdx = 2，txSliceIdx = 3
     u32 initSlice0Idx = 0;
     u32 initSlice1Idx = 0;
@@ -269,9 +271,15 @@ HcclResult ReduceScatterRingConcurrentDirect::RunInitStep(const u32 rank, const 
 
 HcclResult ReduceScatterRingConcurrentDirect::PreSync()
 {
-    CHK_RET(LocalNotify::Wait(stream_, dispatcher_, mainSignals_[0], profilerInput_.stage));
+    {
+        TaskSemanticRoleScope role("local_main_wait_sub", "local_copy_ready", INVALID_UINT, true);
+        CHK_RET(LocalNotify::Wait(stream_, dispatcher_, mainSignals_[0], profilerInput_.stage));
+    }
     CHK_RET(AlgTemplateBase::ExecEmptyTask(inputMem_, outputMem_, stream_, dispatcher_));
-    CHK_RET(LocalNotify::Post(stream_, dispatcher_, subSignals_[0], profilerInput_.stage));
+    {
+        TaskSemanticRoleScope role("local_main_record_sub", "local_copy_release", INVALID_UINT, true);
+        CHK_RET(LocalNotify::Post(stream_, dispatcher_, subSignals_[0], profilerInput_.stage));
+    }
     return HCCL_SUCCESS;
 }
 
@@ -485,15 +493,29 @@ HcclResult ReduceScatterRingConcurrentDirect::RunMainStream(const u32 step, std:
 HcclResult ReduceScatterRingConcurrentDirect::RunSubStream(const u32 step, std::vector<Slice> subSliceVector,
     std::vector<Slice> cclSliceVector, const u32 rank, const u32 rankSize)
 {
+    TaskSemanticScope location(MakeTaskSemanticTraceInfo("reduce_scatter_direct", step, userRank_,
+        rankSize, 0, nullptr, nullptr, INVALID_VALUE_RANKID, "single_ring_direct", rank));
     if (!isSdma_) {
-        CHK_RET(LocalNotify::Post(subStreams_[0], dispatcher_, mainSignals_[0], profilerInput_.stage));
-        CHK_RET(LocalNotify::Wait(subStreams_[0], dispatcher_, subSignals_[0], profilerInput_.stage));
+        {
+            TaskSemanticRoleScope role("local_sub_record_main", "local_copy_ready", 0, true);
+            CHK_RET(LocalNotify::Post(subStreams_[0], dispatcher_, mainSignals_[0], profilerInput_.stage));
+        }
+        {
+            TaskSemanticRoleScope role("local_sub_wait_main", "local_copy_release", 0, true);
+            CHK_RET(LocalNotify::Wait(subStreams_[0], dispatcher_, subSignals_[0], profilerInput_.stage));
+        }
     }
     bool traceSubCopy = true;
     for (u32 sliceIdx = 0; sliceIdx < subSliceVector.size(); sliceIdx++) {
         if (isSdma_) {
-            CHK_RET(LocalNotify::Post(subStreams_[0], dispatcher_, mainSignals_[0], profilerInput_.stage));
-            CHK_RET(LocalNotify::Wait(subStreams_[0], dispatcher_, subSignals_[0], profilerInput_.stage));
+            {
+                TaskSemanticRoleScope role("local_sub_record_main", "local_copy_ready", sliceIdx, true);
+                CHK_RET(LocalNotify::Post(subStreams_[0], dispatcher_, mainSignals_[0], profilerInput_.stage));
+            }
+            {
+                TaskSemanticRoleScope role("local_sub_wait_main", "local_copy_release", sliceIdx, true);
+                CHK_RET(LocalNotify::Wait(subStreams_[0], dispatcher_, subSignals_[0], profilerInput_.stage));
+            }
         }
         HCCL_DEBUG("Memcpy operation: step[%u] stream[sub], src rank[%u] starts to send offset[%llu], size[%llu] "
             "from userMemIn_", step, userRank_, subSliceVector[sliceIdx].offset, subSliceVector[sliceIdx].size);
@@ -538,6 +560,8 @@ HcclResult ReduceScatterRingConcurrentDirect::RunSubStream(const u32 step, std::
 
 HcclResult ReduceScatterRingConcurrentDirect::RunReduceScatter(const u32 rank, const u32 rankSize)
 {
+    TaskSemanticScope location(MakeTaskSemanticTraceInfo("reduce_scatter_control", 0, userRank_,
+        rankSize, 0, nullptr, nullptr, INVALID_VALUE_RANKID, "single_ring_direct", rank));
     HCCL_INFO("ReduceScatterRingConcurrentDirect starts, the input param rank[%u]", rank);
     // 空拷贝用于后续操作附着
     CHK_RET(AlgTemplateBase::ExecEmptyTask(inputMem_, outputMem_, stream_, dispatcher_));
@@ -595,6 +619,7 @@ HcclResult ReduceScatterRingConcurrentDirect::RunReduceScatter(const u32 rank, c
 HcclResult ReduceScatterRingConcurrentDirect::MainRecordSub()
 {
     for (u32 signalIndex = 0; signalIndex < subSignals_.size(); signalIndex++) {
+        TaskSemanticRoleScope role("local_main_record_sub_begin", "local_stream_begin", signalIndex, true);
         CHK_RET(LocalNotify::Post(stream_, dispatcher_, subSignals_[signalIndex],
             profilerInput_.stage));
     }
@@ -604,6 +629,7 @@ HcclResult ReduceScatterRingConcurrentDirect::MainRecordSub()
 HcclResult ReduceScatterRingConcurrentDirect::SubWaitMain()
 {
     for (u32 streamIndex = 0; streamIndex < subSignals_.size(); streamIndex++) {
+        TaskSemanticRoleScope role("local_sub_wait_main_begin", "local_stream_begin", streamIndex, true);
         CHK_RET(LocalNotify::Wait(subStreams_[streamIndex], dispatcher_, subSignals_[streamIndex],
             profilerInput_.stage));
     }
@@ -613,6 +639,7 @@ HcclResult ReduceScatterRingConcurrentDirect::SubWaitMain()
 HcclResult ReduceScatterRingConcurrentDirect::MainWaitSub()
 {
     for (u32 signalIndex = 0; signalIndex < mainSignals_.size(); signalIndex++) {
+        TaskSemanticRoleScope role("local_main_wait_sub_end", "local_stream_end", signalIndex, true);
         CHK_RET(LocalNotify::Wait(stream_, dispatcher_, mainSignals_[signalIndex], profilerInput_.stage));
     }
     return HCCL_SUCCESS;
@@ -621,6 +648,7 @@ HcclResult ReduceScatterRingConcurrentDirect::MainWaitSub()
 HcclResult ReduceScatterRingConcurrentDirect::SubRecordMain()
 {
     for (u32 streamIndex = 0; streamIndex < mainSignals_.size(); streamIndex++) {
+        TaskSemanticRoleScope role("local_sub_record_main_end", "local_stream_end", streamIndex, true);
         CHK_RET(LocalNotify::Post(subStreams_[streamIndex], dispatcher_, mainSignals_[streamIndex],
             profilerInput_.stage));
     }

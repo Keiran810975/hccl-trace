@@ -73,12 +73,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--algorithm", choices=("default", "ring"), default="default")
-    parser.add_argument("--size-mib", type=int, choices=(2, 32), default=2)
+    parser.add_argument("--size-mib", type=int, choices=(2, 32, 128), default=2)
     parser.add_argument("--official-reference", action="store_true", help="numerics only: official libraries, no profiling or context holders")
     parser.add_argument("--op-expansion-mode", choices=("HOST", "AI_CPU"), default="HOST")
     parser.add_argument("--gpt", action="store_true", help="actual GPT-2 short training, 10 warmup + 7 measured")
     parser.add_argument("--protected-package", action="store_true", help="metadata: launched by the authorized Host/Device wrapper")
     parser.add_argument("--formal-case", type=Path, help="frozen input/case.json: one real 10+50 experiment")
+    parser.add_argument("--communication-calibration", action="store_true", help="explicit frozen communication-only exploratory plan")
+    parser.add_argument("--short-copy-burst", action="store_true", help="one 64MiB copy overlapping a measured 128MiB AllReduce; retain all inputs")
+    parser.add_argument("--copy-burst-phase", choices=("submit", "payload"), default="submit")
     args = parser.parse_args()
     root = args.root.resolve()
     if (root.parent != LOCAL_PARENT or not root.name.startswith("hccl-diagnose-node03-")
@@ -87,12 +90,25 @@ def main():
     lock = (root / "preflight.lock").open("x")
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     base = "/workspace/" + root.name
+    if args.short_copy_burst:
+        if args.gpt or args.formal_case or args.communication_calibration or args.official_reference or args.size_mib != 128:
+            raise ValueError("short-copy profile cannot be combined with another experiment")
+        write(root / "retain-all-evidence.json", dict(retain_all_evidence=True, automatic_cleanup_forbidden=True))
+    elif args.size_mib == 128:
+        raise ValueError("128MiB is reserved for the explicit short-copy profile")
+    elif args.copy_burst_phase != "submit":
+        raise ValueError("copy placement applies only to the short-copy profile")
+    if args.communication_calibration and not args.formal_case:
+        raise ValueError("communication calibration requires an explicit frozen formal case")
     if args.formal_case:
         if not args.gpt or args.formal_case.resolve() != root / "input/case.json":
             raise ValueError("formal GPT case must be the frozen owned input/case.json")
         from node03_gpt2_suite import build_plan
         formal_case = json.loads(args.formal_case.read_text())
-        if formal_case not in build_plan()["cases"]:
+        if args.communication_calibration:
+            from communication_calibration import validate_case
+            validate_case(formal_case)
+        elif formal_case not in build_plan()["cases"]:
             raise ValueError("formal case differs from the requested frozen six-case plan")
     state = dict(status="prechecking", job_name="hccl-diagnose", devices=DEVICES, physical_cards=[4, 5, 6, 7],
                  physical_chips=[9, 11, 13, 15], nodes=["node0", "node3"], started_unix_ns=time.time_ns(),
@@ -102,7 +118,9 @@ def main():
     state_path = root / "preflight-state.json"
     (root / "logs").mkdir()
     processes, holders, logs, clock_server, network_process = [], [], [], None, None
-    measured = 50 if args.formal_case else 7
+    measured = 20 if args.short_copy_burst else 50 if args.formal_case else 7
+    warmup = 10 if args.short_copy_burst else 1
+    expected_results = warmup + measured
     case_name = "case.json" if args.formal_case else "normal.json"
     try:
         state["containers"] = [own_container(n) for n in (0, 1)]
@@ -142,6 +160,7 @@ def main():
         run_id = root.name + "-preflight"
         if args.gpt:
             run_id = json.loads((root / "input" / case_name).read_text())["case_id"]
+        if args.gpt or args.short_copy_burst:
             from multinode_clock_probe import ProbeServer, raw_ns
             clock_server = ProbeServer("192.169.0.173", 29776, run_id, "node0", ["node3"])
             clock_server.__enter__()
@@ -168,8 +187,10 @@ def main():
             capture = base + "/capture/nodes/" + label
             app = [PYTHON, "-m", "torch.distributed.run", "--nnodes=2", "--nproc-per-node=4", "--node-rank=" + str(node),
                    "--master-addr=192.169.0.173", "--master-port=29773", "--max-restarts=0",
-                   base + "/src/examples/diagnosis_collectives.py", "--devices", DEVICES, "--warmup", "1", "--iterations", "7",
+                   base + "/src/examples/diagnosis_collectives.py", "--devices", DEVICES, "--warmup", str(warmup), "--iterations", str(measured),
                    "--size-mib", str(args.size_mib), "--numerics-dir", base + "/numerics"]
+            if args.short_copy_burst:
+                app += ["--short-copy-burst", "--copy-burst-phase", args.copy_burst_phase]
             if args.gpt:
                 output = base + "/gpt-output"
                 execute(container_command(base, node, shlex.join([PYTHON, "-c", "from pathlib import Path;Path(" + repr(output + "/workload_results") + ").mkdir(parents=True)"])))
@@ -195,7 +216,7 @@ def main():
                 raise RuntimeError("a reference workload or profiler failed; check capture log")
         state["status"] = "captured"
         write(state_path, state)
-        if args.gpt:
+        if args.gpt or args.short_copy_burst:
             clock_probe("after")
             if not clock_server.wait_for_after(5):
                 raise RuntimeError("clock peer did not acknowledge completion")
@@ -214,7 +235,7 @@ def main():
             check = ("import json,pathlib; p=pathlib.Path(" + repr(base + "/numerics") + ");"
                      "a=[json.loads(f.read_text()) for f in p.glob('rank-*.json')];"
                      "assert {r['user_rank'] for r in a}==set(" + repr(expected) + "), 'workload did not complete; msprof exit zero is not a numeric pass';"
-                     "assert all(r['status']=='passed' and len(r['results'])==8 for r in a)")
+                     "assert all(r['status']=='passed' and len(r['results'])==" + str(expected_results) + " for r in a)")
             if args.gpt:
                 check = ("import json,pathlib;p=pathlib.Path(" + repr(base + "/gpt-output/workload_results") + ");"
                          "a=[json.loads(f.read_text()) for f in p.glob('rank-*.json')];"
@@ -248,7 +269,7 @@ def main():
                    "shutil.copytree(r/'peer-preflight/capture/nodes/node3',r/'capture/nodes/node3');"
                    "a=[json.loads(p.read_text()) for d in (r/'numerics',r/'peer-preflight/numerics') for p in d.glob('rank-*.json')];"
                    "assert {x['user_rank'] for x in a}==set(range(8)) and len(a)==8;"
-                   "assert all(x['status']=='passed' and len(x['results'])==8 for x in a)")
+                   "assert all(x['status']=='passed' and len(x['results'])==" + str(expected_results) + " for x in a)")
         if args.gpt:
             program = ("import json,pathlib,shutil;r=pathlib.Path(" + repr(base) + ");"
                        "shutil.copytree(r/'peer-preflight/capture/nodes/node3',r/'capture/nodes/node3');"
@@ -260,9 +281,9 @@ def main():
         write(state_path, state)
         report = "/report" if args.formal_case else "/preflight-report"
         cmd = [PYTHON, "-m", "hccl.tools.diagnosis.cli", "analyze", "--capture", base + "/capture", "--mode", "rolling", "--output", base + report]
-        if not args.formal_case:
+        if not args.formal_case or args.communication_calibration:
             cmd.append("--keep-debug")
-        if args.gpt:
+        if args.gpt or args.short_copy_burst:
             cmd.append("--allow-uncalibrated-clock")
         log = (root / "logs/diagnosis.log").open("x")
         logs.append(log)
@@ -274,6 +295,16 @@ def main():
     finally:
         if clock_server is not None:
             clock_server.__exit__(None, None, None)
+        if state["status"] != "passed" and processes:
+            # Bound failure cleanup before the outer wrapper restores Device packages.
+            # Match exact per-attempt script paths, not process names or all container PIDs.
+            for node in (0, 1):
+                try:
+                    command = [PYTHON, base + "/src/test/stop_owned_capture.py", "--base", base]
+                    receipt = execute(container_command(base, node, shlex.join(command), 60), timeout=75)
+                    write(root / "logs" / ("capture-stop-node{}.json".format(3 if node else 0)), json.loads(receipt))
+                except Exception as error:
+                    state.setdefault("cleanup_errors", []).append("own capture stop: " + str(error))
         if network_process is not None and network_process.poll() is None:
             try:
                 execute(container_command(base, 0, shlex.join([PYTHON, "-c", "from pathlib import Path;p=Path(" + repr(base + "/gpt-output/private") + ");p.mkdir(parents=True,exist_ok=True);(p/'abort').touch()"])))

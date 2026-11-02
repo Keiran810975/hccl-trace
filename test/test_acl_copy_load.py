@@ -55,6 +55,13 @@ class AclCopyTests(unittest.TestCase):
         self.assertEqual(library.aclrtFree.call_count, 2)
         library.aclFinalize.assert_called_once()
 
+    def test_shared_runtime_is_not_initialized_or_finalized(self):
+        library, _, _ = self.library()
+        copies = AclCopies(1, 1, library, initialize_runtime=False)
+        copies.close()
+        library.aclInit.assert_not_called()
+        library.aclFinalize.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

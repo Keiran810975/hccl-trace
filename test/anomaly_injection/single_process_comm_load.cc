@@ -62,7 +62,7 @@ int main(int argc, char **argv)
     if (argc == 6 && !deferFinalize) return 2;
     int32_t devices[2] = {std::stoi(argv[1]), std::stoi(argv[2])};
     uint64_t mib = std::stoull(argv[3]);
-    if (devices[0] < 0 || devices[1] < 0 || devices[0] == devices[1] || mib < 32 || mib > 256) return 2;
+    if (devices[0] < 0 || devices[1] < 0 || devices[0] == devices[1] || mib < 32 || mib > 1024) return 2;
     std::string directory(argv[4]);
     HcclComm comms[2] = {nullptr, nullptr};
     Rendezvous gate;

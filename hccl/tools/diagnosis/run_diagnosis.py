@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 
 if __package__ in (None, ""):
@@ -48,6 +49,9 @@ def attach_rolling_sources(diagnosis, rolling_report):
                    and (rolling_report.get("source_policy_version", 1) < 3 or r.get("primary_eligible", False))]
     diagnosis["reference_mode"] = rolling_report["reference_mode"]
     diagnosis["source_policy_version"] = rolling_report.get("source_policy_version", 1)
+    for field in ("source_ranking_version", "source_regions", "recommended_candidate_ids"):
+        if field in rolling_report:
+            diagnosis[field] = rolling_report[field]
     diagnosis["diagnosis_status"] = rolling_report.get("diagnosis_status", "legacy_candidates")
     diagnosis["primary_source_candidate_id"] = rolling_report.get("primary_source_candidate_id")
     diagnosis["slow_event_count"] = rolling_report.get("slow_event_count", 0)
@@ -287,7 +291,9 @@ def resume_replay_analysis(source, output, *, iteration_map, preparation_map=Non
             (output / relative).mkdir(exist_ok=True)
         else:
             (output / relative).parent.mkdir(parents=True, exist_ok=True)
-            os.link(path, output / relative)
+            # Consumers rewrite metadata (including clock calibration) in place.
+            # A private copy keeps a new diagnosis from changing retained evidence.
+            shutil.copy2(path, output / relative)
     (output / "resumed-from.json").write_text(json.dumps(dict(source=str(source),
         workload_rerun=False, replay_revalidated=True), indent=2) + "\n")
     return _analyze_replayed(output, True, iteration_map=iteration_map, preparation_map=preparation_map,

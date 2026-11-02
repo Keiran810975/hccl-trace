@@ -175,6 +175,8 @@ HcclResult AllGatherRingConcurrentDirect::SetSlices(const u32 rank, const u32 ra
 
 HcclResult AllGatherRingConcurrentDirect::RunInitStep(const u32 rank, const u32 rankSize)
 {
+    TaskSemanticScope location(MakeTaskSemanticTraceInfo("allgather_init", 0, userRank_,
+        rankSize, 0, nullptr, nullptr, INVALID_VALUE_RANKID, "single_ring_direct", rank));
     // 第一步搬到userMemIn_的offset, 不同的ring环offset不一样
     auto firstStepOffset = slices_[ringsOrder_[0]].offset;
     // 第-1步，片内将部分数据从userIn搬到cclIn
@@ -217,6 +219,8 @@ HcclResult AllGatherRingConcurrentDirect::RunInitStep(const u32 rank, const u32 
 
 HcclResult AllGatherRingConcurrentDirect::RunAllGather(const u32 rank, const u32 rankSize)
 {
+    TaskSemanticScope location(MakeTaskSemanticTraceInfo("allgather_control", 0, userRank_,
+        rankSize, 0, nullptr, nullptr, INVALID_VALUE_RANKID, "single_ring_direct", rank));
     HCCL_INFO("AllGatherRingConcurrentDirect starts, the input param rank[%u]", rank);
     // 空拷贝用于后续操作附着
     CHK_RET(AlgTemplateBase::ExecEmptyTask(inputMem_, outputMem_, stream_, dispatcher_));
@@ -235,6 +239,8 @@ HcclResult AllGatherRingConcurrentDirect::RunAllGather(const u32 rank, const u32
     std::vector<DeviceMem> finalSrc;
     std::vector<DeviceMem> finalDst;
     for (u32 step = 0; step < rankSize - 1; step++) {
+        TaskSemanticScope stepLocation(MakeTaskSemanticTraceInfo("allgather_direct", step, userRank_,
+            rankSize, 0, nullptr, nullptr, INVALID_VALUE_RANKID, "single_ring_direct", rank));
         std::vector<Slice> rxSliceVector;
         std::vector<Slice> mainSliceVector;
         std::vector<Slice> txSliceVector;
@@ -251,14 +257,26 @@ HcclResult AllGatherRingConcurrentDirect::RunAllGather(const u32 rank, const u32
         }
         // 从流
         if (!isSdma_) {
-            CHK_RET(LocalNotify::Post(subStreams_[0], dispatcher_, mainSignals_[0], profilerInput_.stage));
-            CHK_RET(LocalNotify::Wait(subStreams_[0], dispatcher_, subSignals_[0], profilerInput_.stage));
+            {
+                TaskSemanticRoleScope role("local_sub_record_main", "local_copy_ready", 0, true);
+                CHK_RET(LocalNotify::Post(subStreams_[0], dispatcher_, mainSignals_[0], profilerInput_.stage));
+            }
+            {
+                TaskSemanticRoleScope role("local_sub_wait_main", "local_copy_release", 0, true);
+                CHK_RET(LocalNotify::Wait(subStreams_[0], dispatcher_, subSignals_[0], profilerInput_.stage));
+            }
         }
         bool traceSubCopy = true;
         for (u32 sliceIdx = 0; sliceIdx < sliceSize; sliceIdx++) {
             if (isSdma_) {
-                CHK_RET(LocalNotify::Post(subStreams_[0], dispatcher_, mainSignals_[0], profilerInput_.stage));
-                CHK_RET(LocalNotify::Wait(subStreams_[0], dispatcher_, subSignals_[0], profilerInput_.stage));
+                {
+                    TaskSemanticRoleScope role("local_sub_record_main", "local_copy_ready", sliceIdx, true);
+                    CHK_RET(LocalNotify::Post(subStreams_[0], dispatcher_, mainSignals_[0], profilerInput_.stage));
+                }
+                {
+                    TaskSemanticRoleScope role("local_sub_wait_main", "local_copy_release", sliceIdx, true);
+                    CHK_RET(LocalNotify::Wait(subStreams_[0], dispatcher_, subSignals_[0], profilerInput_.stage));
+                }
             }
             DeviceMem src = outputMem_.range(txSliceVector[sliceIdx].offset, txSliceVector[sliceIdx].size);
             DeviceMem dst = DeviceMem::create(static_cast<u8 *>(opInfo_->outputAddr) + subSliceVector[sliceIdx].offset,
@@ -331,9 +349,15 @@ HcclResult AllGatherRingConcurrentDirect::RunAllGather(const u32 rank, const u32
             CHK_RET(rightLink_->TxAsync(txMems, stream_));
         }
         if (!isSdma_) {
-            CHK_RET(LocalNotify::Wait(stream_, dispatcher_, mainSignals_[0], profilerInput_.stage));
+            {
+                TaskSemanticRoleScope role("local_main_wait_sub", "local_copy_ready", 0, true);
+                CHK_RET(LocalNotify::Wait(stream_, dispatcher_, mainSignals_[0], profilerInput_.stage));
+            }
             CHK_RET(AlgTemplateBase::ExecEmptyTask(inputMem_, outputMem_, stream_, dispatcher_));
-            CHK_RET(LocalNotify::Post(stream_, dispatcher_, subSignals_[0], profilerInput_.stage));
+            {
+                TaskSemanticRoleScope role("local_main_record_sub", "local_copy_release", 0, true);
+                CHK_RET(LocalNotify::Post(stream_, dispatcher_, subSignals_[0], profilerInput_.stage));
+            }
             TaskSemanticScope semanticScope(rxTraceInfo);
             TaskSemanticEventScope eventScope("rx_payload_copy_start", "link_rx_payload_copy");
             CHK_RET(leftLink_->RxAsync(rxMems, stream_));
@@ -345,9 +369,15 @@ HcclResult AllGatherRingConcurrentDirect::RunAllGather(const u32 rank, const u32
             }
             bool traceRxCopy = true;
             for (auto& mem : rxMems) {
-                CHK_RET(LocalNotify::Wait(stream_, dispatcher_, mainSignals_[0], profilerInput_.stage));
+                {
+                    TaskSemanticRoleScope role("local_main_wait_sub", "local_copy_ready", 0, true);
+                    CHK_RET(LocalNotify::Wait(stream_, dispatcher_, mainSignals_[0], profilerInput_.stage));
+                }
                 CHK_RET(AlgTemplateBase::ExecEmptyTask(inputMem_, outputMem_, stream_, dispatcher_));
-                CHK_RET(LocalNotify::Post(stream_, dispatcher_, subSignals_[0], profilerInput_.stage));
+                {
+                    TaskSemanticRoleScope role("local_main_record_sub", "local_copy_release", 0, true);
+                    CHK_RET(LocalNotify::Post(stream_, dispatcher_, subSignals_[0], profilerInput_.stage));
+                }
                 CHK_PTR_NULL(mem.dst);
                 void *srcMemPtr = nullptr;
                 CHK_RET(leftLink_->GetRemoteMem(mem.srcMemType, &srcMemPtr));
@@ -395,6 +425,7 @@ HcclResult AllGatherRingConcurrentDirect::RunAllGather(const u32 rank, const u32
 HcclResult AllGatherRingConcurrentDirect::MainRecordSub()
 {
     for (u32 signalIndex = 0; signalIndex < subSignals_.size(); signalIndex++) {
+        TaskSemanticRoleScope role("local_main_record_sub_begin", "local_stream_begin", signalIndex, true);
         CHK_RET(LocalNotify::Post(stream_, dispatcher_, subSignals_[signalIndex],
             profilerInput_.stage));
     }
@@ -404,6 +435,7 @@ HcclResult AllGatherRingConcurrentDirect::MainRecordSub()
 HcclResult AllGatherRingConcurrentDirect::SubWaitMain()
 {
     for (u32 streamIndex = 0; streamIndex < subSignals_.size(); streamIndex++) {
+        TaskSemanticRoleScope role("local_sub_wait_main_begin", "local_stream_begin", streamIndex, true);
         CHK_RET(LocalNotify::Wait(subStreams_[streamIndex], dispatcher_, subSignals_[streamIndex],
             profilerInput_.stage));
     }
@@ -413,6 +445,7 @@ HcclResult AllGatherRingConcurrentDirect::SubWaitMain()
 HcclResult AllGatherRingConcurrentDirect::MainWaitSub()
 {
     for (u32 signalIndex = 0; signalIndex < mainSignals_.size(); signalIndex++) {
+        TaskSemanticRoleScope role("local_main_wait_sub_end", "local_stream_end", signalIndex, true);
         CHK_RET(LocalNotify::Wait(stream_, dispatcher_, mainSignals_[signalIndex], profilerInput_.stage));
     }
     return HCCL_SUCCESS;
@@ -421,6 +454,7 @@ HcclResult AllGatherRingConcurrentDirect::MainWaitSub()
 HcclResult AllGatherRingConcurrentDirect::SubRecordMain()
 {
     for (u32 streamIndex = 0; streamIndex < mainSignals_.size(); streamIndex++) {
+        TaskSemanticRoleScope role("local_sub_record_main_end", "local_stream_end", streamIndex, true);
         CHK_RET(LocalNotify::Post(subStreams_[streamIndex], dispatcher_, mainSignals_[streamIndex],
             profilerInput_.stage));
     }

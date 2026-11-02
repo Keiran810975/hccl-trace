@@ -6,12 +6,43 @@ from . import analyze_waits as waits
 from . import compare_diagnosis as comparison
 from .dependency_model import stable_id
 from .task_classifier import classify_task
+from .clock_alignment import models_from_report
+from . import wait_arrival
 
 
 WORK_KINDS = frozenset({"sdma", "reduce_inline", "kernel_mix_aic", "kernel_mix_aiv", "kernel_aivec"})
 
 
-def trace_sources(rows, edges, tasks, options):
+def local_release_check(src, dst, clocks, quantization):
+    """Compare availability intervals, never rewrite an execution timestamp."""
+    source = clocks.get((src["_node_id"], src["_device_id"]))
+    target = clocks.get((dst["_node_id"], dst["_device_id"]))
+    if source is None or target is None:
+        return None
+    keys = ((src["_node_id"], src["_device_id"]), (dst["_node_id"], dst["_device_id"]))
+    if any(key not in quantization for key in keys):
+        return None
+    rs = waits.ns(src, "start") - source.profiler_to_raw_offset_ns
+    re = waits.ns(src, "stop") - source.profiler_to_raw_offset_ns
+    ws = waits.ns(dst, "start") - target.profiler_to_raw_offset_ns
+    we = waits.ns(dst, "stop") - target.profiler_to_raw_offset_ns
+    uncertainty = 0 if keys[0] == keys[1] else sum(quantization[key] for key in keys)
+    if rs - uncertainty > we:
+        status = "incompatible_notify_timestamps"
+    elif re + uncertainty <= ws:
+        status = "signal_precedes_wait_start"
+    elif ws < rs - uncertainty and re + uncertainty <= we:
+        status = "producer_observed_during_wait"
+    else:
+        status = "producer_release_interval_compatible"
+    return dict(timing_status=status, timing_domain="same_node_monotonic_raw",
+                producer_profiler_interval_ns=[waits.ns(src, "start"), waits.ns(src, "stop")],
+                wait_profiler_interval_ns=[waits.ns(dst, "start"), waits.ns(dst, "stop")],
+                producer_interval_ns=[rs, re], wait_interval_ns=[ws, we],
+                metadata_uncertainty_ns=uncertainty, exact_release_time_available=False)
+
+
+def trace_sources(rows, edges, tasks, options, *, alignment=None):
     nodes, incoming, _ = comparison.evidence_adjacency(rows, edges, cross_operations=True)
     changes = {t["graph_id"]: t for t in tasks}
     syncs, orders = defaultdict(list), defaultdict(list)
@@ -24,9 +55,21 @@ def trace_sources(rows, edges, tasks, options):
                 orders[key].append((src, edge_id))
     seeds = [t for t in tasks if t["task_kind"] == "notify_wait" and t["duration_slow"]]
     roots, traces = {}, []
+    clocks = models_from_report(alignment) if options.calibrated_release_intervals else {}
+    quantization = {}
+    if clocks:
+        for item in alignment.get("profiler_calibrations", []):
+            for key in clocks:
+                if (key[1] == item["device_id"] and key[0] in {
+                        item["node_id"], str(alignment["capture_id"]) + "/" + item["node_id"]}):
+                    value = item.get("metadata_quantization_ns")
+                    if type(value) is int and value >= 0:
+                        quantization[key] = value
+    origins = wait_arrival.local_origins(rows, clocks)
     for seed in sorted(seeds, key=lambda t: t["graph_id"]):
         target = seed["graph_id"]
         trace = dict(wait_graph_id=target, operation_scope=seed["operation_scope"], node_id=seed["node_id"],
+                     notify_pairing_status="paired" if len(syncs[target]) == 1 else "unpaired" if not syncs[target] else "ambiguous",
                      source_root_ids=[], boundaries=[], release_checks=[], traversal_truncated=False, visited_count=0)
         queue, seen = deque([(target, (), "wait_duration")]), set()
 
@@ -45,6 +88,8 @@ def trace_sources(rows, edges, tasks, options):
                                                    or item["operation_scope"] != seed["operation_scope"])
             confidence = min((edge_by_id[e]["confidence"] for e in path), key=lambda c: {"observed": 0, "exact": 1}[c])
             root = roots[root_id]
+            root.setdefault("dependency_timing", {}).update({check["edge_id"]: check
+                for check in trace["release_checks"] if check["edge_id"] in path})
             root["evidence_confidence"] = "observed" if root.get("evidence_confidence") == "observed" else confidence
             if target not in root["affected_wait_graph_ids"]:
                 root["affected_wait_graph_ids"].append(target)
@@ -82,7 +127,10 @@ def trace_sources(rows, edges, tasks, options):
                 boundary(key, path, "iteration_boundary")
                 continue
             if kind == "notify_wait":
-                if mode == "wait_duration" or item["duration_slow"]:
+                uncomparable = item["reference_count"] != 5
+                if uncomparable:
+                    boundary(key, path, "notify_wait_not_comparable:" + item["comparison_status"])
+                if mode == "wait_duration" or item["duration_slow"] or uncomparable:
                     producers = syncs[key]
                     if len(producers) != 1:
                         boundary(key, path, "unpaired_notify_wait" if not producers else "ambiguous_notify_producers")
@@ -97,15 +145,24 @@ def trace_sources(rows, edges, tasks, options):
                             continue
                         remote = src["_node_id"] != row["_node_id"]
                         timing = "rdma_completion_unmeasured" if src.get("profiler_task_kind") == "rdma" else "remote_clock_boundary"
+                        interval = None
                         if not remote and src.get("profiler_task_kind") == "notify_record":
-                            if waits.ns(src, "stop") > waits.ns(row, "stop"):
+                            if options.calibrated_release_intervals:
+                                interval = local_release_check(src, row, clocks, quantization)
+                            if interval is not None:
+                                timing = interval["timing_status"]
+                            elif waits.ns(src, "stop") > waits.ns(row, "stop"):
                                 timing = "incompatible_notify_timestamps"
                             elif waits.ns(src, "stop") <= waits.ns(row, "start"):
                                 timing = "signal_precedes_wait_start"
                             else:
                                 timing = "producer_observed_during_wait"
-                        trace["release_checks"].append(dict(wait_graph_id=key, producer_graph_id=producer,
-                                                            edge_id=edge_id, timing_status=timing))
+                        check = dict(wait_graph_id=key, producer_graph_id=producer,
+                                     edge_id=edge_id, timing_status=timing,
+                                     dependency_identity_preserved=True)
+                        if interval is not None:
+                            check.update(interval)
+                        trace["release_checks"].append(check)
                         if timing in {"incompatible_notify_timestamps", "signal_precedes_wait_start"}:
                             boundary(key, path, timing)
                         else:
@@ -113,10 +170,9 @@ def trace_sources(rows, edges, tasks, options):
                 if mode != "wait_duration" and (item.get("start_late") or item["gap_slow"]):
                     follow_order(key, path)
                 elif mode != "wait_duration" and not item["duration_slow"]:
-                    if item["reference_count"] == 5 and item.get("start_late") is False:
-                        boundary(key, path, "normal_reference_boundary")
-                    else:
-                        follow_order(key, path)
+                    # A short Wait can inherit its stream's arrival delay. A call
+                    # starting earlier than history can conceal that relative delay.
+                    follow_order(key, path)
                 continue
             intrinsic = (item["duration_slow"] and kind in WORK_KINDS
                          and classify_task(row)["task_domain"] == "hccl_internal")
@@ -127,16 +183,17 @@ def trace_sources(rows, edges, tasks, options):
                     continue
             if item["gap_slow"]:
                 boundary(key, path, "unattributed_pre_task_gap")
-            if (not intrinsic and item["reference_count"] == 5 and item.get("start_late") is False
-                    and not item["gap_slow"] and nodes[key]["_node_id"] == seed["node_id"]):
-                boundary(key, path, "normal_reference_boundary")
-                continue
             if kind in WORK_KINDS and item["reference_count"] != 5:
                 boundary(key, path, "execution_not_comparable:" + item["comparison_status"])
             if kind == "rdma":
                 boundary(key, path, "rdma_submission_is_not_payload_completion")
             follow_order(key, path)
         trace["visited_count"] = len(seen)
+        if len(syncs[target]) == 1 and clocks:
+            producer = nodes[syncs[target][0][0]]
+            arrival = wait_arrival.observe(nodes[target], producer, seed, nodes, syncs, clocks, quantization, origins)
+            if arrival is not None:
+                trace["arrival_observation"] = arrival
         trace["source_root_ids"] = sorted(set(trace["source_root_ids"]))
         trace["status"] = "source_candidates_found" if trace["source_root_ids"] else "unresolved_upstream"
         if trace["traversal_truncated"]:
@@ -181,4 +238,12 @@ def coverage(tasks, traces):
                 comparison_status_counts=dict(Counter(t["comparison_status"] for t in eligible)),
                 unbound_task_kind_counts=dict(Counter(t["task_kind"] for t in tasks if t["stage"] == "unbound")),
                 wait_backtrace_count=len(traces), boundary_reason_counts=dict(reasons),
+                paired_slow_wait_count=sum(t["notify_pairing_status"] == "paired" for t in traces),
+                unpaired_or_ambiguous_slow_wait_count=sum(t["notify_pairing_status"] != "paired" for t in traces),
+                source_linked_slow_wait_count=sum(bool(t["source_root_ids"]) for t in traces),
+                upstream_dependency_gap_wait_count=sum(any(b["reason"] in {"missing_stream_predecessor", "unpaired_notify_wait",
+                    "ambiguous_stream_predecessors", "ambiguous_notify_producers"} for b in t["boundaries"]) for t in traces),
+                timing_conflict_wait_count=sum(any(b["reason"] in {"incompatible_notify_timestamps", "incompatible_stream_order_timestamps"}
+                    for b in t["boundaries"]) for t in traces),
+                wait_arrival_observation_counts=dict(Counter(t["arrival_observation"]["status"] for t in traces if t.get("arrival_observation"))),
                 truncated_wait_backtrace_count=sum(t["traversal_truncated"] for t in traces))

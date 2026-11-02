@@ -15,7 +15,7 @@ def raw_ns():
 
 
 class AclCopies:
-    def __init__(self, device, mib, library=None):
+    def __init__(self, device, mib, library=None, *, initialize_runtime=True):
         self.acl = library if library is not None else ctypes.CDLL("libascendcl.so")
         ptr, size, integer = ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int
         signatures = {
@@ -33,8 +33,9 @@ class AclCopies:
         self.bytes = mib * 1024 * 1024
         self.initialized = False
         try:
-            self.call("aclInit", None)
-            self.initialized = True
+            if initialize_runtime:
+                self.call("aclInit", None)
+                self.initialized = True
             self.call("aclrtSetDevice", device)
             self.call("aclrtMalloc", ctypes.byref(self.source), self.bytes, 0)
             self.call("aclrtMalloc", ctypes.byref(self.destination), self.bytes, 0)

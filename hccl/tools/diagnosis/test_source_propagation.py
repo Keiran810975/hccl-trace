@@ -39,6 +39,9 @@ class SourcePropagationTests(unittest.TestCase):
         self.assertEqual(chain["evidence_confidence"],"observed")
         self.assertEqual(report["nodes"]["i5p0"]["comparison"]["reference_mean_ns"],"10000")
         self.assertFalse(report["physical_causation_proven"])
+        self.assertEqual(report["candidates"][0]["source"]["source_region_rank"], 1)
+        page = presentation.render_html(report)
+        self.assertIn('id="source-region"', page)
 
     def test_all_branches_are_kept_without_a_new_downstream_search(self):
         rows,edges,roots,tasks,primary=diagnosed()

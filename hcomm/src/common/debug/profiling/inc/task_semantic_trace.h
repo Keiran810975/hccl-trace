@@ -83,6 +83,22 @@ private:
 };
 u32 GetTaskSemanticPhysicalDeviceId();
 bool GetTaskSemanticTraceInfo(TaskSemanticTraceInfo &info);
+// Algorithm location survives consumption of a one-shot execution label.
+bool GetTaskSemanticTraceContext(TaskSemanticTraceInfo &info);
+void SetTaskSemanticTraceContext(const TaskSemanticTraceInfo &info);
+void ClearTaskSemanticTraceContext();
+class TaskSemanticRoleScope {
+public:
+    TaskSemanticRoleScope(const char *event, const char *semantic,
+        u32 slice = INVALID_UINT, bool local = false, bool onlyIfUnlabeled = false);
+    ~TaskSemanticRoleScope();
+    TaskSemanticRoleScope(const TaskSemanticRoleScope &) = delete;
+    TaskSemanticRoleScope &operator=(const TaskSemanticRoleScope &) = delete;
+private:
+    TaskSemanticTraceInfo previous_{};
+    bool hadPrevious_{false};
+    bool active_{false};
+};
 bool CaptureTaskSemanticTraceInfo(TaskSemanticTraceInfo &info);
 void SetTaskSemanticTraceInfo(const TaskSemanticTraceInfo &info);
 void ClearTaskSemanticTraceInfo();

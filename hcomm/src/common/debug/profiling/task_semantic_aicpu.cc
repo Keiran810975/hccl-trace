@@ -23,6 +23,7 @@ struct SemanticSnapshot {
     TaskType kind;
     u32 physicalDeviceId;
     bool control;
+    bool semantic;
     TaskControlAnchor anchor;
 };
 std::mutex g_semanticMutex;
@@ -51,8 +52,9 @@ void CaptureAicpuTaskSemantic(const uint8_t *sqe, TaskType kind, u64 notifyId, s
     TaskControlAnchor anchor;
     const bool control = GetTaskControlAnchor(anchor) &&
         (kind == TaskType::TASK_NOTIFY_RECORD || kind == TaskType::TASK_NOTIFY_WAIT);
-    if (!control && (!GetTaskSemanticTraceInfo(info) || info.event == nullptr || info.event[0] == '\0' ||
-        info.semantic == nullptr || info.semantic[0] == '\0')) {
+    const bool semantic = GetTaskSemanticTraceInfo(info) && info.event != nullptr && info.event[0] != '\0' &&
+        info.semantic != nullptr && info.semantic[0] != '\0';
+    if (!control && !semantic) {
         return;
     }
     // HAL's device-local ID can differ from the Host physical ID in msprof.
@@ -68,9 +70,9 @@ void CaptureAicpuTaskSemantic(const uint8_t *sqe, TaskType kind, u64 notifyId, s
     info.notifyStage = stage;
     try {
         std::lock_guard<std::mutex> lock(g_semanticMutex);
-        g_semanticSqes[sqe] = SemanticSnapshot{info, kind, physicalDeviceId, control, anchor};
+        g_semanticSqes[sqe] = SemanticSnapshot{info, kind, physicalDeviceId, control, semantic, anchor};
         g_hasSemanticSqes.store(true, std::memory_order_relaxed);
-        if (!control) {
+        if (semantic) {
             TaskSemanticTraceInfo consumed{};
             (void)CaptureTaskSemanticTraceInfo(consumed);
         }
@@ -120,7 +122,8 @@ void ReportAicpuTaskSemantic(const uint8_t *sqes, size_t count, bool consume)
             ReportTaskControl(it->second.anchor, header->rtStreamId, header->taskId,
                 it->second.kind == TaskType::TASK_NOTIFY_RECORD ? "notify_record" : "notify_wait",
                 it->second.info.notifyId);
-        } else {
+        }
+        if (it->second.semantic) {
             (void)ReportTaskSemanticTrace(it->second.physicalDeviceId, header->rtStreamId, header->taskId,
                 it->second.kind, &it->second.info);
         }

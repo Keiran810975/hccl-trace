@@ -28,6 +28,8 @@ thread_local int g_deviceTraceEnabled = -1;
 thread_local u32 g_deviceUserRank = INVALID_VALUE_RANKID;
 thread_local u32 g_physicalDeviceId = INVALID_UINT;
 thread_local TaskSemanticTraceInfo g_taskSemanticInfo{};
+thread_local bool g_taskSemanticContextValid = false;
+thread_local TaskSemanticTraceInfo g_taskSemanticContext{};
 thread_local TaskControlAnchor g_controlAnchor{};
 thread_local TaskControlAnchor g_buildAnchor{};
 // DispatcherGraph adds contexts and launches the graph synchronously on the
@@ -253,6 +255,66 @@ bool GetTaskSemanticTraceInfo(TaskSemanticTraceInfo &info)
         info.userRank = g_deviceUserRank;
     }
     return true;
+}
+
+bool GetTaskSemanticTraceContext(TaskSemanticTraceInfo &info)
+{
+    if (!IsTaskSemanticTraceEnabled() || !g_taskSemanticContextValid) {
+        return false;
+    }
+    info = g_taskSemanticContext;
+    if (g_deviceUserRank != INVALID_VALUE_RANKID) {
+        info.userRank = g_deviceUserRank;
+    }
+    return info.algorithm != nullptr && info.phase != nullptr;
+}
+
+void SetTaskSemanticTraceContext(const TaskSemanticTraceInfo &info)
+{
+    if (IsTaskSemanticTraceEnabled()) {
+        g_taskSemanticContext = info;
+        g_taskSemanticContextValid = true;
+    }
+}
+
+void ClearTaskSemanticTraceContext()
+{
+    g_taskSemanticContextValid = false;
+}
+
+TaskSemanticRoleScope::TaskSemanticRoleScope(const char *event, const char *semantic,
+    u32 slice, bool local, bool onlyIfUnlabeled)
+{
+    TaskSemanticTraceInfo context{};
+    if (!GetTaskSemanticTraceContext(context)) {
+        return;
+    }
+    hadPrevious_ = GetTaskSemanticTraceInfo(previous_);
+    if (onlyIfUnlabeled && hadPrevious_ && HasReportableSemantic(previous_)) {
+        return;
+    }
+    context.event = event;
+    context.semantic = semantic;
+    context.oneShot = true;
+    if (slice != INVALID_UINT) {
+        context.slice = slice;
+    }
+    if (local) {
+        context.peerRank = INVALID_VALUE_RANKID;
+    }
+    SetTaskSemanticTraceInfo(context);
+    active_ = true;
+}
+
+TaskSemanticRoleScope::~TaskSemanticRoleScope()
+{
+    if (active_) {
+        if (hadPrevious_) {
+            SetTaskSemanticTraceInfo(previous_);
+        } else {
+            ClearTaskSemanticTraceInfo();
+        }
+    }
 }
 
 bool CaptureTaskSemanticTraceInfo(TaskSemanticTraceInfo &info)

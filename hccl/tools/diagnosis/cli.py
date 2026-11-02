@@ -62,11 +62,16 @@ def _baseline_pairs(current, baseline, work):
 
 def analyze_capture(capture, output, *, mode, baseline=None, topology=None, manifest=None,
                     min_match_rate=95.0, require_clock_alignment=False, keep_debug=False,
-                    debug_dir=None, verbose=False, allow_uncalibrated_clock=False):
+                    debug_dir=None, verbose=False, allow_uncalibrated_clock=False,
+                    source_slowdown_factor="1.5", wait_slowdown_factor=None,
+                    calibrated_release_intervals=False, completion_fallback=False, candidate_policy="all"):
     if require_clock_alignment and allow_uncalibrated_clock:
         raise DiagnosisError(2, "required alignment and explicit local-clock fallback are mutually exclusive")
     if mode not in {"rolling", "baseline"} or (mode == "baseline") != (baseline is not None):
         raise DiagnosisError(2, "baseline mode requires --baseline; rolling forbids it")
+    from .candidate_screening import POLICIES
+    if candidate_policy not in POLICIES or mode != "rolling" and candidate_policy != "all":
+        raise DiagnosisError(2, "experimental candidate admission requires rolling mode and a supported policy")
     if not 0 < min_match_rate <= 100:
         raise DiagnosisError(2, "min-match-rate must be in (0,100]")
     output = Path(output).absolute()
@@ -84,7 +89,10 @@ def analyze_capture(capture, output, *, mode, baseline=None, topology=None, mani
         if any((p.parent if p.is_file() else p) == debug.resolve() or
                (p.parent if p.is_file() else p) in debug.resolve().parents for p in inputs):
             raise DiagnosisError(2, "debug cannot be placed inside capture inputs")
-    with tempfile.TemporaryDirectory(prefix="hccl-diag-") as temporary:
+        debug.parent.mkdir(parents=True, exist_ok=True)
+    # Keep replay on its destination filesystem so retention is an atomic move,
+    # not a second full copy of multi-gigabyte captures and graph artifacts.
+    with tempfile.TemporaryDirectory(prefix="hccl-diag-", dir=debug.parent if keep_debug else None) as temporary:
         work = Path(temporary)
         try:
             try:
@@ -115,7 +123,10 @@ def analyze_capture(capture, output, *, mode, baseline=None, topology=None, mani
                         min_match_rate=min_match_rate, require_clock_alignment=require_clock_alignment,
                         allow_uncalibrated_clock=allow_uncalibrated_clock,
                         comparison_options=comparison.ComparisonOptions(max_figures=0),
-                        rolling_options=rolling.RollingOptions(max_figures=0), html_views=(), include_critical_path=False)
+                        rolling_options=rolling.RollingOptions(max_figures=0, slowdown_factor=source_slowdown_factor,
+                            wait_slowdown_factor=wait_slowdown_factor, calibrated_release_intervals=calibrated_release_intervals,
+                            completion_fallback=completion_fallback, candidate_policy=candidate_policy),
+                        html_views=(), include_critical_path=False)
                 pipeline = _gate(directory, ready)
                 report = read_json(directory / ("rolling/report.json" if mode == "rolling" else "comparison/report.json"))
                 rows = graph.read_graph_artifact_nodes(directory / "dep_graph_nodes.csv")
@@ -135,8 +146,9 @@ def analyze_capture(capture, output, *, mode, baseline=None, topology=None, mani
         finally:
             if keep_debug:
                 try:
-                    debug.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copytree(work, debug)
+                    if debug.exists() or debug.is_symlink():
+                        raise FileExistsError("debug appeared during analysis; refusing overwrite")
+                    work.rename(debug)
                 except Exception as error:
                     print("hccl-diag: debug retention failed: " + str(error), file=sys.stderr)
 
@@ -157,6 +169,13 @@ def main(argv=None):
     analyze.add_argument("--keep-debug", action="store_true")
     analyze.add_argument("--debug-dir", type=Path)
     analyze.add_argument("--verbose", action="store_true")
+    analyze.add_argument("--source-slowdown-factor", default="1.5")
+    analyze.add_argument("--wait-slowdown-factor")
+    analyze.add_argument("--calibrated-release-intervals", action="store_true")
+    analyze.add_argument("--completion-fallback", action="store_true")
+    from .candidate_screening import POLICIES
+    analyze.add_argument("--candidate-policy", choices=POLICIES, default="all",
+                         help="experimental admission, default all; deferred observations remain in root_causes.json")
     args = parser.parse_args(argv)
     try:
         result = analyze_capture(**{key: value for key, value in vars(args).items() if key != "command"})

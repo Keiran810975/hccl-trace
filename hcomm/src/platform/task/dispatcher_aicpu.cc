@@ -774,6 +774,8 @@ HcclResult DispatcherAiCpu::ReduceAsync(const void *src, void *dst, u64 dataCoun
 HcclResult DispatcherAiCpu::InlineReduceAsync(const void *src, u64 dataCount, const HcclDataType datatype,
     HcclReduceOp redOp, hccl::Stream &stream, void *dst, u32 remoteUserRank, hccl::LinkType inLinkType)
 {
+    TaskSemanticRoleScope role("inline_reduce_submit", "hccl_inline_reduce_submission",
+        INVALID_UINT, false, true);
     // 参数有效性检查
     CHK_PTR_NULL(stream.ptr());
     if (dataCount == 0) {
@@ -836,6 +838,8 @@ HcclResult DispatcherAiCpu::TbeReduceAsync(const void *src1, const void *src2, u
 
 HcclResult DispatcherAiCpu::RdmaSend(u32 dbindex, u64 dbinfo, hccl::Stream &stream, RdmaTaskInfo &taskInfo)
 {
+    TaskSemanticRoleScope role(taskInfo.rdmaType == RdmaType::RDMA_SEND_PAYLOAD ?
+        "rdma_payload_submit" : "rdma_notify_submit", "rdma_doorbell_submission", INVALID_UINT, false, true);
     const HcclComStreamInfo &streamInfo = stream.GetHcclStreamInfo();
 
     uint8_t *sqeBuffer = nullptr;

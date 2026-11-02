@@ -31,6 +31,11 @@ def source_category(source, row):
     if source.get("component") == "host_preparation":
         return EXTERNAL
     domain = classify_task(row)["task_domain"]
+    local = source.get("local_completion_evidence", {})
+    if (source.get("component") == "execution" and domain == "hccl_internal"
+            and source.get("status") == "local_completion_supported_candidate"
+            and local.get("validated") is True and local.get("same_node_rank_operation") is True):
+        return INTERNAL
     if (source.get("component") == "execution" and domain == "hccl_internal"
             and source.get("status") == "dependency_supported_candidate"
             and any(source.get("evidence_paths", {}).get(w) for w in source.get("affected_wait_graph_ids", []))):

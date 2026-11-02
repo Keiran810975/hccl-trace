@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import asdict
 from decimal import Decimal
 import json
 from pathlib import Path
@@ -9,6 +10,7 @@ import unittest
 
 from . import rolling_diagnosis as rolling
 from .test_source_events import capture
+from .clock_alignment import DeviceClock
 
 
 def cross_call_capture():
@@ -24,6 +26,124 @@ def cross_call_capture():
 
 
 class WaitBacktraceTests(unittest.TestCase):
+    def test_uncomparable_intermediate_wait_is_not_assumed_normal(self):
+        from . import wait_backtrace
+        rows, edges, coords, _ = capture(execution_delay=True)
+        tasks = rolling.compare_tasks(rows, edges, coords, rolling.RollingOptions())
+        # The real producer of this Wait must remain reachable even when the
+        # intermediate Wait has no cross-iteration semantic label.
+        middle = deepcopy(next(r for r in rows if r['_graph_id'] == 'i5p2'))
+        middle.update(_graph_id='intermediate', _stream_id=77, event='', phase='', algorithm='',
+                      _stop=5044, _stop_order=Decimal(5044))
+        rows.append(middle)
+        record = next(r for r in rows if r['_graph_id'] == 'i5p1')
+        producer = deepcopy(record)
+        producer['_graph_id'] = 'middle-producer'
+        rows.append(producer)
+        record.update(_start=5044, _stop=5044.001, _start_order=Decimal(5044), _stop_order=Decimal('5044.001'))
+        incoming = next(e for e in edges if e['edge_id'] == 'i5e0')
+        incoming['dst'] = 'middle-producer'
+        edges.append(dict(edge_id='middle-to-record', src='intermediate', dst='i5p1',
+                          kind='direct_stream_order_observed', confidence='observed'))
+        target = next(r for r in rows if r['_graph_id'] == 'i5p2')
+        target.update(_stop=5044.1, _stop_order=Decimal('5044.1'))
+        edges.append(dict(edge_id='middle-pair', src='middle-producer', dst='intermediate',
+                          kind='direct_notify_sync_exact', confidence='exact'))
+        unknown = dict(next(t for t in tasks if t['graph_id'] == 'i5p2'), graph_id='intermediate',
+                       comparison_status='unannotated_task_location', reference_count=0,
+                       duration_slow=False, start_late=None, gap_slow=False)
+        tasks.append(unknown)
+        tasks.append(dict(next(t for t in tasks if t['graph_id'] == 'i5p1'), graph_id='middle-producer'))
+        before = deepcopy((rows, edges))
+        roots, traces = wait_backtrace.trace_sources(rows, edges, tasks, rolling.RollingOptions())
+        trace = next(t for t in traces if t['wait_graph_id'] == 'i5p2')
+        self.assertTrue(any('notify_wait_not_comparable:' in b['reason'] for b in trace['boundaries']))
+        self.assertTrue(any(r['graph_id'] == 'i5p0' for r in roots))
+        self.assertEqual((rows, edges), before)
+
+    def test_early_call_start_does_not_cut_a_real_upstream_overrun(self):
+        rows, edges, coords, _ = capture(execution_delay=True)
+        for i in range(6):
+            base = i * 1000
+            shift = 200 if i < 5 else 0
+            for row in rows[i * 4:i * 4 + 4]:
+                for key in ("_start", "_stop", "_start_order", "_stop_order"):
+                    row[key] += shift
+            anchor = deepcopy(rows[i * 4])
+            anchor.update(_graph_id="origin-{}".format(i), _stream_id=99, event="independent_origin",
+                          _start=base, _stop=base + 1, _duration=1,
+                          _start_order=Decimal(base), _stop_order=Decimal(base + 1))
+            rows.append(anchor)
+        report = rolling.analyze(rows, edges, coords)
+        record = next(t for t in report["tasks"] if t["graph_id"] == "i5p1")
+        self.assertFalse(record["start_late"])
+        self.assertFalse(record["duration_slow"])
+        root = next(r for r in report["root_causes"] if r["root_id"] == report["primary_source_candidate_id"])
+        self.assertEqual(root["graph_id"], "i5p0")
+        self.assertEqual(root["evidence_paths"]["i5p2"], ["i5e0", "i5e1"])
+
+    def clocks(self, offset=0):
+        models = [DeviceClock("run/node0", device, offset if device == 0 else 0,
+                              0, 0, 1, 1, 0, 10**9, 1000) for device in (0, 1)]
+        return dict(schema_version=3, status="network_probe_estimate", capture_id="run",
+                    models=[asdict(model) for model in models],
+                    profiler_calibrations=[dict(node_id="node0", device_id=device, metadata_quantization_ns=1000)
+                                           for device in (0, 1)])
+
+    def test_wait_threshold_is_independent_of_source_threshold(self):
+        rows, edges, coords, _ = capture(execution_delay=True)
+        for i in range(6):
+            wait, tail = rows[i * 4 + 2:i * 4 + 4]
+            stop = i * 1000 + (134 if i == 5 else 104)
+            wait.update(_stop=stop, _stop_order=Decimal(stop), _duration=stop - wait["_start"])
+            tail.update(_start=stop, _stop=stop + .2, _start_order=Decimal(stop),
+                        _stop_order=Decimal(str(stop + .2)))
+        original = rolling.analyze(rows, edges, coords)
+        changed = rolling.analyze(rows, edges, coords, rolling.RollingOptions(wait_slowdown_factor="1.1"))
+        self.assertIsNone(original["primary_source_candidate_id"])
+        self.assertIsNotNone(changed["primary_source_candidate_id"])
+        self.assertEqual(changed["source_policy_version"], 7)
+        self.assertEqual(next(t for t in changed["tasks"] if t["graph_id"] == "i5p0")["slowdown_factor"], "4")
+
+    def test_record_can_release_before_its_profiled_execution_ends(self):
+        rows, edges, coords, _ = capture(execution_delay=True)
+        record = next(r for r in rows if r["_graph_id"] == "i5p1")
+        record.update(_stop=5043.2, _stop_order=Decimal("5043.2"), _duration=.2)
+        before = deepcopy((rows, edges))
+        original = rolling.analyze(rows, edges, coords)
+        changed = rolling.analyze(rows, edges, coords, rolling.RollingOptions(calibrated_release_intervals=True),
+                                  alignment=self.clocks())
+        self.assertIsNone(original["primary_source_candidate_id"])
+        self.assertIsNotNone(changed["primary_source_candidate_id"])
+        self.assertEqual((rows, edges), before)
+        checks = [c for t in changed["wait_backtraces"] for c in t["release_checks"]]
+        self.assertTrue(any(c["timing_status"] == "producer_release_interval_compatible" for c in checks))
+        from .source_propagation import build_report
+        root = next(r for r in changed["root_causes"] if r["root_id"] == changed["primary_source_candidate_id"])
+        report = build_report(rows, edges, [root], changed["tasks"])
+        self.assertEqual(report["candidates"][0]["chains"][0]["hops"][-1]["timing_status"],
+                         "producer_release_interval_compatible")
+        self.assertEqual(report["candidates"][0]["chains"][0]["status"], "complete_with_timing_limits")
+
+    def test_device_start_offsets_are_removed_for_same_node_release_checks(self):
+        rows, edges, coords, _ = capture(execution_delay=True)
+        for row in rows:
+            if row["_device_id"] == 0:
+                for key in ("_start", "_stop", "_start_order", "_stop_order"):
+                    row[key] += 5
+        changed = rolling.analyze(rows, edges, coords, rolling.RollingOptions(calibrated_release_intervals=True),
+                                  alignment=self.clocks(offset=5000))
+        self.assertIsNotNone(changed["primary_source_candidate_id"])
+
+    def test_calibrated_mode_does_not_force_a_truly_incompatible_release(self):
+        rows, edges, coords, _ = capture(execution_delay=True)
+        record = next(r for r in rows if r["_graph_id"] == "i5p1")
+        record.update(_start=5060, _stop=5061, _start_order=Decimal(5060), _stop_order=Decimal(5061), _duration=1)
+        changed = rolling.analyze(rows, edges, coords, rolling.RollingOptions(calibrated_release_intervals=True),
+                                  alignment=self.clocks())
+        self.assertIsNone(changed["primary_source_candidate_id"])
+        self.assertIn("incompatible_notify_timestamps", changed["coverage"]["boundary_reason_counts"])
+
     def test_cross_call_order_is_kept_without_creating_an_edge(self):
         rows, edges, coords = cross_call_capture()
         before = deepcopy(edges)

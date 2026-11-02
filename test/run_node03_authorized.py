@@ -10,7 +10,34 @@ import subprocess
 import sys
 import time
 
-from run_node03_preflight import LOCAL_PARENT, PEER_PARENT, write
+from run_node03_preflight import LOCAL_PARENT, PEER_PARENT, PYTHON, container_command, write
+
+
+def cancel_capture(root):
+    """Used only for the new calibration path, before restoring its Device lease."""
+    base = "/workspace/" + root.name
+    errors = []
+    for node in (0, 1):
+        code = ("import json;from pathlib import Path;from test.stop_owned_capture import terminate;"
+                "p=Path(" + repr(base + "/gpt-output/private") + ");p.mkdir(parents=True,exist_ok=True);"
+                "(p/'abort').touch();print(json.dumps(terminate(" + repr(base) + ")))")
+        try:
+            result = subprocess.run(container_command(base, node, shlex.join([PYTHON, "-c", code]), 60),
+                                    capture_output=True, text=True, check=True, timeout=75)
+            write(root / ("cancel-capture-node{}.json".format(3 if node else 0)), json.loads(result.stdout))
+        except Exception as error:
+            errors.append(str(error))
+    # Abort the owned network watcher and independently read back the saved ports.
+    code = ("import sys,json;from pathlib import Path;r=Path(" + repr(str(root)) + ");"
+            "sys.path.insert(0,str(r/'src/test'));from node03_roce_window import Window;"
+            "w=Window(r);s=w.snapshot;"
+            "(w.restore(),w.stop_timer(json.loads(s.read_text())['unit'])) if s.exists() else None")
+    try:
+        subprocess.run(root_command(0, ["python3", "-c", code]), capture_output=True, text=True, check=True, timeout=180)
+    except Exception as error:
+        errors.append(str(error))
+    if errors:
+        raise RuntimeError("owned cancellation requires attention: " + "; ".join(errors))
 
 
 def root_command(node, command):
@@ -27,16 +54,28 @@ def main():
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--gpt", action="store_true")
     parser.add_argument("--formal-case", type=Path)
+    parser.add_argument("--communication-calibration", action="store_true")
+    parser.add_argument("--short-copy-burst", action="store_true")
+    parser.add_argument("--copy-burst-phase", choices=("submit", "payload"), default="submit")
     args = parser.parse_args()
     root = args.root.resolve()
     if root.parent != LOCAL_PARENT or not root.name.startswith("hccl-diagnose-node03-"):
         raise ValueError("reviewed owned Node0 root required")
+    if args.short_copy_burst and (args.gpt or args.formal_case or args.communication_calibration):
+        raise ValueError("short-copy profile must run independently")
+    if args.copy_burst_phase != "submit" and not args.short_copy_burst:
+        raise ValueError("copy placement requires an explicit short-copy profile")
+    if args.communication_calibration:
+        if not args.gpt or args.formal_case is None or args.formal_case.resolve() != root / "input/case.json":
+            raise ValueError("communication calibration requires the explicit owned GPT case before device preparation")
+        from communication_calibration import validate_case
+        validate_case(json.loads(args.formal_case.read_text()))
     state = dict(status="preparing", formal_runs=0, requested_formal_runs=6, started_unix_ns=time.time_ns())
     path = root / "authorized-state.json"
     if path.exists():
         raise ValueError("do not restart a used protected attempt")
     log = (root / "authorized.log").open("x")
-    prepared, restored = [], []
+    prepared, restored, validation_process = [], [], None
 
     def interrupted(signum, frame):
         raise InterruptedError("protected run interrupted by signal " + str(signum))
@@ -66,17 +105,33 @@ def main():
         state["status"] = "validating"
         write(path, state)
         command = [sys.executable, str(root / "src/test/run_node03_preflight.py"), "--root", str(root),
-                   "--algorithm", "ring", "--size-mib", "32", "--op-expansion-mode", "AI_CPU", "--protected-package"]
+                   "--algorithm", "ring", "--size-mib", "128" if args.short_copy_burst else "32", "--op-expansion-mode", "AI_CPU", "--protected-package"]
+        if args.short_copy_burst:
+            command += ["--short-copy-burst", "--copy-burst-phase", args.copy_burst_phase]
         if args.gpt:
             command.append("--gpt")
         if args.formal_case:
             command += ["--formal-case", str(args.formal_case)]
-        result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=5400 if args.formal_case else 3000 if args.gpt else 1200)
-        if result.returncode:
+        if args.communication_calibration:
+            command.append("--communication-calibration")
+        validation_process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
+        if validation_process.wait(timeout=5400 if args.formal_case else 3000 if args.gpt else 1200):
             raise RuntimeError("protected capture/diagnosis preflight failed; inspect authorized.log")
         state["validation_passed"] = True
     except BaseException as error:
         state.update(status="failed", error=str(error))
+        if (args.communication_calibration or args.short_copy_burst) and validation_process is not None:
+            try:
+                cancel_capture(root)
+            except Exception as cleanup_error:
+                state["capture_cancellation_error"] = str(cleanup_error)
+        if validation_process is not None and validation_process.poll() is None:
+            validation_process.terminate()
+            try:
+                validation_process.wait(timeout=120)
+            except subprocess.TimeoutExpired:
+                validation_process.kill()
+                validation_process.wait(timeout=30)
         raise
     finally:
         for node in reversed(prepared):

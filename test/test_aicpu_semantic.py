@@ -161,6 +161,42 @@ int main() {
  }
  {
   TaskSemanticDeviceScope enable(true, 7, 14);
+  const auto before=logs.size();
+  TaskControlAnchor anchor; anchor.deviceId=14; anchor.streamId=12; anchor.taskId=42;
+  {
+   TaskControlScope control(anchor);
+   TaskSemanticScope algorithm(MakeTaskSemanticTraceInfo("RS",2,7,3,1));
+   {
+    TaskSemanticRoleScope role("local_wait","local_copy_ready",0,true);
+    CaptureAicpuTaskSemantic(sqes,TaskType::TASK_NOTIFY_WAIT,99,-1);
+    TaskSemanticTraceInfo read{}; assert(!GetTaskSemanticTraceInfo(read));
+    assert(GetTaskSemanticTraceContext(read) && read.step==2);
+    CaptureAicpuTaskSemantic(sqes+64,TaskType::TASK_NOTIFY_WAIT,100,-1);
+   }
+  }
+  TaskSemanticTraceInfo read{}; assert(!GetTaskSemanticTraceContext(read));
+  ReportAicpuTaskSemantic(sqes,2,true);
+  assert(logs.size()==before+3); // one semantic plus two physical control anchors
+  assert(logs[before+1].find("event[local_wait]")!=std::string::npos);
+  assert(logs[before+1].find("peer_rank[4294967295]")!=std::string::npos);
+  logs.resize(before);
+  {
+   TaskSemanticScope algorithm(MakeTaskSemanticTraceInfo("RS",2,7,3,1));
+   { TaskSemanticEventScope primary("payload","reduce");
+     CaptureAicpuTaskSemantic(sqes,TaskType::TASK_REDUCE_INLINE,0,-1);
+     { TaskSemanticRoleScope helper("submit","helper",INVALID_UINT,false,true);
+       CaptureAicpuTaskSemantic(sqes+64,TaskType::TASK_RDMA,10,-1); }
+     assert(!GetTaskSemanticTraceInfo(read));
+   }
+  }
+  ReportAicpuTaskSemantic(sqes,2,true);
+  assert(logs.size()==before+2);
+  assert(logs[before].find("event[payload]")!=std::string::npos);
+  assert(logs[before+1].find("event[submit]")!=std::string::npos);
+  logs.resize(before);
+ }
+ {
+  TaskSemanticDeviceScope enable(true, 7, 14);
   TaskControlAnchor anchor; anchor.deviceId=14; anchor.streamId=12; anchor.taskId=42;
   { TaskBuildContext build(anchor); TaskControlAnchor read; assert(GetTaskBuildAnchor(read));
     assert(!GetTaskControlAnchor(read));
