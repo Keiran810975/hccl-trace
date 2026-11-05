@@ -64,11 +64,14 @@ def analyze_capture(capture, output, *, mode, baseline=None, topology=None, mani
                     min_match_rate=95.0, require_clock_alignment=False, keep_debug=False,
                     debug_dir=None, verbose=False, allow_uncalibrated_clock=False,
                     source_slowdown_factor="1.5", wait_slowdown_factor=None,
-                    calibrated_release_intervals=False, completion_fallback=False, candidate_policy="all"):
+                    calibrated_release_intervals=False, completion_fallback=False, candidate_policy="all", source_policy="legacy",
+                    selected_iteration_view=False):
     if require_clock_alignment and allow_uncalibrated_clock:
         raise DiagnosisError(2, "required alignment and explicit local-clock fallback are mutually exclusive")
     if mode not in {"rolling", "baseline"} or (mode == "baseline") != (baseline is not None):
         raise DiagnosisError(2, "baseline mode requires --baseline; rolling forbids it")
+    if source_policy not in {"legacy", "dual", "dual-v2"} or source_policy in {"dual", "dual-v2"} and (mode != "rolling" or candidate_policy != "all"):
+        raise DiagnosisError(2, "dual source policy requires rolling mode and no separate candidate filter")
     from .candidate_screening import POLICIES
     if candidate_policy not in POLICIES or mode != "rolling" and candidate_policy != "all":
         raise DiagnosisError(2, "experimental candidate admission requires rolling mode and a supported policy")
@@ -125,21 +128,41 @@ def analyze_capture(capture, output, *, mode, baseline=None, topology=None, mani
                         comparison_options=comparison.ComparisonOptions(max_figures=0),
                         rolling_options=rolling.RollingOptions(max_figures=0, slowdown_factor=source_slowdown_factor,
                             wait_slowdown_factor=wait_slowdown_factor, calibrated_release_intervals=calibrated_release_intervals,
-                            completion_fallback=completion_fallback, candidate_policy=candidate_policy),
+                            completion_fallback=completion_fallback, candidate_policy=candidate_policy, source_policy=source_policy),
                         html_views=(), include_critical_path=False)
                 pipeline = _gate(directory, ready)
                 report = read_json(directory / ("rolling/report.json" if mode == "rolling" else "comparison/report.json"))
                 rows = graph.read_graph_artifact_nodes(directory / "dep_graph_nodes.csv")
                 edges = graph.read_graph_artifact_edges(directory / "dep_graph_edges.csv")
+                selection = None
+                if source_policy in {"dual", "dual-v2"}:
+                    from .multinode_source_policy import select
+                    alignment = read_json(directory / "clock_alignment.json") if (directory / "clock_alignment.json").exists() else None
+                    protocol = read_json(directory / "cross_node/report.json") if (directory / "cross_node/report.json").exists() else None
+                    report, selection = select(report, rows, edges, alignment, protocol, refined=source_policy == "dual-v2")
+                    write_json(directory / "source_selection.json", selection)
                 normalized, roots, tasks = normalize(report, mode=mode,
                     run_id=current_capture.manifest["run_id"], rows=rows, edges=edges, pipeline=pipeline,
                     binding_evidence=dict(current.evidence, identity_exports=list(current_capture.identity_exports)),
                     merge_metrics=waits.read_csv(directory / "merge_summary.csv"))
+                if selection is not None:
+                    keys = ("selected_mechanism", "primary_proposal", "proposals", "host_admission_decisions") if source_policy == "dual" else ("policy", "selected_mechanism", "primary_proposal", "transfer_coverage")
+                    normalized["source_selection"] = {k: selection[k] for k in keys}
+                    normalized["source_candidates"] = normalized["candidates"] + normalized["external_anomaly_clues"]
+                    normalized["primary_source_id"] = report["primary_source_candidate_id"]
+                    for candidate in normalized["source_candidates"]:
+                        root = next(r for r in roots if r["root_id"] == candidate["id"])
+                        candidate.update(source_activity_id=root.get("source_activity_id"), anchor_graph_id=root["graph_id"],
+                            protocol_endpoints=root.get("protocol_endpoints"), source_unit=root.get("source_unit", root["component"]))
+                    normalized["source_selection"]["protocol_coverage"] = {k: v for k, v in selection["protocol_observations"].items() if k != "candidates"}
             except DiagnosisError:
                 raise
             except Exception as error:
                 raise DiagnosisError(4, "analysis: " + str(error)) from error
             try:
+                if selected_iteration_view:
+                    from .report_exporter import publish_selected_iteration_report
+                    return publish_selected_iteration_report(directory, output, normalized, roots, tasks)
                 return publish_final_report(directory, output, normalized, roots, tasks)
             except Exception as error:
                 raise DiagnosisError(5, "report publication: " + str(error)) from error
@@ -167,12 +190,14 @@ def main(argv=None):
     analyze.add_argument("--require-clock-alignment", action="store_true")
     analyze.add_argument("--allow-uncalibrated-clock", action="store_true", help="on rejected display calibration, retain node-local axes and report the reason; semantic/graph gates remain required")
     analyze.add_argument("--keep-debug", action="store_true")
+    analyze.add_argument("--selected-iteration-view", action="store_true", help="render selected formal iterations; keep full diagnosis and original debug graph")
     analyze.add_argument("--debug-dir", type=Path)
     analyze.add_argument("--verbose", action="store_true")
     analyze.add_argument("--source-slowdown-factor", default="1.5")
     analyze.add_argument("--wait-slowdown-factor")
     analyze.add_argument("--calibrated-release-intervals", action="store_true")
     analyze.add_argument("--completion-fallback", action="store_true")
+    analyze.add_argument("--source-policy", choices=("legacy", "dual", "dual-v2"), default="legacy")
     from .candidate_screening import POLICIES
     analyze.add_argument("--candidate-policy", choices=POLICIES, default="all",
                          help="experimental admission, default all; deferred observations remain in root_causes.json")

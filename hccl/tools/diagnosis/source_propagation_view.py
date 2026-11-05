@@ -134,7 +134,8 @@ def build_view_model(report):
         source = root["source"]
         chains = [dict(chain, segments=compact_path(report, chain), sentence=branch_summary(report, chain),
                        status_label=STATUS_LABELS[chain["status"]]) for chain in root["chains"]]
-        source_label = ("Host 准备区间" if source["component"] == "host_preparation" else
+        source_label = ("跨机协议区间（不是纯传输耗时）" if source["component"] == "protocol_interval" else
+                        "Host 准备区间" if source["component"] == "host_preparation" else
                         EVENT_LABELS.get(source.get("event"), source.get("event") or "执行任务"))
         display_source = dict(source)
         for key in ("observed_start_ns", "observed_stop_ns"):
@@ -144,7 +145,9 @@ def build_view_model(report):
         category_ranks[category] = category_ranks.get(category, 0) + 1
         candidates.append(dict(root, diagnosis_category=category, category_label=CATEGORY_LABELS[category],
             category_rank=category_ranks[category], source=display_source, chains=chains, source_label=source_label, coordinate=coordinate(source),
-            source_location=("{} · Rank {} · Host 观测区间".format(source["node_id"].rsplit("/", 1)[-1], source["user_rank"])
+            source_location=("{} · Rank {} · 接收端协议区间".format(source["node_id"].rsplit("/", 1)[-1], source["user_rank"])
+                             if source["component"] == "protocol_interval" else
+                             "{} · Rank {} · Host 观测区间".format(source["node_id"].rsplit("/", 1)[-1], source["user_rank"])
                              if source["component"] == "host_preparation" else location(source)),
             duration=duration(source["duration_ns"]), reference=duration(reference_value(source)),
             delta=duration(source["delta_ns"], signed=True), factor=factor(source["slowdown_factor"]),
@@ -154,6 +157,7 @@ def build_view_model(report):
             wait_ranks=sorted({nodes[c["target_wait_graph_id"]]["user_rank"] for c in chains
                                if c["target_wait_graph_id"] in nodes}, key=str)))
     return dict(summary=report["summary"], candidates=candidates, nodes=nodes,
+                analysis_scope=report.get("analysis_scope"),
                 unresolved_observations=report.get("unresolved_observations", []),
                 origins={node:str(value) for node, value in origins.items()},
                 timing_labels=TIMING_LABELS, boundary_labels=BOUNDARY_LABELS)
@@ -247,6 +251,7 @@ aside{background:#f6f7f8;border-right:1px solid #d9dde2;padding:18px 12px}aside 
 #candidates{display:grid;gap:2px}.candidate{border:0;border-left:3px solid transparent;background:transparent;text-align:left;padding:10px;min-width:0;overflow-wrap:anywhere}.candidate[aria-pressed=true]{background:#e6f1fa;border-left-color:#1268a5}.candidate strong,.candidate small{display:block}.candidate small{margin-top:3px}.candidate[hidden]{display:none}
 main{padding:22px 28px;min-width:0}.source-top{display:flex;align-items:flex-start;gap:12px;justify-content:space-between}.tag{display:inline-block;font-size:12px;background:#edf1f4;padding:3px 7px;border-radius:3px;white-space:nowrap}.primary{color:#1268a5;background:#e6f1fa}
 .metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin:20px 0;padding:16px 0;border-top:1px solid #e0e4e8;border-bottom:1px solid #e0e4e8}.metric span{display:block;color:#59636d;font-size:12px}.metric strong{display:block;font-size:21px;font-weight:600;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.increase{color:#b53e20}
+.source-top>div{min-width:0;max-width:100%;overflow-wrap:anywhere}
 .scope{display:flex;gap:10px 24px;flex-wrap:wrap;margin-bottom:8px}.scope strong{font-variant-numeric:tabular-nums}.limit{font-size:12px;color:#59636d;border-left:3px solid #adb5bd;padding-left:10px;margin:12px 0}.warning{color:#845310;background:#fff5df;padding:9px 12px;border-radius:3px}.boundary{color:#a63124;background:#fdf0ed;padding:10px 12px}
 .controls{display:grid;grid-template-columns:130px minmax(0,1fr);gap:14px;margin:22px 0 12px}.controls label{display:block;font-size:12px;color:#59636d;margin-bottom:5px}select{width:100%;min-width:0;padding:8px;border:1px solid #b5bec7;border-radius:4px;background:#fff}
 details{border-top:1px solid #d9dde2;margin-top:20px;padding-top:12px}summary{cursor:pointer;font-weight:600;overflow-wrap:anywhere}.sentence{font-size:15px;margin:12px 0;overflow-wrap:anywhere}.status{font-size:12px;color:#386b47}.status.limited{color:#845310}.status.broken{color:#a63124}
@@ -257,7 +262,7 @@ details{border-top:1px solid #d9dde2;margin-top:20px;padding-top:12px}summary{cu
 @media(max-width:640px){header{padding:16px}.layout{display:block}aside{border-right:0;border-bottom:1px solid #d9dde2;padding:14px 16px}#candidates{max-height:190px;overflow:auto}.candidate{padding:8px}main{padding:18px 16px}.controls{grid-template-columns:1fr}.stage{grid-template-columns:60px 16px minmax(0,1fr);gap:8px}.stage:not(:last-child) .stage-content:after{left:76px}.rail:before{left:3px}.rail:after{left:7px}.metrics{gap:12px}.source-top{flex-wrap:wrap}select,input{font-size:16px}}
 @media print{aside,.downloads,.controls{display:none}.layout{display:block}main{padding:10px}details{break-inside:avoid}}
 </style></head><body>
-<header><div><h1>异常传播诊断</h1><div id="report-counts" class="muted"></div></div>
+<header><div><h1>异常传播诊断</h1><div id="report-counts" class="muted"></div><div id="analysis-scope" class="muted" hidden></div></div>
 <nav class="downloads" aria-label="诊断数据"><a href="report.json">完整 JSON</a><a href="chains.csv">分支 CSV</a><a href="steps.csv">逐跳 CSV</a><a href="chains.md">文字报告</a></nav></header>
 <details id="unresolved-section" style="margin:16px 24px"><summary id="unresolved-title">未归因观测</summary><p>没有完整证据的慢任务或等待，不作为通信内部根因。</p><div id="unresolved-items"></div></details>
 <div class="layout" id="layout"><aside><label for="search">按类别查看</label><input id="search" type="search" placeholder="Rank / iter / 任务名" autocomplete="off"><nav id="candidates" aria-label="分类诊断结果"></nav><p id="no-matches" class="muted" hidden>没有匹配的结果</p></aside>
@@ -280,6 +285,7 @@ const target=chain=>model.nodes[chain.target_wait_graph_id];
 const edgeLabel=hop=>hop.kind==="direct_stream_order_observed"?"同流顺序":hop.kind.includes("notify_sync")?"Record → Wait 通知配对":hop.kind;
 const metric=(label,value,extra="")=>`<div class="metric"><span>${esc(label)}</span><strong class="${extra}">${esc(value)}</strong></div>`;
 $("report-counts").textContent=`${model.summary.communication_source_count??model.summary.candidate_count} 个通信内部候选 · ${model.summary.external_clue_count??0} 个外部线索 · ${model.summary.chain_count} 条已报告路径`;
+if(model.analysis_scope?.kind==="selected_iteration_slice_from_original_artifacts"){$("analysis-scope").hidden=false;$("analysis-scope").textContent=`原图切片 · 正式 iteration ${model.analysis_scope.iterations.join(", ")} · 非全采集`;}
 $("unresolved-title").textContent=`未归因观测（${model.unresolved_observations.length}）`;
 const arrivalText=item=>{const a=item.arrival_observation;if(!a)return "";return `<br>到达时序观测：${a.status==="waiter_advanced_without_observed_producer_delay"?"等待方更早到达，未观察到通知方晚到":a.status==="producer_later_observed"?"观察到通知方晚到，原因尚未确定":"变化混合或在时间分辨率内"}；等待开始变化 ${(Number(a.waiter_start_delta_ns)/1000).toFixed(3)} μs，通知完成变化 ${(Number(a.producer_stop_delta_ns)/1000).toFixed(3)} μs。该观测不是故障根因。`;};
 $("unresolved-items").innerHTML=model.unresolved_observations.map(item=>`<p><strong>${esc(item.status)}</strong> · ${esc(item.node_id)} · Rank ${esc(item.user_rank)} · iter ${esc(item.iteration)} · ${esc(item.graph_id||item.wait_graph_id)}${item.notify_pairing_status==="paired"?" · 已有唯一通知配对，尚未定位慢执行源头":""}<br>${esc(item.reason||JSON.stringify(item.boundary_reason_counts||{}))}${arrivalText(item)}</p>`).join("");

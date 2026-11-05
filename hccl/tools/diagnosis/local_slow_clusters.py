@@ -188,9 +188,9 @@ def selected_cluster_ids(clusters, options, *, metric="score"):
     return {c["region_id"] for c in ranked if Decimal(c[metric]) >= floor}
 
 
-def analyze(tasks, edges, options=ClusterOptions()):
+def analyze(tasks, edges, options=ClusterOptions(), *, alignment=None):
     preliminary, clusters, quality = build_clusters(tasks, edges, options)
-    probe = analyze_selected_tasks(tasks, edges, preliminary, clusters, options, include_wait_roots=False)
+    probe = analyze_selected_tasks(tasks, edges, preliminary, clusters, options, include_wait_roots=False, alignment=alignment)
     by_source = {c["graph_id"]: c for c in probe["candidates"]}
     for cluster in clusters:
         targets = {w for key in cluster["preliminary_graph_ids"] for w in by_source[key]["affected_wait_graph_ids"]}

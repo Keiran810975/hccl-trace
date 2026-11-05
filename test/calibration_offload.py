@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import shlex
@@ -12,14 +13,28 @@ import subprocess
 import tarfile
 
 
-SSH = ["ssh", "-i", str(Path.home() / ".ssh/id_rsa_k1"), "-o", "IdentitiesOnly=yes",
+def ssh_arguments():
+    command = ["ssh", "-i", str(Path.home() / ".ssh/id_rsa_k1"), "-o", "IdentitiesOnly=yes",
        "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=15",
-       "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=2", "commTeam@heter.2.heroism.win"]
+       "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=2"]
+    control = os.environ.get("HCCL_DIAG_SSH_CONTROL_PATH")
+    if control:
+        if not Path(control).is_absolute():
+            raise ValueError("SSH control path must be absolute")
+        command += ["-o", "ControlMaster=auto", "-o", "ControlPersist=600", "-o", "ControlPath=" + control]
+    return command + ["commTeam@heter.2.heroism.win"]
+
+
+SSH = ssh_arguments()
 REPORTS = {"report/" + name for name in ("execution.html", "root_causes.json", "propagation.html")}
 MEMBERS = ("src", "input", "capture", "report.debug", "report", "gpt-output", "peer-preflight", "logs",
            "security", "network", "hold", "evaluation.json", "communication-impact.json", "authorized-state.json",
            "preflight-state.json", "network-port-evidence.json", "cleanup-receipt.json", "node3-preflight.tar",
-           "retain-all-evidence.json")
+           "retain-all-evidence.json", "diagnosis-seal.json", "build-receipt.json", "deployment.json",
+           "source-snapshot.json", "retain-until-verified-archive.json")
+MEMBERS += ('effect-evidence.json', 'authorization.json', 'restoration-verified.json')
+MEMBERS += ('cpu-recovery.json', 'cpu-recovery-transport.json', 'network-observation-unavailable.json')
+MEMBERS += ('failure-restoration-audit.json',)
 REMOVE = ("capture", "report.debug", "peer-preflight", "node3-preflight.tar", "report/execution.html")
 
 
@@ -32,8 +47,11 @@ def file_hash(path):
 
 
 def case_name(name):
-    if not re.fullmatch(r"hccl-diagnose-node03-20261101-2\d\d", name) or name.endswith("-200"):
-        raise ValueError("only new calibration attempts 201..299 are accepted")
+    calibration = bool(re.fullmatch(r"hccl-diagnose-node03-20261101-2\d\d", name)) and not name.endswith("-200")
+    dual = bool(re.fullmatch(r"hccl-diagnose-node03-20261103-52[1-6]", name))
+    repeated = name in {'hccl-diagnose-node03-20261105-' + str(i) for i in range(901, 921)}
+    if not (calibration or dual or repeated):
+        raise ValueError("only reviewed calibration attempts or new dual cases 521..526 are accepted")
     return name
 
 
@@ -81,6 +99,7 @@ print(json.dumps(d))
 
 def verify_archive(archive, manifest, reports=None):
     found = set()
+    regular = set()
     if reports is not None:
         reports.mkdir(parents=True, exist_ok=True)
     with tarfile.open(archive, "r|gz") as stream:
@@ -91,6 +110,16 @@ def verify_archive(archive, manifest, reports=None):
             if member.isdir():
                 continue
             expected = manifest["files"].get(member.name)
+            if member.islnk() and manifest.get('content_deduplicated') is True:
+                target_path = PurePosixPath(member.linkname)
+                target = manifest['files'].get(member.linkname)
+                if (expected is None or target is None or member.size != 0 or member.linkname not in regular
+                        or target_path.is_absolute() or '..' in target_path.parts
+                        or target['size'] != expected['size'] or target['sha256'] != expected['sha256']
+                        or member.name in REPORTS):
+                    raise ValueError('unsafe or unverified content-deduplicated hardlink')
+                found.add(member.name)
+                continue
             if not member.isfile() or expected is None or member.size != expected["size"]:
                 raise ValueError("archive member differs from frozen manifest: " + member.name)
             source = stream.extractfile(member)
@@ -107,6 +136,7 @@ def verify_archive(archive, manifest, reports=None):
             if digest.hexdigest() != expected["sha256"]:
                 raise ValueError("archive content hash differs: " + member.name)
             found.add(member.name)
+            regular.add(member.name)
     if found != set(manifest["files"]):
         raise ValueError("archive is incomplete")
     return found
@@ -124,6 +154,9 @@ def backup(node, name, output):
             raise ValueError("local verified archive changed")
         return receipt
     manifest = remote_json(node, manifest_code(base))
+    deduplicate = name in {'hccl-diagnose-node03-20261105-' + str(i) for i in range(901, 921)}
+    if deduplicate:
+        manifest['content_deduplicated'] = True
     if not manifest["files"]:
         raise ValueError("empty completed capture manifest")
     if shutil.disk_usage(output).free < 30 * 1024**3:
@@ -134,6 +167,28 @@ def backup(node, name, output):
     if partial.exists() or archive.exists():
         raise ValueError("unfinished backup exists; inspect it before retrying")
     cmd = command(node, ["docker", "exec", "zjy-new", "tar", "--hard-dereference", "-czf", "-", "-C", base] + manifest["names"])
+    if deduplicate:
+        # Keep native replay files lossless, but store duplicate DB copies only once.
+        code = """import json,pathlib,sys,tarfile
+base=pathlib.Path(BASE)
+manifest=json.loads((base/'offload-manifest.json').read_text())
+seen={}
+with tarfile.open(fileobj=sys.stdout.buffer,mode='w|gz') as archive:
+ for name,record in sorted(manifest['files'].items()):
+  path=base/name
+  assert path.is_file() and not path.is_symlink() and path.resolve().is_relative_to(base.resolve())
+  item=archive.gettarinfo(str(path),arcname=name)
+  key=(record['size'],record['sha256'],item.mode,item.uid,item.gid)
+  if key in seen and name not in REPORTS:
+   item.type=tarfile.LNKTYPE;item.linkname=seen[key];item.size=0
+   archive.addfile(item)
+  else:
+   with path.open('rb') as stream:archive.addfile(item,stream)
+   seen[key]=name
+""".replace('BASE', repr(base)).replace('REPORTS', repr(REPORTS))
+        # The manifest digest must be identical on both ends before any cleanup.
+        remote_json(node, "import json,pathlib;p=pathlib.Path(" + repr(base + '/offload-manifest.json') + ");d=json.loads(p.read_text());d['content_deduplicated']=True;p.write_text(json.dumps(d,sort_keys=True)+'\\n');print('{}')")
+        cmd = command(node, ['docker', 'exec', 'zjy-new', 'python3', '-c', code])
     with partial.open("xb") as target:
         process = subprocess.Popen(cmd, stdout=target, stderr=subprocess.PIPE)
         try:

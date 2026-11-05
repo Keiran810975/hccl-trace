@@ -121,6 +121,11 @@ class SingleControl:
                        "--timeout", "1800", "--defer-finalize"]
             if kind == "copy_contention":
                 command += ["--buffer-mib", str(self.inj["buffer_mib"])]
+                if "active_timeout_seconds" in self.inj:
+                    seconds = self.inj["active_timeout_seconds"]
+                    if backend != "acl_memcpy_async" or type(seconds) not in (int, float) or not .1 <= seconds <= 5:
+                        raise ValueError("bounded active Copy requires ACL and 0.1--5 seconds")
+                    command += ["--active-timeout", str(seconds)]
             else:
                 command += ["--matrix-size", str(self.inj["matrix_size"]), "--gemm-backend", self.gemm_backend]
         env = dict(os.environ if environment is None else environment,

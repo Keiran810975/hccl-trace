@@ -138,7 +138,7 @@ def preparation_sources(records, rows, edges, coordinates, tasks, options, *, al
         duration = item["stop_ns"] - item["start_ns"]
         if not slow(duration, center, mad, options):
             continue
-        supported, overlaps, clock_errors = [], {}, []
+        supported, overlaps, clock_errors, support_facts = [], {}, [], []
         for edge in syncs[(item["operation_scope"], item["node_id"], item["user_rank"])]:
             src, dst = lookup[edge["src"]], lookup[edge["dst"]]
             changed = task_by_id.get(edge["dst"], {})
@@ -166,6 +166,20 @@ def preparation_sources(records, rows, edges, coordinates, tasks, options, *, al
             if overlap:
                 supported.append(edge)
                 overlaps[edge["dst"]] = overlap
+                def endpoint(row):
+                    return dict(graph_id=row["_graph_id"], node_id=row["_node_id"],
+                        user_rank=row["_user_rank"], device_id=row["_device_id"],
+                        stream_id=row["_stream_id"], task_id=row["_task_id"],
+                        operation_scope=row.get("_operation_scope"), task_kind=row["profiler_task_kind"],
+                        observed_start_ns=waits.ns(row, "start"), observed_stop_ns=waits.ns(row, "stop"))
+                support_facts.append(dict(edge=dict(edge), producer=endpoint(src), wait=endpoint(dst),
+                    wait_comparison={key: changed.get(key) for key in (
+                        "duration_ns", "duration_slow", "reference_count", "reference_iterations",
+                        "reference_mean_ns", "reference_mad_ns")},
+                    overlap_ns=overlap, unique_notify_producer=True,
+                    time_domain="same_node" if src["_node_id"] == dst["_node_id"] else "aligned_estimate",
+                    alignment=(None if src["_node_id"] == dst["_node_id"] else dict(
+                        preparation_ns=[hs, he], wait_ns=[ws, we], sender_error_ns=es, receiver_error_ns=er))))
         anchor = min(supported, key=lambda e: (waits.ns(lookup[e["src"]], "start"), e["edge_id"])) if supported else None
         candidates = rank_rows[(item["operation_scope"], item["node_id"], item["user_rank"])]
         anchor_row = lookup[anchor["src"]] if anchor else min(candidates, key=lambda r: (waits.ns(r, "start"), r["_graph_id"]))
@@ -183,6 +197,7 @@ def preparation_sources(records, rows, edges, coordinates, tasks, options, *, al
             operation_scope=item["operation_scope"], **location_fields(coord),
             algorithm="host", phase="call_preparation", step="", event="prepare_collective", task_kind="host_interval",
             observed_start_ns=item["start_ns"], observed_stop_ns=item["stop_ns"], duration_ns=duration,
+            api_start_ns=item["api_start_ns"], api_stop_ns=item["api_stop_ns"],
             component="host_preparation", status="dependency_supported_candidate" if supported else "unresolved_host_preparation",
             reason=("Observed Host preparation grew before this call's bound Notify producer and overlaps a slow peer Wait; cross-node support uses an observed protocol dependency and estimated clock-error margins, not RDMA hardware completion; graph_id is a device anchor, not the Host activity"
                     if supported else "Observed Host preparation grew, but no unique late Notify producer/slow peer Wait overlap is established with available clock evidence"),
@@ -192,6 +207,7 @@ def preparation_sources(records, rows, edges, coordinates, tasks, options, *, al
             evidence_paths={k: [e["edge_id"] for e in supported if e["dst"] == k] for k in affected},
             host_call_evidence=item["evidence"], upstream_slow_graph_ids=[], traversal_truncated=False,
             observed_wait_overlap_ns=overlap, time_alignment_estimated_error_ns=max(clock_errors, default=None),
+            support_evidence_version=1, supporting_dependencies=support_facts,
             physical_cause="unknown"))
         roots[-1].update(task_domain="host_preparation", task_domain_evidence="public_preparation_and_bound_api")
     return roots

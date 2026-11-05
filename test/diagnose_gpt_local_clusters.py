@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Strict replay and unchanged local Top1 analysis, with no private truth inputs."""
+"""Strict replay, resource Top1 and evidenced preparation-delay selection; no truth inputs."""
 from __future__ import annotations
 
 import argparse
@@ -17,17 +17,22 @@ from hccl.tools.diagnosis import visualize_dependency_graph as graph
 from hccl.tools.diagnosis.visualize_html import build_wait_inventory
 from hccl.tools.diagnosis.local_slow_clusters import ClusterOptions, analyze
 from hccl.tools.diagnosis.wait_backtrace import WORK_KINDS
+from hccl.tools.diagnosis import source_selection
 from test.replay_significant_regions import digest, render
 
 
-def diagnose(manifest, coordinates_path, preparations_path, output):
+def diagnose(manifest, coordinates_path, preparations_path, output, *, source_policy='dual'):
+    if source_policy not in {'dual', 'execution-only'}:
+        raise ValueError('unknown source policy')
     output.mkdir(parents=True, exist_ok=False)
     inputs = dict(manifest_sha256=digest(manifest), coordinates_sha256=digest(coordinates_path),
                   preparations_sha256=digest(preparations_path), truth_accessed=False,
-                  rolling_options=asdict(rolling.RollingOptions()), cluster_options=asdict(ClusterOptions()))
+                  rolling_options=asdict(rolling.RollingOptions()), cluster_options=asdict(ClusterOptions()),
+                  source_policy=source_policy, selection_options=asdict(source_selection.SelectionOptions()))
     inputs['consumer_sha256'] = {name: digest(Path(__file__).resolve().parents[1]/name) for name in (
         'hccl/tools/diagnosis/local_slow_clusters.py', 'hccl/tools/diagnosis/significant_regions.py',
-        'hccl/tools/diagnosis/rolling_diagnosis.py', 'hccl/tools/diagnosis/source_events.py')}
+        'hccl/tools/diagnosis/rolling_diagnosis.py', 'hccl/tools/diagnosis/source_events.py',
+        'hccl/tools/diagnosis/source_selection.py', 'test/diagnose_gpt_local_clusters.py')}
     (output/'input-manifest.json').write_text(json.dumps(inputs, indent=2)+'\n')
     directory, ready = replay_manifest(manifest, output/'analysis', 95)
     if not ready:
@@ -43,6 +48,8 @@ def diagnose(manifest, coordinates_path, preparations_path, output):
         rolling.source_events.load_preparations(preparations_path), rows, edges, coordinates, tasks,
         rolling.RollingOptions())
     report['external_host_observations'] = observations
+    if source_policy == 'dual':
+        report = source_selection.select_sources(report, observations)
     counts = defaultdict(Counter)
     for task in tasks:
         if task.get('stage') == 'measured' and task.get('iteration', -1) >= 5:
@@ -65,7 +72,7 @@ def diagnose(manifest, coordinates_path, preparations_path, output):
         (output/name).write_bytes((directory/name).read_bytes())
     path = output/'report.json'
     path.write_text(json.dumps(report, indent=2, ensure_ascii=False)+'\n')
-    (output/'report.html').write_text(render(report), encoding='utf-8')
+    (output/'report.html').write_text((source_selection.render if source_policy == 'dual' else render)(report), encoding='utf-8')
     (output/'sealed.json').write_text(json.dumps(dict(report_sha256=digest(path),
         resource_comparisons_sha256=digest(output/'resource-comparisons.csv'), truth_accessed=False), indent=2)+'\n')
     print(json.dumps(report['summary']), flush=True)
@@ -77,5 +84,6 @@ if __name__ == '__main__':
     parser.add_argument('--coordinates', type=Path, required=True)
     parser.add_argument('--preparations', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--source-policy', choices=('dual', 'execution-only'), default='dual')
     args = parser.parse_args()
-    diagnose(args.manifest, args.coordinates, args.preparations, args.output)
+    diagnose(args.manifest, args.coordinates, args.preparations, args.output, source_policy=args.source_policy)

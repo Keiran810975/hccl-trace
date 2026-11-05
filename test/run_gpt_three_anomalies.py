@@ -147,7 +147,9 @@ def capture(attempt, case, guard):
     mapping = guard.docker('npu-smi','info','-m')
     (attempt/'logs/runtime-mapping.txt').write_text(mapping)
     import re
-    for logical,physical in ((1,9),(3,11),(5,13),(7,15)):
+    if tuple(guard.cards) not in {(0,1,2,3), (4,5,6,7)}:
+        raise ValueError('this four-rank GPT runner requires an explicitly reviewed whole-card quartet')
+    for logical,physical in zip((1,3,5,7), (2*card+1 for card in guard.cards)):
         if not any(re.match(r'\s*\d+\s+\d+\s+'+str(logical)+r'\s+'+str(physical)+r'\s+Ascend910',line) for line in mapping.splitlines()):
             raise ValueError('reviewed whole-card runtime mapping changed')
     with socket.socket() as port:
@@ -211,6 +213,10 @@ def evaluate(attempt, case):
         start_ns=c['observed_start_ns'],stop_ns=c['observed_stop_ns'],delta_ns=c['delta_ns'],
         overlap_ns=overlap(c),supported_waits=len(c['affected_wait_graph_ids'])) for c in report['external_host_observations']]
     hits=sum(c['hit'] for c in evaluated)
+    def typed_counts(kind):
+        values = [c for c in evaluated if (c['kind'] == 'host_interval') == (kind == 'host_interval')]
+        found = sum(c['hit'] for c in values)
+        return dict(hits=found, count=len(values), precision=found/len(values) if values else None)
     result=dict(case_id=case['case_id'],injection=case['injection'],actual_windows=windows,
         criterion='same declared injection Node/Rank and strictly positive actual-activity overlap',
         communication_evaluates_both_predeclared_endpoints=True if case['injection']['kind']=='communication_contention' else False,
@@ -221,6 +227,9 @@ def evaluate(attempt, case):
         overlapping_resource_factors=[c['slowdown_factor'] for c in inside],
         external_host_observations=host,host_observation_hits=sum(c['overlap_ns']>0 for c in host),
         host_observations_not_counted_as_execution_hits=True,quality=report['quality'],
+        selected_mechanism=report.get('selected_mechanism', 'communication_execution_growth'),
+        execution_tasks=typed_counts('execution'), host_intervals=typed_counts('host_interval'),
+        candidate_unit='host_interval' if typed_counts('host_interval')['count'] else 'device_execution_task',
         report_sha256=seal['report_sha256'],analyzer_reads_injection_truth=False,
         evaluator_reads_truth_after_sealed_diagnosis=True,hardware_interference_duration_claimed=False)
     write(attempt/'evaluation.json',result)

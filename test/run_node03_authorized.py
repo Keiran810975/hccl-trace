@@ -3,14 +3,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import shlex
 import signal
+import socket
 import subprocess
 import sys
 import time
 
-from run_node03_preflight import LOCAL_PARENT, PEER_PARENT, PYTHON, container_command, write
+if __package__:
+    from .run_node03_preflight import LOCAL_PARENT, PEER_PARENT, PYTHON, container_command, write
+else:
+    from run_node03_preflight import LOCAL_PARENT, PEER_PARENT, PYTHON, container_command, write
 
 
 def cancel_capture(root):
@@ -41,6 +46,10 @@ def cancel_capture(root):
 
 
 def root_command(node, command):
+    if node not in (0, 3):
+        raise ValueError('only Node0 and Node3 are authorized')
+    if node == 0 and os.geteuid() == 0 and socket.gethostname().split('.')[0] == 'liteserver-560t-0':
+        return list(command)
     value = ["ssh", "-i", str(Path.home() / ".ssh/KeyPair-f1dd.pem"), "-o", "IdentitiesOnly=yes",
              "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=15"]
     if node == 0:
@@ -120,7 +129,8 @@ def main():
         state["validation_passed"] = True
     except BaseException as error:
         state.update(status="failed", error=str(error))
-        if (args.communication_calibration or args.short_copy_burst) and validation_process is not None:
+        repeat20 = args.formal_case and json.loads(args.formal_case.read_text()).get('experiment_contract', {}).get('profile') == 'multinode20-v1'
+        if (args.communication_calibration or args.short_copy_burst or repeat20) and validation_process is not None:
             try:
                 cancel_capture(root)
             except Exception as cleanup_error:

@@ -39,6 +39,8 @@ SOURCE_FIELDS += ("group_id", "call_site", "occurrence", "reference_value_ns", "
 SOURCE_FIELDS += ("diagnosis_category", "task_domain", "category_rank", "cross_operation")
 SOURCE_FIELDS += ("local_completion_evidence", "dependency_timing", "communication_context")
 SOURCE_FIELDS += ("event_slow",)
+SOURCE_FIELDS += ("protocol_endpoints", "source_selection_policy", "anchor_graph_id")
+SOURCE_FIELDS += ("source_unit",)
 SOURCE_FIELDS += ("source_region_id", "source_region_rank", "source_region_budget_ns", "ranking_execution_budget_ns",
                   "ranking_metric", "supported_wait_max_excess_ns", "supported_wait_excess_beyond_source_growth_ns")
 LIMITS = [
@@ -46,7 +48,7 @@ LIMITS = [
     "Only existing reported evidence paths are expanded; downstream descendants are not exhaustively searched.",
     "A path and a Wait duration increase do not measure the candidate's individual causal contribution.",
     "Concurrent Wait increases must not be summed as workload completion loss.",
-    "Cross-node clocks are not aligned; no cross-node timestamp subtraction or global latency sum is performed.",
+    "Cross-node hops retain independent calibration limits when present; uncalibrated hops remain explicit and no global latency sum is performed.",
     "Host preparation is an observed interval. Its device anchor is not a fabricated Host-to-device edge.",
     "Missing/disconnected paths and incompatible local timestamps stay explicit, without inferred repair.",
 ]
@@ -96,7 +98,7 @@ def build_report(rows, edges, candidates, comparisons=(), *, primary_source_cand
         return facts[identifier]
 
     for rank, root in enumerate(candidates, 1):
-        if root["component"] not in {"execution", "host_preparation"}:
+        if root["component"] not in {"execution", "host_preparation", "protocol_interval"}:
             raise ValueError("only execution and observed Host candidates are supported; not legacy gap roots")
         anchor = root["graph_id"]
         category = source_category(root, nodes.get(anchor, {}))
@@ -106,7 +108,7 @@ def build_report(rows, edges, candidates, comparisons=(), *, primary_source_cand
             diagnosis_category=category,
             primary=category == INTERNAL and root["root_id"] == primary_source_candidate_id,
             source={k:root.get(k) for k in SOURCE_FIELDS}, anchor_graph_id=anchor,
-            anchor_meaning="observed_device_anchor_only" if root["component"]=="host_preparation" else "source_execution",
+            anchor_meaning="observed_device_anchor_only" if root["component"] in {"host_preparation", "protocol_interval"} else "source_execution",
             status=root["status"], chains=[])
         for target in dict.fromkeys(root.get("affected_wait_graph_ids", [])):
             path = root.get("evidence_paths", {}).get(target)
@@ -153,9 +155,16 @@ def build_report(rows, edges, candidates, comparisons=(), *, primary_source_cand
                                     and timing.get("wait_profiler_interval_ns") == [dst["start_ns"], dst["stop_ns"]]
                                     and "ffts" not in edge["kind"]
                                     and src["subtask_id"] < 0 and dst["subtask_id"] < 0)
+                    protocol_clock = (timing if timing and root.get("source_selection_policy") in {"multinode_dual_v1", "multinode_dual_v2"}
+                        and timing.get("timing_domain") == "independent_network_probe_estimate"
+                        and timing.get("status") == "accepted" and src["node_id"] != dst["node_id"]
+                        and timing.get("source_profiler_interval_ns") == [src["start_ns"], src["stop_ns"]]
+                        and timing.get("target_profiler_interval_ns") == [dst["start_ns"], dst["stop_ns"]] else None)
                     chain["hops"].append(dict(edge_id=identifier, src=edge["src"], dst=edge["dst"],
                         kind=edge["kind"], confidence=edge["confidence"], reason=edge.get("reason", ""),
-                        timing_status=timing["timing_status"] if valid_timing else timing_check(edge, src, dst),
+                        timing_status=(timing["timing_status"] if valid_timing else "protocol_dependency_with_estimated_clock_limits"
+                            if protocol_clock else timing_check(edge, src, dst)),
+                        protocol_clock_evidence=protocol_clock,
                         calibrated_release_evidence=timing if valid_timing else None))
                     chain["edge_ids"].append(identifier)
                     cursor = edge["dst"]
@@ -238,7 +247,7 @@ def export_report(report, directory):
 
 
 def load_csv_records(path, *, candidates=False, graph_ids=None):
-    integer_fields = {"user_rank","device_id","stream_id","task_id","iteration","block","bucket","observed_start_ns","observed_stop_ns","duration_ns","reference_count","modeled_execution_gain_ns"}
+    integer_fields = {"user_rank","device_id","stream_id","task_id","iteration","block","bucket","occurrence","observed_start_ns","observed_stop_ns","duration_ns","reference_count","modeled_execution_gain_ns"}
     boolean_fields = {"duration_slow","traversal_truncated","other_backtrace_branches_truncated", "primary_eligible"}
     records=[]
     with Path(path).open(encoding="utf-8-sig",newline="") as stream:

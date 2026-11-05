@@ -2,10 +2,21 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
 from hccl.tools.diagnosis.clock_alignment import raw_to_profiler
+
+
+def network_active_interval(activity):
+    begin = activity.get("first_confirmed_limit_raw_ns", activity["started_raw_ns"])
+    end = activity["finished_raw_ns"]
+    if (type(begin) is not int or type(end) is not int or end <= begin
+            or "first_confirmed_limit_raw_ns" in activity and not (
+                activity["apply_returned_raw_ns"] <= begin <= activity["started_raw_ns"])):
+        raise ValueError("invalid confirmed network active interval")
+    return begin, end
 
 
 def validate_network_window(data, case, activity):
@@ -34,8 +45,13 @@ def validate_network_window(data, case, activity):
 
 
 def evaluate(root):
-    case = json.loads((root / "input/case.json").read_text())
     report = json.loads((root / "report/root_causes.json").read_text())
+    if "source_selection" in report:
+        seal = json.loads((root / "diagnosis-seal.json").read_text())
+        if seal.get('truth_accessed') is not False or any(hashlib.sha256((root/'report'/name).read_bytes()).hexdigest()!=value
+                for name,value in seal['sha256'].items()):
+            raise ValueError('dual diagnosis must be sealed before independent evaluation')
+    case = json.loads((root / "input/case.json").read_text())
     if not report["quality"]["pipeline_passed"] or report["quality"]["rank_count"] != 8:
         raise ValueError("complete eight-rank diagnosis is required before evaluation")
     windows = []
@@ -74,6 +90,8 @@ def evaluate(root):
             elif activity.get("operations", 0) <= 0 or activity.get("max_error") != 0:
                 raise ValueError("background activity did not actually execute correctly")
             begin, end = activity["started_raw_ns"], activity["finished_raw_ns"]
+            if filename == "network-result.json":
+                begin, end = network_active_interval(activity)
         if end <= begin:
             raise ValueError("actual injection interval is empty")
         start, stop = clocks[0]
@@ -90,14 +108,17 @@ def evaluate(root):
                             start_ns=raw_to_profiler(begin, start, stop),
                             stop_ns=raw_to_profiler(end, start, stop),
                             clock_conversion="cann_start_offset"))
-    hits = [c["id"] for c in report["candidates"] if any(c["node_id"] == w["node_id"]
+    candidates = report.get("source_candidates", report["candidates"])
+    hits = [c["id"] for c in candidates if any(c["node_id"] == w["node_id"]
             and c["user_rank"] == w["user_rank"] and min(c["observed_stop_ns"], w["stop_ns"]) > max(c["observed_start_ns"], w["start_ns"])
             for w in windows)]
     return dict(case_id=case["case_id"], injection=injection, diagnosis_status=report["diagnosis_status"],
-                pipeline_passed=True, windows=windows, candidate_count=len(report["candidates"]),
+                pipeline_passed=True, windows=windows, candidate_count=len(candidates),
                 hit_candidate_ids=hits, candidate_hit_count=len(hits), any_candidate_hit=bool(hits),
-                candidate_hit_fraction=len(hits) / len(report["candidates"]) if report["candidates"] else None,
-                primary_hit=report["primary_candidate_id"] in hits, chain_count=report["propagation"]["chain_count"],
+                candidate_hit_fraction=len(hits) / len(candidates) if candidates else None,
+                primary_hit=report.get("primary_source_id", report["primary_candidate_id"]) in hits, chain_count=report["propagation"]["chain_count"],
+                source_units=[c.get("source_unit", "execution") for c in candidates],
+                candidates=candidates, selected_mechanism=report.get("source_selection", {}).get("selected_mechanism"),
                 quality=report["quality"], normal_false_positive_candidate_count=len(report["candidates"]) if not owners else None)
 
 

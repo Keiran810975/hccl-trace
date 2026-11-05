@@ -118,7 +118,7 @@ def main():
     torch_npu.npu.manual_seed_all(case["workload_seed"])
     torch.set_num_threads(1)
     output = args.output
-    if case.get('experiment_contract', {}).get('profile') == 'gpt-three-anomalies-v1':
+    if case.get('experiment_contract', {}).get('profile') in {'gpt-three-anomalies-v1', 'gpt-copy-window-v1'}:
         if store is not None:
             raise ValueError('the bounded three-anomaly experiment is single-node only')
         from test.gpt_three_anomaly_control import GptThreeAnomalyControl

@@ -69,6 +69,18 @@ class LocalSlowClusterTests(unittest.TestCase):
         self.assertEqual(report["summary"]["candidate_count"], 1)
         self.assertFalse(report["candidates"][0]["affected_wait_graph_ids"])
 
+    def test_stream_order_cannot_cross_a_wait_released_by_another_source(self):
+        values = history([task("source", stop=30),
+            task("block", "notify_wait", start=31, stop=100, mean="10"),
+            task("foreign", "notify_record", start=98, stop=99, mean="1"),
+            task("record", "notify_record", start=100, stop=101, mean="1"),
+            task("downstream", "notify_wait", start=50, stop=110, mean="10")])
+        links = [edge("source", "block"), edge("foreign", "block", True),
+                 edge("block", "record"), edge("record", "downstream", True)]
+        report = analyze(values, links)
+        self.assertFalse(report["chains"])
+        self.assertEqual(report["candidates"][0]["boundary_counts"]["stream_order_is_not_wait_release"], 1)
+
     def test_default_top1_keeps_only_best_cluster_with_near_tie_audited(self):
         values = history([task("a", stop=30), task("b", stop=29)])
         report = analyze(values, [])

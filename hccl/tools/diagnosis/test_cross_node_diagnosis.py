@@ -56,12 +56,22 @@ class CrossNodeDiagnosisTests(unittest.TestCase):
 
     def test_links_existing_upstream_candidates_not_injection_truth(self):
         rows, edges, coordinates = capture()
-        root = dict(root_id="source", status="dependency_supported_candidate",
+        root = dict(root_id="source", graph_id="payload-7", status="dependency_supported_candidate",
                     evidence_paths={"done-7": ["payload-signal-7", "signal-done-7"]})
         report = self.report(rows, edges, coordinates, rolling_report=dict(root_causes=[root]))
         item, = [s for s in report["segments"] if s["is_slow"]]
         self.assertEqual(item["diagnosis"], "upstream_source_candidates")
         self.assertEqual(item["source_root_ids"], ["source"])
+
+    def test_existing_but_disconnected_or_wrong_iteration_edges_do_not_explain(self):
+        rows, edges, coordinates = capture()
+        for path in (["payload-signal-6", "signal-done-7"], ["signal-done-7", "payload-signal-7"]):
+            root = dict(root_id="source", graph_id="payload-7", status="dependency_supported_candidate",
+                        evidence_paths={"done-7": path})
+            item = next(s for s in self.report(rows, edges, coordinates,
+                rolling_report=dict(root_causes=[root]))["segments"] if s["is_slow"])
+            self.assertEqual(item["diagnosis"], "cross_node_path_candidate")
+            self.assertFalse(item["source_root_ids"])
 
     def test_missing_mapping_history_and_ambiguity_do_not_get_guessed(self):
         rows, edges, coordinates = capture()

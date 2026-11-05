@@ -97,20 +97,9 @@ def select_regions(tasks, options=RegionOptions()):
     return preliminary, regions
 
 
-def _edge_status(edge, a, b):
-    if "ffts" in edge["kind"]:
-        return "ffts_not_complete_hardware_dag"
-    if a["node_id"] != b["node_id"]:
-        return "uncalibrated_cross_node_boundary"
-    if edge["kind"] == "direct_stream_order_observed":
-        return "accepted" if a["observed_stop_ns"] <= b["observed_start_ns"] else "incompatible_stream_order_timestamps"
-    if a["task_kind"] != "notify_record" or b["task_kind"] != "notify_wait":
-        return "unsupported_or_unmeasured_notify_release"
-    if a["observed_stop_ns"] > b["observed_stop_ns"]:
-        return "incompatible_notify_timestamps"
-    if a["observed_stop_ns"] <= b["observed_start_ns"]:
-        return "signal_precedes_wait_start"
-    return "accepted"
+def _edge_status(edge, a, b, clocks=None):
+    from .dependency_timing import edge_observation
+    return edge_observation(edge, a, b, clocks or {})["status"]
 
 
 def analyze(tasks, edges, options=RegionOptions()):
@@ -119,8 +108,11 @@ def analyze(tasks, edges, options=RegionOptions()):
     return analyze_selected_tasks(tasks, edges, preliminary, regions, options)
 
 
-def analyze_selected_tasks(tasks, edges, preliminary, regions, options, *, include_wait_roots=True):
+def analyze_selected_tasks(tasks, edges, preliminary, regions, options, *, include_wait_roots=True, alignment=None):
     """Expand evidence for explicitly selected resource groups without rebuilding edges."""
+    from .clock_alignment import models_from_report
+    from .dependency_timing import edge_observation
+    clocks = models_from_report(alignment)
     nodes = {t["graph_id"]: t for t in tasks}
     if len(nodes) != len(tasks):
         raise ValueError("duplicate task graph identity")
@@ -180,7 +172,7 @@ def analyze_selected_tasks(tasks, edges, preliminary, regions, options, *, inclu
                     continue
             for edge in predecessors:
                 parent = nodes[edge["src"]]
-                status = _edge_status(edge, parent, current)
+                status = _edge_status(edge, parent, current, clocks)
                 if not same_iteration(parent, target):
                     boundaries["iteration_boundary"] += 1
                 elif status != "accepted":
@@ -219,7 +211,7 @@ def analyze_selected_tasks(tasks, edges, preliminary, regions, options, *, inclu
             for edge in outgoing[current_id]:
                 target_id = edge["dst"]
                 target = nodes[target_id]
-                status = _edge_status(edge, current, target)
+                status = _edge_status(edge, current, target, clocks)
                 if not same_iteration(root, target):
                     boundaries["iteration_boundary"] += 1
                     continue
@@ -227,6 +219,9 @@ def analyze_selected_tasks(tasks, edges, preliminary, regions, options, *, inclu
                     boundaries[status] += 1
                     continue
                 is_sync = "notify_sync" in edge["kind"]
+                if target["task_kind"] == "notify_wait" and not is_sync:
+                    boundaries["stream_order_is_not_wait_release"] += 1
+                    continue
                 if is_sync and len([e for e in incoming[target_id] if "notify_sync" in e["kind"]]) != 1:
                     boundaries["ambiguous_notify_producers"] += 1
                     continue
@@ -238,7 +233,9 @@ def analyze_selected_tasks(tasks, edges, preliminary, regions, options, *, inclu
                     if target_id not in targets:
                         chains.append(dict(chain_id=chain_id, source_graph_id=identifier, target_graph_id=target_id,
                             edge_ids=path, source_factor=root["slowdown_factor"], target_factor=target["slowdown_factor"],
-                            evidence="actual_dependency_and_observed_slow_wait", causal_contribution_ns=None))
+                            evidence="actual_dependency_and_observed_slow_wait", causal_contribution_ns=None,
+                            timing_evidence={key: edge_observation(links[key], nodes[links[key]["src"]], nodes[links[key]["dst"]], clocks)
+                                for key in path if nodes[links[key]["src"]]["node_id"] != nodes[links[key]["dst"]]["node_id"]}))
                         targets.append(target_id)
                 if target["task_kind"] == "notify_wait" and not slow(target, options.propagation_factor, options):
                     boundaries["wait_below_propagation_threshold"] += 1

@@ -6,8 +6,9 @@ from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from .calibration_offload import case_name, verify_archive, command
+from .calibration_offload import case_name, verify_archive, command, ssh_arguments
 
 
 class CalibrationOffloadTests(unittest.TestCase):
@@ -49,6 +50,10 @@ class CalibrationOffloadTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 case_name(name)
         self.assertEqual(case_name("hccl-diagnose-node03-20261101-201"), "hccl-diagnose-node03-20261101-201")
+        self.assertEqual(case_name("hccl-diagnose-node03-20261103-521"), "hccl-diagnose-node03-20261103-521")
+        for suffix in ("520", "527", "501"):
+            with self.assertRaises(ValueError):
+                case_name("hccl-diagnose-node03-20261103-" + suffix)
 
     def test_peer_uses_strict_host_keys_and_no_private_key_contents(self):
         value = command(3, ["docker", "exec", "zjy-new", "true"])
@@ -56,6 +61,17 @@ class CalibrationOffloadTests(unittest.TestCase):
         self.assertIn("StrictHostKeyChecking=yes", value[-1])
         with self.assertRaises(ValueError):
             command(2, ["true"])
+
+    def test_optional_owned_connection_reuse_keeps_host_key_checks(self):
+        with patch.dict("os.environ", {"HCCL_DIAG_SSH_CONTROL_PATH": "/private/tmp/own/session"}):
+            value = ssh_arguments()
+        self.assertIn("ControlPath=/private/tmp/own/session", value)
+        self.assertIn("ControlMaster=auto", value)
+        self.assertIn("StrictHostKeyChecking=yes", value)
+        self.assertEqual(value[-1], "commTeam@heter.2.heroism.win")
+        with patch.dict("os.environ", {"HCCL_DIAG_SSH_CONTROL_PATH": "relative"}):
+            with self.assertRaisesRegex(ValueError, "absolute"):
+                ssh_arguments()
 
 
 if __name__ == "__main__":

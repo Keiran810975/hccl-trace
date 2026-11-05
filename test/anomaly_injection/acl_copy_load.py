@@ -76,6 +76,35 @@ class AclCopies:
             self.initialized = False
 
 
+def copy_window(copies, directory, deadline, *, probe_operations=0, active_timeout=0):
+    started, operations = raw_ns(), 0
+    active_deadline = time.monotonic() + active_timeout if active_timeout else None
+    spans = []
+    while True:
+        if probe_operations and operations >= probe_operations:
+            reason = "probe_operations_completed"
+            break
+        if not probe_operations and (directory / "stop").exists():
+            reason = "foreground_iteration_completed"
+            break
+        if active_deadline is not None and time.monotonic() >= active_deadline:
+            reason = "active_timeout"
+            break
+        if time.monotonic() >= deadline:
+            raise TimeoutError("copy active/finalize timeout")
+        begin = raw_ns()
+        copies.copy()
+        spans.append([begin, raw_ns()])
+        operations += 1
+        if operations == 1:
+            (directory / "active").touch()
+    if operations <= 0:
+        raise RuntimeError("no active D2D copies")
+    return dict(started_raw_ns=started, finished_raw_ns=raw_ns(), operations=operations,
+                copy_host_envelopes_raw_ns=spans, active_stop_reason=reason,
+                hardware_duration_claimed=False)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kind", choices=("copy",), default="copy")
@@ -85,11 +114,14 @@ def main():
     parser.add_argument("--timeout", type=float, default=1800)
     parser.add_argument("--defer-finalize", action="store_true")
     parser.add_argument("--probe-operations", type=int, default=0)
+    parser.add_argument("--active-timeout", type=float, default=0)
     args = parser.parse_args()
     if args.device < 0 or not 1 <= args.buffer_mib <= 2048 or args.timeout <= 0 or args.probe_operations < 0:
         parser.error("invalid bounded copy configuration")
     if args.probe_operations and args.defer_finalize:
         parser.error("standalone probe cannot await a foreground finalize")
+    if args.active_timeout and (not .1 <= args.active_timeout <= 5 or args.probe_operations):
+        parser.error("active timeout must be 0 or 0.1--5 seconds without a standalone probe")
     directory = args.control_dir
     directory.mkdir(parents=True, exist_ok=True)
     if (directory / "result.json").exists() or (directory / "ready").exists():
@@ -105,22 +137,8 @@ def main():
                 if time.monotonic() >= deadline:
                     raise TimeoutError("copy start timeout")
                 time.sleep(.005)
-        started, operations = raw_ns(), 0
-        while True:
-            if args.probe_operations and operations >= args.probe_operations:
-                break
-            if not args.probe_operations and (directory / "stop").exists():
-                break
-            if time.monotonic() >= deadline:
-                raise TimeoutError("copy active/finalize timeout")
-            copies.copy()
-            operations += 1
-            if operations == 1:
-                (directory / "active").touch()
-        finished = raw_ns()
-        if operations <= 0:
-            raise RuntimeError("no active D2D copies")
-        activity = dict(started_raw_ns=started, finished_raw_ns=finished, operations=operations, validation_status="pending")
+        activity = dict(copy_window(copies, directory, deadline, probe_operations=args.probe_operations,
+                                   active_timeout=args.active_timeout), validation_status="pending")
         (directory / "activity-window.json").write_text(json.dumps(activity) + "\n")
         if args.defer_finalize:
             (directory / "paused").touch()
@@ -132,7 +150,7 @@ def main():
         copies.validate()
         result = dict(kind="copy", backend="aclrtMemcpyAsync", memcpy_kind="ACL_MEMCPY_DEVICE_TO_DEVICE",
                       pid=os.getpid(), runtime_device_index=args.device, buffer_mib=args.buffer_mib,
-                      started_raw_ns=started, finished_raw_ns=finished, operations=operations,
+                      **{k: v for k, v in activity.items() if k != "validation_status"},
                       finalize_deferred=args.defer_finalize, finalize_authorized_raw_ns=authorized,
                       max_error=0, status="completed_not_proof_of_contention")
         (directory / "result.json").write_text(json.dumps(result, indent=2) + "\n")

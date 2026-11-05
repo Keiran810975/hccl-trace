@@ -15,7 +15,7 @@ def owned_processes(observations, base):
         "/src/test/gpt2_train.py", "/src/examples/diagnosis_collectives.py",
         "/src/test/device_context_hold.py", "/src/test/anomaly_injection/npu_background_load.py",
         "/src/test/anomaly_injection/acl_copy_load.py", "/bin/single_process_comm_load",
-        "/src/test/diagnose_gpt_local_clusters.py")}
+        "/src/test/diagnose_gpt_local_clusters.py", "/src/test/diagnose_single_gpt40.py")}
     selected = {pid for pid, item in observations.items() if scripts.intersection(item["argv"])}
     while True:
         children = {pid for pid, item in observations.items() if item["parent"] in selected}
@@ -42,7 +42,9 @@ def inspect(proc=Path("/proc")):
 
 def terminate(base):
     extra = {"/workspace/gpt2-three-anomalies-20261102-"+str(i) for i in (101, 102, 103)}
-    if not re.fullmatch(r"/workspace/hccl-diagnose-node03-[0-9-]+", base) and base not in extra:
+    copy_suite = base in {"/workspace/hccl-diagnose-single-20261104-" + str(i)
+                         for i in list(range(701, 711)) + list(range(801, 811))}
+    if not re.fullmatch(r"/workspace/hccl-diagnose-(?:node03-[0-9-]+|single-20261103-6[0-4][0-9])", base) and base not in extra and not copy_suite:
         raise ValueError("an exact owned attempt path is required")
     initial = owned_processes(inspect(), base)
     if os.getpid() in initial:

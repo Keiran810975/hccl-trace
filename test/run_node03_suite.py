@@ -24,6 +24,8 @@ def main():
     parser.add_argument("--validated-smoke", type=Path)
     parser.add_argument("--validated-replay", type=Path, help="separate successful read-only replay of the same smoke capture")
     parser.add_argument("--reuse-normal", type=Path, help="reuse a restored real 10+50 normal capture after successful audited CPU diagnosis")
+    parser.add_argument("--dual-source", action="store_true", help="frozen new six-run policy with raw evidence retained")
+    parser.add_argument("--verified-offload", action="store_true", help="wait for a verified lossless local backup between dual runs")
     args = parser.parse_args()
     root = args.root.resolve()
     if root.parent != LOCAL_PARENT or socket.gethostname().split(".")[0] != "liteserver-560t-0":
@@ -35,6 +37,8 @@ def main():
 
 
 def run_suite(args, root):
+    if args.verified_offload and not args.dual_source:
+        raise ValueError("verified offload is limited to the explicit dual-source suite")
     if bool(args.validated_smoke) == bool(args.reuse_normal):
         raise ValueError("choose either validated short training or a completed formal normal experiment")
     training = (args.reuse_normal or args.validated_smoke).resolve()
@@ -63,8 +67,12 @@ def run_suite(args, root):
         expected = attestation["files"].get(str(source.relative_to("src"))) if attestation else hashlib.sha256((replay / source).read_bytes()).hexdigest()
         if actual != expected:
             raise ValueError("formal consumer differs from the independently validated replay")
-    plan = build_plan()
-    validate_plan(plan)
+    if args.dual_source:
+        from multinode_dual_suite import plan as dual_plan
+        plan = dual_plan()
+    else:
+        plan = build_plan()
+        validate_plan(plan)
     if args.reuse_normal and json.loads((training / "input/case.json").read_text()) != plan["cases"][0]:
         raise ValueError("reused normal experiment differs from the exact frozen formal workload")
     if attestation and not attestation.get("pipeline_passed"):
@@ -90,6 +98,10 @@ def run_suite(args, root):
                 shutil.copytree(root / "src", current / "src")
                 (current / "input").mkdir()
                 shutil.copy2(root / "input/aicpu_hcomm.tar.gz", current / "input/aicpu_hcomm.tar.gz")
+                if args.dual_source:
+                    shutil.copytree(root / "deploy", current / "deploy")
+                    for metadata_name in ("build-receipt.json", "deployment.json"):
+                        shutil.copy2(root / metadata_name, current / metadata_name)
                 write(current / "input/case.json", case)
                 if case["injection"]["kind"] == "bandwidth_limit":
                     proof = json.loads((Path(state["cases"][0]["directory"]) / "network-port-evidence.json").read_text())
@@ -99,6 +111,10 @@ def run_suite(args, root):
                     "shutil.copytree(Path(" + repr(str(Path(PEER_PARENT) / root.name / "src")) + "),r/'src');"
                     "(r/'input').mkdir();shutil.copy2(Path(" + repr(str(Path(PEER_PARENT) / root.name / "input/aicpu_hcomm.tar.gz")) + "),r/'input/aicpu_hcomm.tar.gz');"
                     "(r/'input/case.json').write_text(" + repr(json.dumps(case)) + ")")
+            if args.dual_source:
+                peer_root = str(Path(PEER_PARENT) / root.name)
+                code += (";shutil.copytree(Path(" + repr(peer_root) + ")/'deploy',r/'deploy');"
+                    "[shutil.copy2(Path(" + repr(peer_root) + ")/n,r/n) for n in ('build-receipt.json','deployment.json')]")
             if not reused:
                 execute(ssh(shlex.join(["python3", "-c", code])), timeout=90)
             log = (root / (case["case_id"] + ".log")).open("x")
@@ -106,9 +122,13 @@ def run_suite(args, root):
                 command = [sys.executable, str(current / "src/test/run_node03_authorized.py"), "--root", str(current),
                            "--gpt", "--formal-case", str(current / "input/case.json")]
                 if not reused:
-                    result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=6500)
-                    if result.returncode:
-                        raise RuntimeError("formal capture/diagnosis/restoration failed for " + case["case_id"])
+                    if args.dual_source:
+                        from run_communication_calibration import protected_run
+                        protected_run(command, log)
+                    else:
+                        result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=6500)
+                        if result.returncode:
+                            raise RuntimeError("formal capture/diagnosis/restoration failed for " + case["case_id"])
                 base = "/workspace/" + name
                 evaluated = json.loads(execute(container_command("/workspace/" + root.name, 0, shlex.join([PYTHON,
                     "/workspace/" + root.name + "/src/test/node03_evaluate.py", "--root", base])), timeout=120))
@@ -119,6 +139,15 @@ def run_suite(args, root):
                 state["cases"].append(evaluated)
                 state["completed"] = len(state["cases"])
                 write(state_path, state)
+                if args.dual_source:
+                    if args.verified_offload:
+                        from run_communication_calibration import wait_for_archive
+                        wait_for_archive(root, current, state, state_path)
+                        state["status"] = "running"
+                        write(state_path, state)
+                    else:
+                        write(current / "retain-all-evidence.json", dict(retain_all_evidence=True, source_policy="dual"))
+                    continue
                 # Only new raw captures created by this case are removed, after report/evaluation and restoration passed.
                 for node in (0, 1):
                     cleanup = ("from pathlib import Path;import shutil; r=Path(" + repr(base) + ");"

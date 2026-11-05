@@ -30,6 +30,9 @@ class MultiNodeControl(SingleControl):
         self.network_iterations = []
         self.network_closed = False
         self.communication_scoped = config is not None and self.case.get("experiment_contract", {}).get("profile") == "communication-calibration-v1"
+        self.bounded_interference = self.case.get("experiment_contract", {}).get("profile") in {"multinode-dual-v1", "multinode20-v1"}
+        if self.bounded_interference:
+            self.communication_scoped = self.kind not in {"normal", "progress_delay", "bandwidth_limit"}
         if self.kind == "communication_contention":
             self.owner = rank in {self.inj["target_rank"], self.inj["peer_rank"]}
 
@@ -54,7 +57,7 @@ class MultiNodeControl(SingleControl):
                            HCCL_NPU_SOCKET_PORT_RANGE="57200-57327")
         self.log = (self.directory / "background.log").open("x", encoding="utf-8")
         self.process = subprocess.Popen(command, env=environment, stdout=self.log, stderr=subprocess.STDOUT, start_new_session=True)
-        self.record("background_spawn", pid=self.process.pid, command=command, cross_node_pair=[0, 4],
+        self.record("background_spawn", pid=self.process.pid, command=command, cross_node_pair=sorted([self.inj['peer_rank'], self.inj['target_rank']]),
                     profiling_environment_isolated=True, shared_path_verified=False)
         self.wait("ready")
 
@@ -103,6 +106,14 @@ class MultiNodeControl(SingleControl):
                     verified_started_raw_ns=ack["started_raw_ns"])
 
     def after_iteration(self, iteration):
+        if (self.bounded_interference and self.owner and self.kind in {
+                "copy_contention", "communication_contention", "compute_contention"} and iteration == self.inj["iteration"]):
+            if not self.started:
+                raise ValueError("selected collective did not activate the interference")
+            self.stop()
+            self.wait("paused")
+            self.record("background_paused_before_next_iteration")
+            return
         if self.kind != "bandwidth_limit" or not self.owner or self.network_first_iteration is None or self.stop_requested:
             return
         expected = self.network_first_iteration + len(self.network_iterations)

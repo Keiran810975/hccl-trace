@@ -24,6 +24,9 @@ HOST_HASH = "498c951114cff9a2d6cd5e02958a6bf1bc3a90cd661ac93d4b0ba4243430a64e"
 NODE0_BUILD_PROBES = {"semantic-coverage-20261102", "gpt2-semantic-20261102-001",
     "gpt2-three-anomalies-20261102-101", "gpt2-three-anomalies-20261102-102",
     "gpt2-three-anomalies-20261102-103"}
+SDMA10_ROOTS = frozenset("hccl-diagnose-single-20261104-" + str(i) for i in range(700, 711))
+SDMA03_ROOTS = frozenset("hccl-diagnose-single-20261104-" + str(i) for i in range(800, 811))
+MULTINODE20_ROOTS = frozenset("hccl-diagnose-node03-20261105-" + str(i) for i in range(900, 921))
 
 
 def write(path, value):
@@ -36,7 +39,9 @@ def scope(root, hostname=None):
     parent = PARENTS.get((hostname or socket.gethostname()).split(".")[0])
     root = root.resolve()
     semantic_probe = root.name in NODE0_BUILD_PROBES and (hostname or socket.gethostname()).split(".")[0] == "liteserver-560t-0"
-    if parent is None or root.parent != parent.resolve() or not (semantic_probe or re.fullmatch(r"hccl-diagnose-node03-[0-9-]+", root.name)):
+    single_suite = bool(re.fullmatch(r"hccl-diagnose-single-20261103-6[0-4][0-9]", root.name)) and (hostname or socket.gethostname()).split(".")[0] == "liteserver-560t-0"
+    copy_suite = root.name in SDMA10_ROOTS | SDMA03_ROOTS and (hostname or socket.gethostname()).split(".")[0] == "liteserver-560t-0"
+    if parent is None or root.parent != parent.resolve() or not (semantic_probe or single_suite or copy_suite or re.fullmatch(r"hccl-diagnose-node03-[0-9-]+", root.name)):
         raise ValueError("only the explicitly authorized Node0/Node3 workspace is allowed")
     return root
 
@@ -64,11 +69,41 @@ class Guard:
         self.device_hash, self.host_hash = DEVICE_HASH, HOST_HASH
         self.host_library = "/workspace/nf-20261022/deploy/lib64/libhcomm.so"
         self.host_libraries = {self.host_library: self.host_hash}
-        if self.root.name in NODE0_BUILD_PROBES:
+        multi20 = self.root.name in MULTINODE20_ROOTS
+        multi_build = (self.root.name.startswith("hccl-diagnose-node03-20261103-") or multi20) and (self.root / "build-receipt.json").is_file()
+        single_build = bool(re.fullmatch(r"hccl-diagnose-single-20261103-6[0-4][0-9]", self.root.name))
+        copy03_build = self.root.name in SDMA03_ROOTS
+        copy_build = self.root.name in SDMA10_ROOTS or copy03_build
+        if copy_build:
+            single_build = True
+        if multi_build or single_build:
+            deployment = json.loads((self.root / "deployment.json").read_text())
+            expected_profile = ("single-gpt-sdma10-npu03-v1" if copy03_build else "single-gpt-sdma10-v1"
+                if copy_build else "single-gpt40-v1" if single_build else "multinode20-v1" if multi20 else "multinode-dual-v1")
+            if deployment.get("profile") != expected_profile:
+                raise ValueError("new multi-node producer requires the explicit reviewed deployment profile")
+            if multi20:
+                authorization = json.loads((self.root / "authorization.json").read_text())
+                if (authorization.get('nodes') != [0, 3] or authorization.get('physical_cards') != [4, 5, 6, 7]
+                        or authorization.get('restore_required') is not True):
+                    raise ValueError('twenty-run batch requires the exact two-node authorization')
+            if single_build and deployment.get("cards") != ([0, 1, 2, 3] if copy03_build else [4, 5, 6, 7]):
+                raise ValueError("single-node batch is limited to the already authorized whole cards")
+            if copy03_build:
+                authorization = json.loads((self.root / "authorization.json").read_text())
+                if (authorization.get("physical_cards") != [0, 1, 2, 3]
+                        or authorization.get("temporary_signature_user_confirmed") is not True
+                        or authorization.get("restore_required") is not True):
+                    raise ValueError("NPU0-3 requires its explicit user authorization and mandatory restoration")
+        if self.root.name in NODE0_BUILD_PROBES or multi_build or single_build:
             build = json.loads((self.root / "build-receipt.json").read_text())
             if build["status"] != "built" or any(not re.fullmatch(r"[0-9a-f]{64}", build[k]) for k in ("device_sha256", "host_sha256")):
                 raise ValueError("new producer requires a completed matching Host/Device build receipt")
-            self.cards = (5, 6, 7) if self.root.name == "semantic-coverage-20261102" else (4, 5, 6, 7)
+            if (multi_build or single_build) and any(hashlib.sha256((self.root / "src" / name).read_bytes()).hexdigest() != value
+                    for name, value in build["verified_current_producer_files"].items()):
+                raise ValueError("multi-node source differs from the attested new semantic producer")
+            self.cards = ((0, 1, 2, 3) if copy03_build else (5, 6, 7)
+                if self.root.name == "semantic-coverage-20261102" else (4, 5, 6, 7))
             self.device_hash, self.host_hash = build["device_sha256"], build["host_sha256"]
             self.host_library = self.base + "/deploy/lib64/libhcomm.so"
             libraries = build.get("host_libraries", {})

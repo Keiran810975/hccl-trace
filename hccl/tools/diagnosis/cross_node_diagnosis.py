@@ -11,10 +11,36 @@ from .schema import write_csv
 from .workload_coordinates import position, location_fields
 
 
+def _explanation_path(root, target, nodes, links, coordinates):
+    path = root.get("evidence_paths", {}).get(target)
+    anchor = root.get("graph_id")
+    if not path or anchor not in nodes:
+        return False
+    cursor, seen = anchor, {anchor}
+    reference = (coordinates or {}).get(nodes[anchor].get("_operation_scope"))
+    if not reference or reference.get("stage") != "measured":
+        return False
+    for key in path:
+        edge = links.get(key)
+        if (not edge or edge["src"] != cursor or edge["dst"] in seen
+                or edge.get("confidence") not in {"observed", "exact"}
+                or not (edge["kind"] == "direct_stream_order_observed" or "notify_sync" in edge["kind"])):
+            return False
+        node = nodes.get(edge["dst"])
+        coordinate = (coordinates or {}).get(node.get("_operation_scope")) if node else None
+        if not coordinate or (coordinate.get("stage"), coordinate.get("iteration")) != (
+                reference["stage"], reference["iteration"]):
+            return False
+        cursor = edge["dst"]
+        seen.add(cursor)
+    return cursor == target and nodes[cursor].get("profiler_task_kind") == "notify_wait"
+
+
 def analyze(protocol, rows, edges, coordinates, options, *, rolling_report=None, communication_tasks=(), operations=()):
     communication_tasks, operations = list(communication_tasks), list(operations)
     nodes = {row["_graph_id"]: row for row in rows}
     edge_ids = {edge["edge_id"] for edge in edges}
+    links = {edge["edge_id"]: edge for edge in edges}
     ranks = {}
     for row in rows:
         rank = row["_user_rank"]
@@ -71,9 +97,8 @@ def analyze(protocol, rows, edges, coordinates, options, *, rolling_report=None,
                     diagnosis="cross_node_path_candidate" if slow else "not_flagged")
         if slow:
             for root in roots:
-                path = root.get("evidence_paths", {}).get(item["completion_graph_id"])
-                if (root.get("status") == "dependency_supported_candidate" and path
-                        and all(edge in edge_ids for edge in path)):
+                if (root.get("status") == "dependency_supported_candidate"
+                        and _explanation_path(root, item["completion_graph_id"], nodes, links, coordinates)):
                     item["source_root_ids"].append(root["root_id"])
             if item["source_root_ids"]:
                 item["diagnosis"] = "upstream_source_candidates"

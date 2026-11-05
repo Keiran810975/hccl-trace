@@ -81,6 +81,13 @@ class RdmaTimingTests(unittest.TestCase):
         item,=timing.analyze(rows,edges)["transfers"]
         self.assertEqual(item["issues"],["ambiguous_handshake_sync"])
 
+    def test_completion_wait_with_a_second_producer_is_unresolved(self):
+        rows, edges = fixture()
+        edges.append(dict(edges[-1], edge_id="other-producer", src="ready"))
+        item, = timing.analyze(rows, edges)["transfers"]
+        self.assertIn("ambiguous_completion_notify_producer", item["issues"])
+        self.assertIsNone(item["protocol_duration_ns"])
+
     def test_local_order_fork_is_not_resolved_by_timestamps(self):
         rows,edges=fixture()
         extra=deepcopy(rows[1]);extra["_graph_id"]="other-ack";rows.append(extra)

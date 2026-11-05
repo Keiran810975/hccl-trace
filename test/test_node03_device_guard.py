@@ -57,6 +57,27 @@ class DeviceGuardTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 policy(a, b)
 
+    def test_explicit_sdma03_profile_cannot_change_cards_4_to_7(self):
+        root = Path('/home/commTeam/zjy/zjy-new-workspace/hccl-diagnose-single-20261104-801')
+        build = dict(status='built',device_sha256='a'*64,host_sha256='b'*64,verified_current_producer_files={},
+            host_libraries={'libhcomm.so':'b'*64,'libhccl_alg.so':'c'*64,'libhccl_plf.so':'d'*64})
+        deployment = dict(profile='single-gpt-sdma10-npu03-v1',cards=[0,1,2,3])
+        authorization = dict(physical_cards=[0,1,2,3],temporary_signature_user_confirmed=True,restore_required=True)
+        def read(path, *args, **kwargs):
+            return json.dumps(deployment if path.name=='deployment.json' else authorization if path.name=='authorization.json' else build)
+        with patch('test.node03_device_guard.scope',return_value=root), patch.object(Path,'read_text',read):
+            guard=Guard(root)
+            self.assertEqual(guard.cards,(0,1,2,3))
+            guard.run=Mock(side_effect=AssertionError('out-of-scope command must never execute'))
+            with self.assertRaises(ValueError):guard.query(6)
+            with self.assertRaises(ValueError):guard.set(7,'custom-op-secverify-enable',1)
+            guard.run.assert_not_called()
+            authorization['temporary_signature_user_confirmed']=False
+            with self.assertRaises(ValueError):Guard(root)
+            authorization['temporary_signature_user_confirmed']=True
+            deployment['cards']=[4,5,6,7]
+            with self.assertRaises(ValueError):Guard(root)
+
     def test_three_new_gpt_cases_are_node0_only_and_use_attested_build(self):
         for number in (101, 102, 103):
             root = Path('/home/commTeam/zjy/zjy-new-workspace/gpt2-three-anomalies-20261102-'+str(number))

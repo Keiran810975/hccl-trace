@@ -51,8 +51,11 @@ class RollingOptions:
     calibrated_release_intervals: bool = False
     completion_fallback: bool = False
     candidate_policy: str = "all"
+    source_policy: str = "legacy"
 
     def validate(self):
+        if self.source_policy not in {"legacy", "dual", "dual-v2"}:
+            raise ValueError("unknown source policy")
         if self.candidate_policy not in candidate_screening.POLICIES:
             raise ValueError("unknown experimental candidate policy")
         if self.window != 5:
@@ -230,7 +233,7 @@ def analyze(rows, edges, coordinates, options=RollingOptions(), *, preparations=
     coordinates = validate_coordinates(list(coordinates.values()))
     comparison.evidence_adjacency(rows, edges)
     tasks = compare_tasks(rows, edges, coordinates, options)
-    roots, traces = wait_backtrace.trace_sources(rows, edges, tasks, options, alignment=alignment)
+    roots, traces = ([], []) if options.source_policy in {"dual", "dual-v2"} else wait_backtrace.trace_sources(rows, edges, tasks, options, alignment=alignment)
     if options.completion_fallback:
         from .completion_sources import support_local_completion
         support_local_completion(roots, rows, edges, options)
@@ -241,7 +244,9 @@ def analyze(rows, edges, coordinates, options=RollingOptions(), *, preparations=
         if root["status"] != "dependency_supported_candidate":
             continue
         for key in root["affected_wait_graph_ids"]:
-            trace = traces_by_wait[key]
+            trace = traces_by_wait.get(key)
+            if trace is None:
+                continue
             trace.setdefault("external_clue_ids", []).append(root["root_id"])
             trace.setdefault("host_activity_ids", []).append(root["source_activity_id"])
             if not trace["source_root_ids"]:

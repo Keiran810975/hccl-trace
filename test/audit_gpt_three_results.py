@@ -45,7 +45,8 @@ def audit_case(attempt):
         decision = decisions[task['candidate_id']]
         if decision['overlap_ns'] != overlap(task, windows) or decision['hit'] != (overlap(task, windows) > 0):
             raise ValueError('independent candidate/window overlap disagrees')
-    edges = {e['edge_id']: e for e in report['edges']}
+    execution = report.get('execution_proposal', report)
+    edges = {e['edge_id']: e for e in execution['edges']}
     for chain in report['chains']:
         current = chain['source_graph_id']
         for key in chain['edge_ids']:
@@ -84,7 +85,15 @@ def audit_case(attempt):
     host_hits = sum(overlap(task, windows) > 0 for task in report['external_host_observations'])
     if host_hits != evaluation['host_observation_hits']:
         raise ValueError('Host observation overlap differs from independent audit')
+    def typed_counts(host):
+        values = [c for c in candidates if (c['task_kind'] == 'host_interval') == host]
+        found = sum(overlap(c, windows) > 0 for c in values)
+        primary = sum(overlap(c, windows) > 0 and c['user_rank'] == evaluation['injection']['target_rank'] for c in values)
+        return dict(hits=found, count=len(values), primary_target_hits=primary,
+                    precision=found/len(values) if values else None)
     return dict(case_id=evaluation['case_id'], injection=evaluation['injection'],
+        selected_mechanism=report.get('selected_mechanism', 'communication_execution_growth'),
+        execution_tasks=typed_counts(False), host_intervals=typed_counts(True),
         actual_windows=windows, hits=hits, candidate_count=len(candidates),
         precision=hits/len(candidates) if candidates else None,
         primary_target_rank_hits=primary_hits,
@@ -115,12 +124,15 @@ if __name__ == '__main__':
             or s['inputs']['consumer_sha256'] != summaries[0]['inputs']['consumer_sha256'] for s in summaries):
         raise ValueError('diagnosis changed between independent cases')
     pending=[path.name for path in paths if not (path/'evaluation.json').is_file()]
-    total=sum(s['candidate_count'] for s in summaries)
-    hits=sum(s['hits'] for s in summaries)
-    primary_hits=sum(s['primary_target_rank_hits'] for s in summaries)
+    total=sum(s['execution_tasks']['count'] for s in summaries)
+    hits=sum(s['execution_tasks']['hits'] for s in summaries)
+    primary_hits=sum(s['execution_tasks']['primary_target_hits'] for s in summaries)
+    host_total=sum(s['host_intervals']['count'] for s in summaries)
+    host_hits=sum(s['host_intervals']['hits'] for s in summaries)
     (args.directory/'audit-summary.json').write_text(json.dumps(dict(cases=summaries,
         completed=len(summaries),requested=3,not_completed=pending,
         execution_candidates=dict(hits=hits,total=total,precision=hits/total if total else None,
             criterion='same Node, predeclared affected endpoint Rank, positive actual-activity overlap'),
+        host_intervals=dict(hits=host_hits,total=host_total,precision=host_hits/host_total if host_total else None),
         primary_target_only=dict(hits=primary_hits,total=total,precision=primary_hits/total if total else None)), indent=2)+'\n')
     print(json.dumps([{k:s[k] for k in ('case_id','hits','candidate_count','precision','host_observation_hits','propagation_chain_count')} for s in summaries], indent=2))

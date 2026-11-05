@@ -175,6 +175,24 @@ class SourcePropagationTests(unittest.TestCase):
             row,=propagation.load_csv_records(path,candidates=True)
             self.assertEqual(row["evidence_paths"],{"wait":["a-b","b-w"]})
 
+    def test_materialized_csv_keeps_native_integer_coordinate_types(self):
+        native = dict(iteration=25, block=3, bucket=1, occurrence=0, user_rank=4)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "comparisons.csv"
+            with path.open("w", newline="") as stream:
+                writer = csv.DictWriter(stream, fieldnames=list(native))
+                writer.writeheader()
+                writer.writerow(native)
+            materialized, = propagation.load_csv_records(path)
+            self.assertEqual(materialized, native)
+            self.assertTrue(all(type(materialized[k]) is int for k in native))
+
+    def test_explicit_iteration_slice_scope_is_preserved_for_visible_report_label(self):
+        report = self.build(diagnosed())
+        report["analysis_scope"] = dict(kind="selected_iteration_slice_from_original_artifacts", iterations=[25])
+        self.assertEqual(presentation.build_view_model(report)["analysis_scope"], report["analysis_scope"])
+        self.assertIn('id="analysis-scope"', presentation.render_html(report))
+
     def test_display_retains_real_sync_endpoints_and_every_folded_node(self):
         report=self.build(diagnosed())
         chain=report["candidates"][0]["chains"][0]

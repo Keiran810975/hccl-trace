@@ -189,8 +189,11 @@ class Window:
             result["apply_started_raw_ns"] = raw_ns()
             self.set(DEVICE, LIMIT)
             result["apply_returned_raw_ns"] = raw_ns()
-            if self.shaping(DEVICE)["limit_mbps"] != LIMIT or self.shaping(SIBLING) != original[str(SIBLING)]:
+            limited = self.shaping(DEVICE)
+            confirmed_raw_ns = raw_ns()
+            if limited["limit_mbps"] != LIMIT or self.shaping(SIBLING) != original[str(SIBLING)]:
                 raise RuntimeError("requested port limit or sibling isolation did not verify")
+            result["first_confirmed_limit_raw_ns"] = confirmed_raw_ns
             before = self.query()
             if (self.control / "abort").exists() or (self.control / "stop").exists():
                 raise RuntimeError("network injection was cancelled while confirming apply")

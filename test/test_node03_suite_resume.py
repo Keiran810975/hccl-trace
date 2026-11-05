@@ -74,6 +74,33 @@ class ResumeTests(unittest.TestCase):
             launch.assert_not_called()
             self.assertFalse((root / "suite-state.json").exists())
 
+    def test_dual_metadata_copy_preserves_all_six_case_directory_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory).resolve()
+            root, smoke = self.setup(parent)
+            (smoke / "authorized-state.json").write_text(json.dumps(dict(status="passed", restored_nodes=[0, 3])))
+            (root / "deploy").mkdir()
+            for name in ("build-receipt.json", "deployment.json"):
+                (root / name).write_text("{}")
+            def capture(command, log):
+                current = Path(command[1]).parents[2]
+                (current / "network-port-evidence.json").write_text("{}")
+            with patch.object(sys, "path", [str(Path(__file__).parent)] + sys.path), \
+                    patch.object(sys, "argv", ["suite", "--root", str(root), "--validated-smoke", str(smoke),
+                    "--validated-replay", str(root), "--dual-source", "--verified-offload"]), \
+                    patch.object(suite, "LOCAL_PARENT", parent), \
+                    patch.object(suite.socket, "gethostname", return_value="liteserver-560t-0"), \
+                    patch.object(suite.ctypes, "CDLL"), patch.object(suite, "execute", side_effect=self.execute) as execute, \
+                    patch("run_communication_calibration.protected_run", side_effect=capture), \
+                    patch("run_communication_calibration.wait_for_archive") as archive:
+                suite.main()
+            evaluations = [call.args[0][-1] for call in execute.call_args_list if "node03_evaluate.py" in str(call.args[0])]
+            self.assertEqual(len(evaluations), 6)
+            for index, command in enumerate(evaluations, 41):
+                self.assertIn("--root /workspace/hccl-diagnose-node03-20261030-{:03d}".format(index), command)
+                self.assertNotIn("/workspace/deployment.json", command)
+            self.assertEqual(archive.call_count, 6)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -94,6 +94,44 @@ def hashes(root):
 
 
 class ToolCliTests(unittest.TestCase):
+    def test_selected_iteration_view_does_not_change_diagnosis_or_inputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            capture = sdk_capture(root / 'capture')
+            before = hashes(capture)
+            full = analyze_capture(capture, root / 'full', mode='rolling', source_policy='dual-v2')
+            sliced = analyze_capture(capture, root / 'slice', mode='rolling', source_policy='dual-v2',
+                                     selected_iteration_view=True, keep_debug=True)
+            self.assertEqual(full['source_candidates'], sliced['source_candidates'])
+            self.assertEqual(full['primary_source_id'], sliced['primary_source_id'])
+            self.assertEqual(sliced['analysis_scope']['kind'], 'selected_iteration_slice_from_original_artifacts')
+            self.assertEqual(hashes(capture), before)
+            validate_final(root / 'slice')
+            self.assertTrue((root / 'slice.debug').is_dir())
+
+    def test_explicit_dual_policy_preserves_strict_three_file_publication(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            capture=sdk_capture(root/'capture')
+            before=hashes(capture)
+            result=analyze_capture(capture,root/'report',mode='rolling',source_policy='dual')
+            self.assertIn('source_candidates',result)
+            self.assertIn('selected_mechanism',result['source_selection'])
+            validate_final(root/'report')
+            self.assertEqual(hashes(capture),before)
+
+    def test_refined_dual_policy_is_explicit_and_keeps_legacy_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            capture = sdk_capture(root / "capture")
+            before = hashes(capture)
+            result = analyze_capture(capture, root / "report", mode="rolling", source_policy="dual-v2")
+            self.assertEqual(result["source_selection"]["policy"], "multinode_dual_v2")
+            validate_final(root / "report")
+            self.assertEqual(hashes(capture), before)
+            with self.assertRaises(DiagnosisError):
+                analyze_capture(capture, root / "bad", mode="baseline", baseline=capture, source_policy="dual-v2")
+
     def test_schema_two_publication_and_legacy_report_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

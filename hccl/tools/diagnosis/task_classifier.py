@@ -31,6 +31,10 @@ def source_category(source, row):
     if source.get("component") == "host_preparation":
         return EXTERNAL
     domain = classify_task(row)["task_domain"]
+    if (source.get("source_selection_policy") in {"multinode_dual_v1", "multinode_dual_v2"} and domain == "hccl_internal"
+            and (source.get("component"), source.get("status")) in {
+                ("execution", "unexplained_execution_growth"), ("protocol_interval", "protocol_path_candidate")}):
+        return INTERNAL
     local = source.get("local_completion_evidence", {})
     if (source.get("component") == "execution" and domain == "hccl_internal"
             and source.get("status") == "local_completion_supported_candidate"

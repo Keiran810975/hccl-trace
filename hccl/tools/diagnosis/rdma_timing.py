@@ -157,6 +157,9 @@ def analyze(rows, edges, *, max_hops=256):
             item["issues"].append("unsupported_cross_node_sync")
             continue
         ready, done = nodes[ready_edge["src"]], nodes[done_edge["dst"]]
+        if len(syncs(done["_graph_id"], "back")) != 1:
+            item["issues"].append("ambiguous_completion_notify_producer")
+            continue
         if (ready.get("semantic") != "link_tx_ack" or done.get("semantic") not in DATA_WAIT_SEMANTICS
                 or _endpoint(ready) != _endpoint(done) or ready["_user_rank"] != payload["_peer_rank"]
                 or _endpoint(ack) != _endpoint(payload) or _endpoint(signal) != _endpoint(payload)

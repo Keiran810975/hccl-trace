@@ -13,9 +13,13 @@ class GptThreeAnomalyControl(SingleControl):
     def __init__(self, config, directory, rank, devices, communication_worker=None):
         super().__init__(config, directory, rank, devices, communication_worker, "grouped")
         self.kind = self.inj['kind']
-        if (self.case.get('experiment_contract', {}).get('profile') != 'gpt-three-anomalies-v1'
-                or self.kind not in {'progress_delay', 'communication_contention', 'compute_contention'}
-                or self.inj.get('duration_iters') != 1):
+        profile = self.case.get('experiment_contract', {}).get('profile')
+        copy_window = (profile == 'gpt-copy-window-v1' and self.kind == 'copy_contention'
+            and self.inj.get('copy_backend') == 'acl_memcpy_async' and self.inj.get('buffer_mib') == 2048
+            and self.inj.get('active_timeout_seconds') == 5 and not self.inj.get('finite_copy_burst'))
+        legacy = profile == 'gpt-three-anomalies-v1' and self.kind in {
+            'progress_delay', 'communication_contention', 'compute_contention'}
+        if not (copy_window or legacy) or self.inj.get('duration_iters') != 1:
             raise ValueError('only the frozen one-iteration three-anomaly profile is supported')
         self.communication_scoped = self.kind != 'progress_delay'
 

@@ -57,7 +57,7 @@ def shell(base, node, command):
     dependencies = "/workspace/gpt2-single-node3-20261029-001/deps" if node else "/workspace/gpt2-single-node0-50-20261029-001/deps"
     return ("source /usr/local/Ascend/ascend-toolkit/set_env.sh\n"
             "export ASCEND_OPP_PATH=" + runtime + "/opp\n"
-            "export LD_LIBRARY_PATH=/workspace/nf-20261022/deploy/lib64:" + runtime + "/aarch64-linux/lib64:" + runtime + "/opp/built-in/op_impl/ai_core/tbe/op_tiling/lib/linux/aarch64:${LD_LIBRARY_PATH:-}\n"
+            "export LD_LIBRARY_PATH=" + base + "/deploy/lib64:/workspace/nf-20261022/deploy/lib64:" + runtime + "/aarch64-linux/lib64:" + runtime + "/opp/built-in/op_impl/ai_core/tbe/op_tiling/lib/linux/aarch64:${LD_LIBRARY_PATH:-}\n"
             "export PYTHONPATH=" + base + "/src:" + dependencies + "\n"
             "export OMP_NUM_THREADS=1\n"
             "unset ASCEND_RT_VISIBLE_DEVICES\n" + command)
@@ -107,6 +107,12 @@ def main():
         formal_case = json.loads(args.formal_case.read_text())
         if args.communication_calibration:
             from communication_calibration import validate_case
+            validate_case(formal_case)
+        elif formal_case.get("experiment_contract", {}).get("profile") == "multinode-dual-v1":
+            from multinode_dual_suite import validate_case
+            validate_case(formal_case)
+        elif formal_case.get("experiment_contract", {}).get("profile") == "multinode20-v1":
+            from multinode20_suite import validate_case
             validate_case(formal_case)
         elif formal_case not in build_plan()["cases"]:
             raise ValueError("formal case differs from the requested frozen six-case plan")
@@ -279,15 +285,33 @@ def main():
         execute(container_command(base, 0, shlex.join([PYTHON, "-c", program])), timeout=60)
         state["status"] = "analyzing"
         write(state_path, state)
+        repeat20 = args.formal_case and formal_case.get('experiment_contract', {}).get('profile') == 'multinode20-v1'
+        if repeat20:
+            # Restore saved policies/packages before the CPU-only diagnosis; the outer finally verifies again.
+            for physical_node in (0, 3):
+                location = str(LOCAL_PARENT if physical_node == 0 else PEER_PARENT) + '/' + root.name
+                execute(root_command(physical_node, ['python3', location + '/src/test/node03_device_guard.py',
+                        'restore', '--root', location]), timeout=240)
         report = "/report" if args.formal_case else "/preflight-report"
         cmd = [PYTHON, "-m", "hccl.tools.diagnosis.cli", "analyze", "--capture", base + "/capture", "--mode", "rolling", "--output", base + report]
-        if not args.formal_case or args.communication_calibration:
+        dual = json.loads((root / "input" / case_name).read_text()).get("experiment_contract", {}).get("profile") in {"multinode-dual-v1", "multinode20-v1"} if args.gpt else False
+        if not args.formal_case or args.communication_calibration or dual:
             cmd.append("--keep-debug")
-        if args.gpt or args.short_copy_burst:
+        if dual:
+            cmd.extend(["--source-policy", "dual-v2" if repeat20 else "dual", "--require-clock-alignment"])
+            if repeat20:
+                cmd.append('--selected-iteration-view')
+        elif args.gpt or args.short_copy_burst:
             cmd.append("--allow-uncalibrated-clock")
         log = (root / "logs/diagnosis.log").open("x")
         logs.append(log)
         subprocess.run(container_command(base, 0, shlex.join(cmd), analysis_seconds), stdout=log, stderr=subprocess.STDOUT, check=True, timeout=analysis_seconds + 30)
+        if dual:
+            code = ("import json,hashlib;from pathlib import Path;r=Path(" + repr(base) + ");"
+                "p=r/" + repr(report.lstrip('/')) + ";"
+                "s={n:hashlib.sha256((p/n).read_bytes()).hexdigest() for n in ('execution.html','root_causes.json','propagation.html')};"
+                "(r/'diagnosis-seal.json').write_text(json.dumps({'sha256':s,'truth_accessed':False})+'\\n')")
+            execute(container_command(base, 0, shlex.join([PYTHON, '-c', code])), timeout=60)
         state["status"] = "passed"
     except BaseException as error:
         state.update(status="failed", error=str(error))

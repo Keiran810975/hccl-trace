@@ -2,6 +2,9 @@
 
 ## 用户诊断入口
 
+新设备、自己的模型、单机或多机的完整操作顺序见
+[从零开始运行训练诊断](../../../文档/从零开始运行训练诊断.md)。
+
 安装后用 `hccl-diag analyze --capture DIR --mode rolling --output RESULTS`，或
 `--mode baseline --baseline NORMAL`，一条命令执行完整离线诊断。默认最终仅保留
 `execution.html`、`root_causes.json`、`propagation.html`；临时分析自动清理，原始输入只读。

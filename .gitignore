@@ -27,3 +27,13 @@ out/
 new_out/
 dist/
 *.egg-info/
+
+# Local captures, reports, presentation scratch files and machine notes
+/artifacts/
+/.chart-data-*/
+/.codex-*/
+/captures/
+/results/
+/runtime/
+/work/
+/环境相关.txt

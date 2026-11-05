@@ -16,15 +16,18 @@ import shlex
 
 
 ROOT = "/home/commTeam/zjy/zjy-new-workspace/hccl-diagnose-node03-20261101-200"
-ROOTS = (ROOT, ROOT[:-3] + "220")
+DUAL_ROOT = "/home/commTeam/zjy/zjy-new-workspace/hccl-diagnose-node03-20261103-520"
+ROOTS = (ROOT, ROOT[:-3] + "220", DUAL_ROOT)
 
 
 def snapshot(root=ROOT):
     code = ("import pathlib,json;r=pathlib.Path(" + repr(root) + ");"
-            "p=r/'calibration-state.json';d=json.loads(p.read_text()) if p.exists() else dict(status='not_created');"
+            "p=r/" + repr("suite-state.json" if root == DUAL_ROOT else "calibration-state.json") + ";d=json.loads(p.read_text()) if p.exists() else dict(status='not_created');"
             "d.pop('source_files',None);print(json.dumps(d))")
     value = subprocess.run(SSH + ["python3 -c " + shlex.quote(code)], capture_output=True, text=True,
-                           check=True, timeout=60)
+                           timeout=60)
+    if value.returncode:
+        raise ValueError("queue SSH query failed: " + value.stderr[-1500:])
     return json.loads(value.stdout)
 
 
@@ -71,7 +74,7 @@ def follow(output, hours, remote_root=ROOT):
                 state.update(status="needs_offline_diagnosis_refinement", no_new_capture_started=True)
                 write(path, state)
                 return state
-        elif status in {"stopped", "exploration_complete"}:
+        elif status in {"stopped", "exploration_complete", "completed"}:
             if status == "stopped" and remote.get("active_directory"):
                 name = Path(remote["active_directory"]).name
                 state.update(status="backing_up_stopped_attempt", active_backup=name)
