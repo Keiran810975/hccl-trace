@@ -788,6 +788,35 @@ class DiagnosisToolTest(unittest.TestCase):
             with self.assertRaisesRegex(MsprofDbError, "missing table COMPUTE_TASK_INFO"):
                 parse_msprof_db_file(path, "node0")
 
+    def test_communication_only_db_can_omit_compute_metadata_without_mutation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "msprof_fixture.db")
+            create_msprof_db(path)
+            with sqlite3.connect(path) as connection:
+                connection.execute("DELETE FROM TASK WHERE globalTaskId=11")
+                connection.execute("DROP TABLE COMPUTE_TASK_INFO")
+            before = Path(path).read_bytes()
+            tasks = parse_msprof_db_file(path, "node0")
+            self.assertEqual(len(tasks), 2)
+            self.assertEqual({task.task_kind for task in tasks}, {"sdma", "notify_record"})
+            self.assertEqual(Path(path).read_bytes(), before)
+            with sqlite3.connect(path) as connection:
+                connection.execute("INSERT INTO STRING_IDS VALUES(99, 'AI_CORE')")
+                connection.execute("UPDATE TASK SET taskType=99 WHERE globalTaskId=10")
+            with self.assertRaisesRegex(MsprofDbError, "missing table COMPUTE_TASK_INFO"):
+                parse_msprof_db_file(path, "node0")
+
+    def test_compute_metadata_columns_still_required_when_table_present(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "msprof_fixture.db")
+            create_msprof_db(path)
+            with sqlite3.connect(path) as connection:
+                connection.execute("DELETE FROM TASK WHERE globalTaskId=11")
+                connection.execute("DROP TABLE COMPUTE_TASK_INFO")
+                connection.execute("CREATE TABLE COMPUTE_TASK_INFO(globalTaskId INTEGER)")
+            with self.assertRaisesRegex(MsprofDbError, "COMPUTE_TASK_INFO missing columns name"):
+                parse_msprof_db_file(path, "node0")
+
     def test_msprof_db_directory_discovers_one_profile(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             profile_dir = os.path.join(temp_dir, "PROF_fixture")

@@ -75,6 +75,24 @@ class MultiNode20Tests(unittest.TestCase):
         self.assertFalse(idle(dict(registry=False, npu='AICore 0', free=10**12), [4]))
         self.assertFalse(idle(dict(registry=True, npu='No running processes found in NPU 4', free=10**12), [4]))
 
+    def test_effect_ignores_control_ratio_and_does_not_invent_missing_execution_ratio(self):
+        case=plan()['cases'][1]
+        evaluation=dict(windows=[dict(node_id='n',user_rank=4,start_ns=100,stop_ns=400)])
+        row=dict(graph_id='record',node_id='n',user_rank='4',observed_start_ns='110',observed_stop_ns='130',
+            task_domain='hccl_internal',stage='measured',reference_count='5',duration_slow='True',
+            task_kind='notify_record',slowdown_factor='')
+        activity=dict(operations=1,max_error=0)
+        result=effect_evidence(case,evaluation,[row],[activity])
+        self.assertFalse(result['effect_gate_passed'])
+        work=dict(row,graph_id='work',task_kind='sdma')
+        self.assertFalse(effect_evidence(case,evaluation,[work],[activity])['effect_gate_passed'])
+        wait=dict(row,graph_id='wait',task_kind='notify_wait')
+        strong=dict(work,slowdown_factor='2')
+        result=effect_evidence(case,evaluation,[row,wait,strong,dict(strong,graph_id='work2')],[activity])
+        self.assertTrue(result['effect_gate_passed'])
+        self.assertEqual(result['slow_wait_ids'],['wait'])
+        self.assertEqual(result['strong_internal_execution_count'],2)
+
     def test_prestart_continuation_forbids_any_started_training_or_second_resume(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / 'queue';root.mkdir()

@@ -12,6 +12,10 @@ else:
 
 PROFILE = "multinode20-v1"
 ROOT_NAME = "hccl-diagnose-node03-20261105-900"
+CONTINUATION_ROOT = "hccl-diagnose-node03-20261106-1000"
+CONTINUATION_PROFILE = "multinode19-lowlog-v1"
+CONTINUATION_CASES = frozenset('hccl-diagnose-node03-20261106-' + str(i) for i in range(1002, 1021))
+LOWLOG_CAPTURE = dict(global_log_level=2, module_override=False, task_time='l1', ai_core='off', hccl='on', ascendcl='on')
 KINDS = ("copy_contention", "communication_contention", "progress_delay", "bandwidth_limit")
 
 
@@ -48,6 +52,40 @@ def validate_case(case):
         raise ValueError('case differs from the frozen twenty-run plan')
 
 
+def continuation_plan():
+    value = plan()
+    value.update(profile=CONTINUATION_PROFILE, requested_runs=19, cases=value['cases'][1:],
+        origin_queue=ROOT_NAME, origin_completed_case=plan()['cases'][0]['case_id'],
+        origin_result_included=False, capture_policy=dict(LOWLOG_CAPTURE))
+    value['resource_scope']['stop_node3_target_processes_once_after_node0_idle'] = False
+    return value
+
+
+def queue_plan(root):
+    if root.name == ROOT_NAME:
+        return plan()
+    if root.name == CONTINUATION_ROOT:
+        return continuation_plan()
+    raise ValueError('unknown reviewed queue')
+
+
+def lowlog_capture(root):
+    if root.name == 'hccl-diagnose-node03-20261108-1101':
+        import json
+        deployment = json.loads((root / 'deployment.json').read_text())
+        if (deployment.get('profile') != 'roce-single-collective-v1'
+                or deployment.get('capture_policy') != LOWLOG_CAPTURE):
+            raise ValueError('single-collective RoCE requires its explicit low-log deployment')
+        return True
+    if root.name not in CONTINUATION_CASES:
+        return False
+    import json
+    deployment = json.loads((root / 'deployment.json').read_text())
+    if deployment.get('profile') != CONTINUATION_PROFILE or deployment.get('capture_policy') != LOWLOG_CAPTURE:
+        raise ValueError('low-log capture requires its exact frozen deployment policy')
+    return True
+
+
 def intersects(row, window):
     return (row['node_id'] == window['node_id'] and int(row['user_rank']) == window['user_rank']
             and min(int(row['observed_stop_ns']), window['stop_ns']) >
@@ -70,9 +108,13 @@ def effect_evidence(case, evaluation, rows, activities, public_delay=None):
             overlap = any(intersects(row, w) for w in evaluation['windows'])
         if not overlap:
             continue
-        factor = Decimal(row['slowdown_factor'])
         if row['task_kind'] == 'notify_wait':
             waits.append(row['graph_id'])
+        if row['task_kind'] not in {'sdma', 'reduce_inline'} or not row.get('slowdown_factor'):
+            continue
+        factor = Decimal(row['slowdown_factor'])
+        if not factor.is_finite():
+            continue
         if row['task_kind'] in {'sdma', 'reduce_inline'} and factor >= (2 if kind == 'copy_contention' else Decimal('1.5')):
             if kind == 'copy_contention':
                 window = evaluation['windows'][0]

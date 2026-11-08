@@ -13,12 +13,13 @@ from . import analyze_waits as waits
 from . import source_propagation as propagation
 from . import source_propagation_view as presentation
 from .capture_discovery import read_json, write_json
+from .report_contract import without_critical_path
 
 
 FINAL_FILES = {"execution.html", "root_causes.json", "propagation.html"}
 
 
-def publish_selected_iteration_report(directory, output, normalized, roots, tasks):
+def publish_selected_iteration_report(directory, output, normalized, roots, tasks, *, full_graph_retained=False):
     import csv
     epochs = sorted({c['iteration'] for c in normalized.get('source_candidates', normalized['candidates'])})
     formal = [t for t in tasks if t.get('stage') == 'measured' and type(t.get('iteration')) is int]
@@ -41,12 +42,20 @@ def publish_selected_iteration_report(directory, output, normalized, roots, task
     rows = graph.read_graph_artifact_nodes(rendered / 'dep_graph_nodes.csv')
     edges = graph.read_graph_artifact_edges(rendered / 'dep_graph_edges.csv')
     write_json(rendered / 'diagnosis.json', waits.analyze(rows, edges, trace_wait_chains=False))
-    (rendered / 'operation_timings.csv').write_text('node_id,device_id,operation_scope,start_ns,end_ns,duration_ns\n')
-    (rendered / 'dep_graph_notify_ambiguities.csv').write_text('kind,reason\n')
+    scopes = {r.get('_operation_scope') for r in rows}
+    with (directory/'operation_timings.csv').open(encoding='utf-8-sig', newline='') as source, \
+            (rendered/'operation_timings.csv').open('x', encoding='utf-8', newline='') as target:
+        reader = csv.DictReader(source)
+        writer = csv.DictWriter(target, reader.fieldnames)
+        writer.writeheader()
+        writer.writerows(r for r in reader if r['operation_scope'] in scopes)
+    # Quality describes the full analysis, not a synthetic zero-ambiguity slice.
+    shutil.copy2(directory/'dep_graph_notify_ambiguities.csv', rendered/'dep_graph_notify_ambiguities.csv')
     if (directory / 'clock_alignment.json').is_file():
         shutil.copy2(directory / 'clock_alignment.json', rendered / 'clock_alignment.json')
     normalized = dict(normalized, analysis_scope=dict(kind='selected_iteration_slice_from_original_artifacts',
-        iterations=epochs, diagnosis_used_full_capture=True, original_full_graph_retained=True))
+        iterations=epochs, diagnosis_used_full_capture=True, original_full_graph_retained=full_graph_retained,
+        full_graph_replayable_from_capture=True))
     return publish_final_report(rendered, output, normalized, roots, [t for t in tasks if t['graph_id'] in wanted])
 
 
@@ -105,6 +114,12 @@ def publish_final_report(directory, output, normalized, roots, comparisons):
     directory, output = Path(directory), Path(output)
     if output.exists() or output.is_symlink():
         raise FileExistsError("refusing to overwrite existing report: " + str(output))
+    normalized, roots = without_critical_path(normalized), without_critical_path(roots)
+    normalized = dict(normalized, candidate_relationship="parallel", primary_candidate_id=None,
+                      primary_source_id=None, primary_external_clue_id=None)
+    if "source_selection" in normalized:
+        normalized["source_selection"] = {k: v for k, v in normalized["source_selection"].items()
+                                          if k != "primary_proposal"}
     rows = graph.read_graph_artifact_nodes(directory / "dep_graph_nodes.csv")
     edges = graph.read_graph_artifact_edges(directory / "dep_graph_edges.csv")
     report = propagation.build_report(rows, edges, roots, comparisons,
@@ -117,7 +132,7 @@ def publish_final_report(directory, output, normalized, roots, comparisons):
         candidate["chain_ids"] = [c["chain_id"] for c in by_id[candidate["id"]]["chains"]]
     normalized["propagation"] = dict(report["summary"], exhaustive_downstream_search=False,
                                      physical_causation_proven=False)
-    diagnosis = read_json(directory / "diagnosis.json")
+    diagnosis = without_critical_path(read_json(directory / "diagnosis.json"))
     diagnosis.update(candidates=[dict(r, id=r["root_id"], category=r["component"], evidence=r["reason"]) for r in roots],
                      result_categories=normalized.get("category_counts", {}),
                      coverage=normalized["coverage"], diagnosis_status=normalized["diagnosis_status"],
@@ -166,6 +181,7 @@ def publish_final_report(directory, output, normalized, roots, comparisons):
     primary = next((r for r in roots if r["root_id"] == normalized.get("primary_source_id", normalized["primary_candidate_id"])), None)
     if primary:
         model["initialSelection"] = primary["graph_id"]
+    model = without_critical_path(model)
     model["caseNote"] = "Reference: " + ("previous five measured iteration mean" if normalized["mode"] == "rolling" else "independent baseline median (explicit or structural reference)")
     scope = normalized.get("analysis_scope", {})
     if scope.get("kind") == "selected_iteration_slice_from_original_artifacts":

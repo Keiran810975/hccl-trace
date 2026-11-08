@@ -114,6 +114,9 @@ def main():
         elif formal_case.get("experiment_contract", {}).get("profile") == "multinode20-v1":
             from multinode20_suite import validate_case
             validate_case(formal_case)
+        elif formal_case.get('experiment_contract', {}).get('profile') == 'roce-single-collective-v1':
+            from roce_single_collective import validate_case
+            validate_case(formal_case)
         elif formal_case not in build_plan()["cases"]:
             raise ValueError("formal case differs from the requested frozen six-case plan")
     state = dict(status="prechecking", job_name="hccl-diagnose", devices=DEVICES, physical_cards=[4, 5, 6, 7],
@@ -204,16 +207,20 @@ def main():
                 app = app[:9] + [base + "/src/test/gpt2_train.py", "--case", base + "/input/" + case_name, "--output", output,
                     "--data", data, "--devices", DEVICES, "--warmup", "10", "--iters", str(measured), "--coordination-port", "29774",
                     "--sdk-observations", capture + "/calls"]
+            from multinode20_suite import lowlog_capture
+            lowlog = lowlog_capture(root)
+            profiler = ['--hccl=on', '--task-time=l1', '--ascendcl=on', '--ai-core=off', '--type=db'] if lowlog else ['--hccl=on', '--task-time=on', '--type=db']
             command = ("export HCCL_STEP_TRACE=" + ("0" if args.official_reference else "1") + " HCCL_TASK_SEMANTIC_TRACE=" + ("0" if args.official_reference else "1") + " HCCL_OP_EXPANSION_MODE=" + args.op_expansion_mode + "\n"
                        + ("export LD_LIBRARY_PATH=${LD_LIBRARY_PATH#/workspace/nf-20261022/deploy/lib64:}\n" if args.official_reference else "") +
                        "export HCCL_IF_IP=" + ("192.169.0.220" if node else "192.169.0.173") + " HCCL_SOCKET_IFNAME=enp23s0f3\n"
                        + ("export HCCL_ALGO='level0:ring;level1:ring;level2:ring'\n" if args.algorithm == "ring" else "unset HCCL_ALGO\n") +
                        "export HCCL_TRACE_RUN_ID=" + run_id + " HCCL_TRACE_NODE_ID=" + label + "\n"
                        "export HCCL_TRACE_CALLS_DIR=" + capture + "/calls ASCEND_PROCESS_LOG_PATH=" + capture + "/plog\n"
-                       "export ASCEND_GLOBAL_LOG_LEVEL=1 ASCEND_SLOG_PRINT_TO_STDOUT=0 HCCL_EXEC_TIMEOUT=120 HCCL_CONNECT_TIMEOUT=120\n"
+                       "export ASCEND_GLOBAL_LOG_LEVEL=" + ('2' if lowlog else '1') + " ASCEND_SLOG_PRINT_TO_STDOUT=0 HCCL_EXEC_TIMEOUT=120 HCCL_CONNECT_TIMEOUT=120\n" +
+                       ('unset ASCEND_MODULE_LOG_LEVEL\n' if lowlog else '') +
                        "export HCCL_IF_BASE_PORT=55000 HCCL_HOST_SOCKET_PORT_RANGE=55000-55127 HCCL_NPU_SOCKET_PORT_RANGE=55200-55327\n" +
                        (shlex.join(app) if args.official_reference else
-                        shlex.join(["msprof", "--application=" + shlex.join(app), "--output=" + capture + "/msprof", "--hccl=on", "--task-time=on", "--type=db"])))
+                        shlex.join(["msprof", "--application=" + shlex.join(app), "--output=" + capture + "/msprof", *profiler])))
             log = (root / "logs" / ("capture-" + label + ".log")).open("x")
             logs.append(log)
             processes.append(subprocess.Popen(container_command(base, node, command, capture_seconds), stdout=log, stderr=subprocess.STDOUT))
@@ -286,7 +293,8 @@ def main():
         state["status"] = "analyzing"
         write(state_path, state)
         repeat20 = args.formal_case and formal_case.get('experiment_contract', {}).get('profile') == 'multinode20-v1'
-        if repeat20:
+        single_roce = args.formal_case and formal_case.get('experiment_contract', {}).get('profile') == 'roce-single-collective-v1'
+        if repeat20 or single_roce:
             # Restore saved policies/packages before the CPU-only diagnosis; the outer finally verifies again.
             for physical_node in (0, 3):
                 location = str(LOCAL_PARENT if physical_node == 0 else PEER_PARENT) + '/' + root.name
@@ -294,12 +302,12 @@ def main():
                         'restore', '--root', location]), timeout=240)
         report = "/report" if args.formal_case else "/preflight-report"
         cmd = [PYTHON, "-m", "hccl.tools.diagnosis.cli", "analyze", "--capture", base + "/capture", "--mode", "rolling", "--output", base + report]
-        dual = json.loads((root / "input" / case_name).read_text()).get("experiment_contract", {}).get("profile") in {"multinode-dual-v1", "multinode20-v1"} if args.gpt else False
+        dual = json.loads((root / "input" / case_name).read_text()).get("experiment_contract", {}).get("profile") in {"multinode-dual-v1", "multinode20-v1", "roce-single-collective-v1"} if args.gpt else False
         if not args.formal_case or args.communication_calibration or dual:
             cmd.append("--keep-debug")
         if dual:
-            cmd.extend(["--source-policy", "dual-v2" if repeat20 else "dual", "--require-clock-alignment"])
-            if repeat20:
+            cmd.extend(["--source-policy", "dual-v2" if repeat20 or single_roce else "dual", "--require-clock-alignment"])
+            if repeat20 or single_roce:
                 cmd.append('--selected-iteration-view')
         elif args.gpt or args.short_copy_burst:
             cmd.append("--allow-uncalibrated-clock")

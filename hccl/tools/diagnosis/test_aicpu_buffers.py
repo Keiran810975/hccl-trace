@@ -21,6 +21,14 @@ def logs(rank, stream, task, pointer, tid=24, size=4096):
 
 
 class BufferTests(unittest.TestCase):
+    def test_runtime_channel_preserves_native_buffer_identity_without_debug_logs(self):
+        rows=[line.replace('[INFO]', '[EVENT]') for line in logs(3,8,10,4096)]
+        records=list(parse_buffers(rows))
+        self.assertEqual(len(records),1)
+        self.assertEqual(records[0]['anchor_task_id'],10)
+        self.assertEqual(records[0]['input_buffer_ptr'],4096)
+        self.assertEqual(list(parse_buffers(rows[2:])),[])
+
     def test_context_is_thread_local_and_requires_an_observed_anchor(self):
         first, second = logs(3, 8, 10, 4096), logs(9, 12, 20, 8192, tid=25)
         records = list(parse_buffers(first[:3] + second[:3] + first[3:] + second[3:]))

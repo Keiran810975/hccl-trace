@@ -118,7 +118,10 @@ def main():
     torch_npu.npu.manual_seed_all(case["workload_seed"])
     torch.set_num_threads(1)
     output = args.output
-    if case.get('experiment_contract', {}).get('profile') in {'gpt-three-anomalies-v1', 'gpt-copy-window-v1'}:
+    if case.get('experiment_contract', {}).get('profile') == 'roce-single-collective-v1':
+        from test.roce_single_collective import SingleCollectiveControl
+        control = SingleCollectiveControl(case, output / 'private', rank, store, torch_npu.npu.synchronize)
+    elif case.get('experiment_contract', {}).get('profile') in {'gpt-three-anomalies-v1', 'gpt-copy-window-v1'}:
         if store is not None:
             raise ValueError('the bounded three-anomaly experiment is single-node only')
         from test.gpt_three_anomaly_control import GptThreeAnomalyControl
@@ -161,7 +164,7 @@ def main():
         data = torch.tensor(values, dtype=torch.long)
         rng = random.Random(case["workload_seed"] + rank)
         warmup, iters = args.warmup if args.warmup is not None else settings["warmup"], args.iters if args.iters is not None else settings["iters"]
-        state = dict(step=None, prepare=None, buckets={}, warmup_buckets={}, target_bucket=None)
+        state = dict(step=None, prepare=None, buckets={}, warmup_buckets={}, target_bucket=None, inflight=[])
 
         hook_lock = threading.Lock()
 
@@ -174,9 +177,16 @@ def main():
             if bucket.buffer().dtype != torch.float32:
                 raise ValueError("this experiment requires actual FP32 gradient buckets")
             state["buckets"][index] = (signature, count)
+            gated = (getattr(control, 'single_collective_window', False)
+                     and step == inj['iteration'] and index == state['target_bucket'])
+            if gated:
+                control.before_bucket(step, signature, count, previous_futures=state['inflight'])
+                state['inflight'].clear()
+                # The deliberately blocked CPU control phase is recorded separately.
+                state['prepare'] = clocks()
             if (control.owner and step == inj.get("iteration") and index == state["target_bucket"]):
                 control.record("selected_bucket", iteration=step, bucket=index, signature=signature, count=count)
-                if not getattr(control, "communication_scoped", False):
+                if not gated and not getattr(control, "communication_scoped", False):
                     control.start(index)
             recorder.preparation = dict(location=(step, 0, index, count), clocks=state["prepare"])
             recorder.begin(step, 0, index, count)
@@ -184,6 +194,11 @@ def main():
             recorder.current["input_buffer_ptr"] = bucket.buffer().data_ptr()
             future = default_hooks.allreduce_hook(dist.group.WORLD, bucket)
             recorder.end()
+            if getattr(control, 'single_collective_window', False):
+                state['inflight'].append(future)
+            if gated:
+                control.after_bucket(future, recorder.current)
+                state['inflight'].clear()
             if (getattr(control, "communication_scoped", False) and index == state["target_bucket"]):
                 control.after_collective(recorder.current)
             state["prepare"] = clocks()
@@ -222,6 +237,10 @@ def main():
                 loss = model(input_ids=batch, labels=batch, use_cache=False).loss
             loss.backward()
             optimizer.step()
+            if getattr(control, 'single_collective_window', False):
+                for future in state['inflight']:
+                    future.wait()
+                state['inflight'].clear()
             torch_npu.npu.synchronize()
             recorder.iteration_done(stage_step)
             elapsed = time.perf_counter_ns() - started

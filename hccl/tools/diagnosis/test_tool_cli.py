@@ -94,6 +94,33 @@ def hashes(root):
 
 
 class ToolCliTests(unittest.TestCase):
+    def test_parallel_policy_is_explicit_and_public_candidates_have_no_priority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            capture = sdk_capture(root / "capture")
+            before = hashes(capture)
+            result = analyze_capture(capture, root / "report", mode="rolling", source_policy="parallel")
+            self.assertEqual(result["source_selection"]["policy"], "multinode_dual_v2")
+            self.assertLessEqual(result["source_selection"]["cluster_selection"]["selected_cluster_count"], 1)
+            self.assertEqual(result["candidate_relationship"], "parallel")
+            self.assertIsNone(result["primary_candidate_id"])
+            self.assertIsNone(result["primary_source_id"])
+            self.assertNotIn("primary_proposal", result["source_selection"])
+            validate_final(root / "report")
+            self.assertEqual(hashes(capture), before)
+            alias = analyze_capture(capture, root / "alias", mode="rolling", source_policy="cluster-top1")
+            self.assertEqual(alias["source_candidates"], result["source_candidates"])
+            self.assertEqual(alias["source_selection"]["cluster_selection"], result["source_selection"]["cluster_selection"])
+            original = analyze_capture(capture, root / "old", mode="rolling", source_policy="dual-v2")
+            self.assertEqual(result["source_candidates"], original["source_candidates"])
+            experimental = analyze_capture(capture, root / "time", mode="rolling", source_policy="cluster-top1-time")
+            self.assertEqual(experimental["source_selection"]["policy"], "dependency_cluster_top1_time_v1")
+            cohort = analyze_capture(capture, root / "cohort", mode="rolling", source_policy="cluster-top1-cohort")
+            self.assertEqual(cohort["source_selection"]["policy"], "dependency_cluster_cohort_v1")
+            self.assertLessEqual(cohort["source_selection"]["cluster_selection"]["selected_cluster_count"], 1)
+            self.assertIsNone(cohort["primary_candidate_id"])
+            self.assertEqual(cohort["candidate_relationship"], "parallel")
+
     def test_selected_iteration_view_does_not_change_diagnosis_or_inputs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

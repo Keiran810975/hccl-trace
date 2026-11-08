@@ -275,6 +275,14 @@ class SourcePropagationTests(unittest.TestCase):
         self.assertIn("steps.csv",text)
         self.assertEqual(report,before)
 
+    def test_candidates_are_presented_as_peers_even_for_legacy_ranked_input(self):
+        report = self.build(diagnosed())
+        report["candidates"][0]["primary"] = True
+        model = presentation.build_view_model(report)
+        self.assertFalse(any(c["primary"] for c in model["candidates"]))
+        self.assertNotIn("主候选", presentation.render_markdown(report))
+        self.assertNotIn("主候选", presentation.render_html(report, standalone=True))
+
 
 if __name__=="__main__":
     unittest.main()

@@ -20,7 +20,8 @@ def normalize(report, *, mode, run_id, rows, edges, pipeline, binding_evidence, 
     metric = "mean" if mode == "rolling" else "median"
     reference = (dict(kind="previous_five_measured", statistic="mean", window=5)
                  if mode == "rolling" else dict(kind="independent_baseline", statistic="median", matching="explicit_or_structural"))
-    roots, candidates, external, unresolved, deferred = [], [], [], [], []
+    roots, candidates, external, deferred = [], [], [], []
+    unresolved = [dict(item, diagnosis_category=UNRESOLVED) for item in report.get('unresolved_observations', [])]
     admission = report.get("candidate_admission")
     selected = set(admission["selected_candidate_ids"]) if admission else None
     decisions = {d["candidate_id"]: d for d in admission["decisions"]} if admission else {}
@@ -54,16 +55,20 @@ def normalize(report, *, mode, run_id, rows, edges, pipeline, binding_evidence, 
         source.setdefault("observed_start_ns", waits.ns(node, "start"))
         source.setdefault("observed_stop_ns", waits.ns(node, "stop"))
         paths = source.get("evidence_paths", {})
-        used = [links[e] for path in paths.values() for e in path if e in links]
-        used.extend(links[e] for e in source.get("local_completion_evidence", {}).get("edge_ids", []) if e in links)
-        confidence = "observed" if any(e["confidence"] == "observed" for e in used) else "exact" if used else "unavailable"
+        edge_ids = [e for path in paths.values() for e in path]
+        edge_ids.extend(source.get("local_completion_evidence", {}).get("edge_ids", []))
+        levels = {'unavailable': -1, 'semantic': 0, 'observed': 1, 'exact': 2}
+        confidence = min((links.get(e, {}).get('confidence', 'unavailable') for e in edge_ids),
+                         key=lambda value: levels.get(value, -1), default='unavailable')
+        supported = confidence in {'observed', 'exact'}
         destination = candidates if category == INTERNAL else external
         destination.append(dict(id=source["root_id"], status=source["status"], physical_cause=source.get("physical_cause", "unknown"),
             diagnosis_category=category, task_domain=source["task_domain"], category_rank=len(destination) + 1,
             cross_operation=source.get("cross_operation", False),
-            evidence_supported=(source["status"] == "dependency_supported_candidate" and bool(used)
+            evidence_supported=supported and (source["status"] in {'dependency_supported_candidate', 'unexplained_execution_growth'} and any(paths.values())
                                 or source.get("local_completion_evidence", {}).get("validated") is True),
-            support_kind="local_completion" if source.get("local_completion_evidence") else "slow_notify_wait" if category == INTERNAL else "host_preparation",
+            support_kind="local_completion" if source.get("local_completion_evidence") else "slow_notify_wait" if category == INTERNAL and paths else
+                         "own_execution_growth_only" if category == INTERNAL else "host_preparation",
             local_completion_evidence=source.get("local_completion_evidence"),
             dependency_timing=source.get("dependency_timing", {}),
             communication_context=source.get("communication_context"),
@@ -71,6 +76,7 @@ def normalize(report, *, mode, run_id, rows, edges, pipeline, binding_evidence, 
             observed_call_scope="source_operation_on_node_not_full_iteration_or_workload",
             local_model_impact_status=source.get("impact_status", "not_assessed"),
             local_model_execution_gain_ns=source.get("modeled_execution_gain_ns"),
+            call_work_evidence=source.get("call_work_evidence"),
             workload_completion_impact_proven=False,
             component=source["component"], **{k: source.get(k) for k in ("node_id", "user_rank", "device_id", "stream_id", "task_id",
             "iteration", "group_id", "call_site", "occurrence", "block", "bucket", "phase", "step", "event", "task_kind", "graph_id")},
@@ -113,12 +119,13 @@ def normalize(report, *, mode, run_id, rows, edges, pipeline, binding_evidence, 
     if primary not in {c["id"] for c in candidates}:
         primary = None
     diagnosis_status = report.get("diagnosis_status")
-    if not diagnosis_status or diagnosis_status == "localized_candidate" and primary is None:
-        diagnosis_status = ("localized_candidate" if primary else "external_clues" if external else
+    if not diagnosis_status or diagnosis_status == "localized_candidate" and not candidates:
+        diagnosis_status = ("localized_candidate" if candidates else "external_clues" if external else
                             "unresolved_waits" if unresolved else "no_slow_task")
     if deferred and not candidates and not external:
         diagnosis_status = "candidate_evidence_deferred"
     normalized = dict(schema_version=2, run_id=run_id, mode=mode, status=status,
+        candidate_relationship="parallel",
         source_policy_version=report.get("source_policy_version"), detection_options=report.get("options", {}),
         diagnosis_status=diagnosis_status,
         reference=reference, coverage=coverage, binding=binding_evidence,

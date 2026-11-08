@@ -33,7 +33,7 @@ SOURCE_FIELDS = ("root_id", "component", "node_id", "user_rank", "device_id", "s
                  "operation_scope", "iteration", "block", "bucket", "phase", "step", "event", "observed_start_ns",
                  "observed_stop_ns", "duration_ns", "reference_mean_ns", "delta_ns", "slowdown_factor",
                  "reference_iterations", "reference_count", "reason",
-                 "physical_cause", "modeled_execution_gain_ns", "impact_status", "traversal_truncated",
+                 "physical_cause", "traversal_truncated",
                  "other_backtrace_branches_truncated")
 SOURCE_FIELDS += ("group_id", "call_site", "occurrence", "reference_value_ns", "reference_metric", "baseline_median_ns")
 SOURCE_FIELDS += ("diagnosis_category", "task_domain", "category_rank", "cross_operation")
@@ -155,7 +155,7 @@ def build_report(rows, edges, candidates, comparisons=(), *, primary_source_cand
                                     and timing.get("wait_profiler_interval_ns") == [dst["start_ns"], dst["stop_ns"]]
                                     and "ffts" not in edge["kind"]
                                     and src["subtask_id"] < 0 and dst["subtask_id"] < 0)
-                    protocol_clock = (timing if timing and root.get("source_selection_policy") in {"multinode_dual_v1", "multinode_dual_v2"}
+                    protocol_clock = (timing if timing and root.get("source_selection_policy") in {"multinode_dual_v1", "multinode_dual_v2", "multinode_parallel_v1", "dependency_cluster_top1_time_v1", "dependency_cluster_cohort_v1"}
                         and timing.get("timing_domain") == "independent_network_probe_estimate"
                         and timing.get("status") == "accepted" and src["node_id"] != dst["node_id"]
                         and timing.get("source_profiler_interval_ns") == [src["start_ns"], src["stop_ns"]]

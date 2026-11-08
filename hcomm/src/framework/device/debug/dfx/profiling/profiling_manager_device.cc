@@ -16,6 +16,7 @@
 #include "common/aicpu_sqe_context.h"
 #include "common/aicpu_hccl_common.h"
 #include "dlprof_function.h"
+#include "task_semantic_trace.h"
 
 namespace {
 static constexpr u32 aging = 1;
@@ -294,14 +295,20 @@ HcclResult ProfilingManager::ReportMainStreamTask(hccl::Stream& stream, uint16_t
         aicpuKernelTaskId = AicpuGetTaskId();
         aicpuKernelStreamId = AicpuGetStreamId();
     }
-    HCCL_INFO("[ReportMainStreamTask] aicpuKernelStreamId = %u, aicpuKernelTaskId = %u", aicpuKernelStreamId, aicpuKernelTaskId);
     MsprofAicpuHcclMainStreamTask flagtask{};
     flagtask.streamId = stream.id();
     flagtask.taskId = taskId;
     flagtask.type = type;
     flagtask.aicpuStreamId = aicpuKernelStreamId;
     flagtask.aicpuTaskId = aicpuKernelTaskId;
-    HCCL_INFO("[ReportMainStreamTask] streamId:%u, taskId:%u, type:%u", flagtask.streamId, flagtask.taskId, flagtask.type);
+    // Exact diagnostic buffer binding must survive disabled debug INFO logs.
+    if (hccl::IsTaskSemanticTraceEnabled()) {
+        HCCL_RUN_INFO("[ReportMainStreamTask] aicpuKernelStreamId = %u, aicpuKernelTaskId = %u", aicpuKernelStreamId, aicpuKernelTaskId);
+        HCCL_RUN_INFO("[ReportMainStreamTask] streamId:%u, taskId:%u, type:%u", flagtask.streamId, flagtask.taskId, flagtask.type);
+    } else {
+        HCCL_INFO("[ReportMainStreamTask] aicpuKernelStreamId = %u, aicpuKernelTaskId = %u", aicpuKernelStreamId, aicpuKernelTaskId);
+        HCCL_INFO("[ReportMainStreamTask] streamId:%u, taskId:%u, type:%u", flagtask.streamId, flagtask.taskId, flagtask.type);
+    }
 
     CHK_PRT(dfx::ProfilingManager::CallMsprofReportAdditionInfo(MSPROF_REPORT_AICPU_HCCL_FLAG_TASK,
         ProfGetCurCpuTimestamp(), &flagtask, sizeof(MsprofAicpuHcclMainStreamTask)));

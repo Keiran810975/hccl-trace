@@ -27,6 +27,15 @@ NODE0_BUILD_PROBES = {"semantic-coverage-20261102", "gpt2-semantic-20261102-001"
 SDMA10_ROOTS = frozenset("hccl-diagnose-single-20261104-" + str(i) for i in range(700, 711))
 SDMA03_ROOTS = frozenset("hccl-diagnose-single-20261104-" + str(i) for i in range(800, 811))
 MULTINODE20_ROOTS = frozenset("hccl-diagnose-node03-20261105-" + str(i) for i in range(900, 921))
+MULTINODE19_ROOTS = frozenset("hccl-diagnose-node03-20261106-" + str(i) for i in (1000, *range(1002, 1021)))
+OVERHEAD_ROOT = "gpt2-overhead-20261105-001"
+OVERHEAD_TRIM_ROOT = "gpt2-overhead-trim-20261105-001"
+OVERHEAD_BENCHMARK_ROOT = "gpt2-overhead-benchmark-20261106-001"
+OVERHEAD_ATTRIBUTION_ROOT = "gpt2-overhead-attribution-20261106-001"
+OVERHEAD_LOGFILTER_ROOT = "gpt2-overhead-logfilter-20261106-001"
+LOWLOG_ROOT = "gpt2-lowlog-20261106-001"
+HCCL_TEST_OVERHEAD_ROOT = "hccl-test-overhead-20261107-001"
+ROCE_SINGLE_ROOT = "hccl-diagnose-node03-20261108-1101"
 
 
 def write(path, value):
@@ -38,7 +47,7 @@ def write(path, value):
 def scope(root, hostname=None):
     parent = PARENTS.get((hostname or socket.gethostname()).split(".")[0])
     root = root.resolve()
-    semantic_probe = root.name in NODE0_BUILD_PROBES and (hostname or socket.gethostname()).split(".")[0] == "liteserver-560t-0"
+    semantic_probe = root.name in NODE0_BUILD_PROBES | {OVERHEAD_ROOT, OVERHEAD_TRIM_ROOT, OVERHEAD_BENCHMARK_ROOT, OVERHEAD_ATTRIBUTION_ROOT, OVERHEAD_LOGFILTER_ROOT, LOWLOG_ROOT, HCCL_TEST_OVERHEAD_ROOT} and (hostname or socket.gethostname()).split(".")[0] == "liteserver-560t-0"
     single_suite = bool(re.fullmatch(r"hccl-diagnose-single-20261103-6[0-4][0-9]", root.name)) and (hostname or socket.gethostname()).split(".")[0] == "liteserver-560t-0"
     copy_suite = root.name in SDMA10_ROOTS | SDMA03_ROOTS and (hostname or socket.gethostname()).split(".")[0] == "liteserver-560t-0"
     if parent is None or root.parent != parent.resolve() or not (semantic_probe or single_suite or copy_suite or re.fullmatch(r"hccl-diagnose-node03-[0-9-]+", root.name)):
@@ -69,24 +78,43 @@ class Guard:
         self.device_hash, self.host_hash = DEVICE_HASH, HOST_HASH
         self.host_library = "/workspace/nf-20261022/deploy/lib64/libhcomm.so"
         self.host_libraries = {self.host_library: self.host_hash}
-        multi20 = self.root.name in MULTINODE20_ROOTS
-        multi_build = (self.root.name.startswith("hccl-diagnose-node03-20261103-") or multi20) and (self.root / "build-receipt.json").is_file()
+        multi19 = self.root.name in MULTINODE19_ROOTS
+        single_roce = self.root.name == ROCE_SINGLE_ROOT
+        multi20 = self.root.name in MULTINODE20_ROOTS or multi19
+        multi_build = (self.root.name.startswith("hccl-diagnose-node03-20261103-") or multi20 or single_roce) and (self.root / "build-receipt.json").is_file()
+        if single_roce and not multi_build:
+            raise ValueError('single-collective RoCE requires an attested low-log build')
         single_build = bool(re.fullmatch(r"hccl-diagnose-single-20261103-6[0-4][0-9]", self.root.name))
         copy03_build = self.root.name in SDMA03_ROOTS
         copy_build = self.root.name in SDMA10_ROOTS or copy03_build
+        overhead_build = self.root.name in {OVERHEAD_ROOT, OVERHEAD_TRIM_ROOT, OVERHEAD_BENCHMARK_ROOT, OVERHEAD_ATTRIBUTION_ROOT, OVERHEAD_LOGFILTER_ROOT, LOWLOG_ROOT, HCCL_TEST_OVERHEAD_ROOT}
         if copy_build:
             single_build = True
-        if multi_build or single_build:
+        if multi_build or single_build or overhead_build:
             deployment = json.loads((self.root / "deployment.json").read_text())
-            expected_profile = ("single-gpt-sdma10-npu03-v1" if copy03_build else "single-gpt-sdma10-v1"
-                if copy_build else "single-gpt40-v1" if single_build else "multinode20-v1" if multi20 else "multinode-dual-v1")
+            expected_profile = ("hccl-test-overhead-v1" if self.root.name == HCCL_TEST_OVERHEAD_ROOT else "gpt-lowlog-v1" if self.root.name == LOWLOG_ROOT else "gpt-overhead-logfilter-v1" if self.root.name == OVERHEAD_LOGFILTER_ROOT else "gpt-overhead-attribution-v1" if self.root.name == OVERHEAD_ATTRIBUTION_ROOT else "gpt-overhead-benchmark-v1" if self.root.name == OVERHEAD_BENCHMARK_ROOT else "gpt-overhead-trim-v1" if self.root.name == OVERHEAD_TRIM_ROOT else "gpt-overhead-v1" if overhead_build else "single-gpt-sdma10-npu03-v1" if copy03_build else "single-gpt-sdma10-v1"
+                if copy_build else "single-gpt40-v1" if single_build else "multinode19-lowlog-v1" if multi19 else "multinode20-v1" if multi20 else "multinode-dual-v1")
+            if single_roce:
+                expected_profile = 'roce-single-collective-v1'
             if deployment.get("profile") != expected_profile:
                 raise ValueError("new multi-node producer requires the explicit reviewed deployment profile")
-            if multi20:
+            if multi20 or single_roce:
                 authorization = json.loads((self.root / "authorization.json").read_text())
                 if (authorization.get('nodes') != [0, 3] or authorization.get('physical_cards') != [4, 5, 6, 7]
                         or authorization.get('restore_required') is not True):
                     raise ValueError('twenty-run batch requires the exact two-node authorization')
+                if multi19 and (authorization.get('manual_continuation_user_confirmed') is not True
+                        or authorization.get('temporary_signature_user_confirmed') is not True
+                        or authorization.get('node3_target_process_stop_user_confirmed') is not False
+                        or deployment.get('capture_policy') != dict(global_log_level=2, module_override=False,
+                            task_time='l1', ai_core='off', hccl='on', ascendcl='on')):
+                    raise ValueError('manual low-log continuation requires exact authorization and capture policy')
+                if single_roce and (authorization.get('single_collective_user_confirmed') is not True
+                        or authorization.get('temporary_signature_user_confirmed') is not True
+                        or authorization.get('node3_target_process_stop_user_confirmed') is not False
+                        or deployment.get('capture_policy') != dict(global_log_level=2, module_override=False,
+                            task_time='l1', ai_core='off', hccl='on', ascendcl='on')):
+                    raise ValueError('single-call RoCE requires exact authorization, low-log capture and no external stop')
             if single_build and deployment.get("cards") != ([0, 1, 2, 3] if copy03_build else [4, 5, 6, 7]):
                 raise ValueError("single-node batch is limited to the already authorized whole cards")
             if copy03_build:
@@ -95,11 +123,24 @@ class Guard:
                         or authorization.get("temporary_signature_user_confirmed") is not True
                         or authorization.get("restore_required") is not True):
                     raise ValueError("NPU0-3 requires its explicit user authorization and mandatory restoration")
-        if self.root.name in NODE0_BUILD_PROBES or multi_build or single_build:
+            if overhead_build:
+                authorization = json.loads((self.root / "authorization.json").read_text())
+                if (deployment.get("cards") != [4, 5, 6, 7] or authorization.get("nodes") != [0]
+                        or authorization.get("physical_cards") != [4, 5, 6, 7]
+                        or authorization.get("temporary_signature_user_confirmed") is not True
+                        or authorization.get("restore_required") is not True):
+                    raise ValueError("overhead capture requires explicit Node0 NPU4-7 authorization and restoration")
+        if self.root.name in NODE0_BUILD_PROBES or multi_build or single_build or overhead_build:
             build = json.loads((self.root / "build-receipt.json").read_text())
             if build["status"] != "built" or any(not re.fullmatch(r"[0-9a-f]{64}", build[k]) for k in ("device_sha256", "host_sha256")):
                 raise ValueError("new producer requires a completed matching Host/Device build receipt")
-            if (multi_build or single_build) and any(hashlib.sha256((self.root / "src" / name).read_bytes()).hexdigest() != value
+            if (multi19 or single_roce) and build['device_sha256'] != 'b68ef612370ebb9c635e9fb9d94ddaf977be81a3d609d0e35936f20e41ceebd2':
+                raise ValueError('continuation requires the tested low-log Device build')
+            if self.root.name == HCCL_TEST_OVERHEAD_ROOT and build['device_sha256'] != 'b68ef612370ebb9c635e9fb9d94ddaf977be81a3d609d0e35936f20e41ceebd2':
+                raise ValueError('HCCL Test overhead requires the tested low-log Device build')
+            if (overhead_build or multi19 or single_roce) and not build.get("verified_current_producer_files"):
+                raise ValueError("overhead capture requires the attested current producer files")
+            if (multi_build or single_build or overhead_build) and any(hashlib.sha256((self.root / "src" / name).read_bytes()).hexdigest() != value
                     for name, value in build["verified_current_producer_files"].items()):
                 raise ValueError("multi-node source differs from the attested new semantic producer")
             self.cards = ((0, 1, 2, 3) if copy03_build else (5, 6, 7)

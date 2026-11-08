@@ -83,7 +83,7 @@ msprof consolidated DB --------------------------------+-> merged.csv
 - 唯一生产 profiler 输入是 consolidated `msprof_*.db`，当前支持 DB schema `1.2.0`，
   SQLite 只读打开。JSON、`task_time.csv` 和旧 marker 路径已退出生产链。
 - semantic 生产 schema 为 v4，消费兼容 v2/v3/v4；拒绝 v1、无版本和旧 token 格式。
-  graph correlation 独立使用 v1；merged CSV 当前 42 列，graph artifact 当前 v4。
+  graph correlation 独立使用 v1；merged CSV 当前 45 列，graph artifact 当前 v7。
 - `device_id` 来自生产端 `deviceLogicId_` / DB 物理设备字段，绝不从 rank 推断。
   `user_rank`、`comm_rank`、`peer_rank`、node/device 分别处理。
 - direct 按 `(node_id, device_id, stream_id, task_id)` 和兼容 task kind 精确匹配。
@@ -109,7 +109,7 @@ msprof consolidated DB --------------------------------+-> merged.csv
 - 不恢复 connection/time、邻居/上一 step 或已删除的 payload semantic 因果边。
   缺证据保留 single、ambiguity 或 boundary；不伪造端点。
 - resource graph 从 execution artifact 派生，视图不重新构边。派生边应取路径最弱证据；
-  **当前 FFts/mixed resource order 错标 observed 仍待修复**，不能沿用为新功能合同。
+  当前实现及专项回归已覆盖 FFts/mixed order 的 semantic 降级，不能提升为 observed/exact。
 - `wait_span_ns` 是本地 wait duration；remote/post 分解是观测值，不是硬件内部精确延迟。
   无校准时可报告跨节点拓扑与本地时长，不做跨节点绝对时间相减或全局关键路径累计。
 

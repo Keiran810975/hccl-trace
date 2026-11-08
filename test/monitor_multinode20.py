@@ -11,16 +11,16 @@ import time
 
 if __package__:
     from .calibration_offload import SSH, offload
-    from .multinode20_suite import ROOT_NAME
+    from .multinode20_suite import ROOT_NAME, CONTINUATION_ROOT
 else:
     from calibration_offload import SSH, offload
-    from multinode20_suite import ROOT_NAME
+    from multinode20_suite import ROOT_NAME, CONTINUATION_ROOT
 
 
 ROOT = '/home/commTeam/zjy/zjy-new-workspace/' + ROOT_NAME
 
 
-def snapshot():
+def snapshot(root=ROOT):
     code = r'''
 import json,subprocess,time,socket
 from pathlib import Path
@@ -37,12 +37,15 @@ if p.exists():
   cmd=(p/'cmdline').read_bytes().replace(b'\0',b' ').decode()
   o['supervisor']=dict(alive=stat[0]!='Z',identity_matches=str(r/'src/test/run_multinode20.py') in cmd,start_ticks=int(stat[19]))
 o['last_resources']=read(r/'last-resources.json') or read(r/'last-node0-resources.json')
+if s.get('status')=='waiting_node0':
+ o['last_admission_resources']=o['last_resources']
+ o['last_resources']=dict(checked_unix_ns=s.get('checked_unix_ns'),source='last-node0-resources.json',nodes={'0':read(r/'last-node0-resources.json')})
 o['current_preflight']=read(Path(s['active_directory'])/'preflight-state.json') if s.get('active_directory') else None
 o['current_authorized']=read(Path(s['active_directory'])/'authorized-state.json') if s.get('active_directory') else None
 o['cpu_recovery']=read(Path(s['active_directory'])/'cpu-recovery.json') if s.get('active_directory') else None
 o['tail']=(r/'supervisor.log').read_text()[-1800:]
 print(json.dumps(o))
-'''.replace('ROOT', repr(ROOT))
+'''.replace('ROOT', repr(root))
     result = subprocess.run(SSH + [shlex.join(['python3', '-c', code])], capture_output=True, text=True, timeout=90)
     if result.returncode:
         raise RuntimeError('bounded queue query failed: ' + result.stderr[-1500:])
@@ -53,11 +56,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--offload-ready', action='store_true')
+    parser.add_argument('--continuation', action='store_true', help='read the explicitly authorized nineteen-run low-log continuation')
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     with (args.output / 'monitor.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        value = snapshot()
+        root = '/home/commTeam/zjy/zjy-new-workspace/' + CONTINUATION_ROOT if args.continuation else ROOT
+        value = snapshot(root)
         state = value['state']
         if state['status'] not in {'completed', 'stopped', 'ineffective_injection'} and not value['supervisor']['identity_matches']:
             raise RuntimeError('supervisor identity missing or reused; do not start another queue')
@@ -68,7 +73,7 @@ def main():
                 completed=state['completed'],active=state['active_case'],supervisor=value['supervisor'])) + '\n')
         if args.offload_ready and state['status'] == 'awaiting_verified_archive':
             current = Path(state['active_directory'])
-            if current.parent != Path(ROOT).parent or value['registry'] is not None:
+            if current.parent != Path(root).parent or value['registry'] is not None:
                 raise ValueError('archive admission requires the exact restored completed case')
             receipt = offload(current.name, args.output / 'live', remove_remote=True)
             print(json.dumps(dict(archive_verified=True,case=current.name,sha256=receipt['local_archive_sha256'])))

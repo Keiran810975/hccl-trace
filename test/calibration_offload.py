@@ -35,6 +35,7 @@ MEMBERS = ("src", "input", "capture", "report.debug", "report", "gpt-output", "p
 MEMBERS += ('effect-evidence.json', 'authorization.json', 'restoration-verified.json')
 MEMBERS += ('cpu-recovery.json', 'cpu-recovery-transport.json', 'network-observation-unavailable.json')
 MEMBERS += ('failure-restoration-audit.json',)
+MEMBERS += ('postdiagnosis-evaluator', 'effect-source-revision.json')
 REMOVE = ("capture", "report.debug", "peer-preflight", "node3-preflight.tar", "report/execution.html")
 
 
@@ -49,7 +50,8 @@ def file_hash(path):
 def case_name(name):
     calibration = bool(re.fullmatch(r"hccl-diagnose-node03-20261101-2\d\d", name)) and not name.endswith("-200")
     dual = bool(re.fullmatch(r"hccl-diagnose-node03-20261103-52[1-6]", name))
-    repeated = name in {'hccl-diagnose-node03-20261105-' + str(i) for i in range(901, 921)}
+    repeated = name in ({'hccl-diagnose-node03-20261105-' + str(i) for i in range(901, 921)}
+                       | {'hccl-diagnose-node03-20261106-' + str(i) for i in range(1002, 1021)})
     if not (calibration or dual or repeated):
         raise ValueError("only reviewed calibration attempts or new dual cases 521..526 are accepted")
     return name
@@ -68,8 +70,12 @@ def command(node, argv):
 
 
 def remote_json(node, code, timeout=240):
-    result = subprocess.run(command(node, ["docker", "exec", "zjy-new", "python3", "-c", code]),
-                            capture_output=True, text=True, check=True, timeout=timeout)
+    try:
+        result = subprocess.run(command(node, ["docker", "exec", "zjy-new", "python3", "-c", code]),
+                                capture_output=True, text=True, check=True, timeout=timeout)
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError('bounded archive query failed (exit {}): {}'.format(
+            error.returncode, (error.stderr or '')[-1500:])) from error
     return json.loads(result.stdout)
 
 
@@ -154,7 +160,8 @@ def backup(node, name, output):
             raise ValueError("local verified archive changed")
         return receipt
     manifest = remote_json(node, manifest_code(base))
-    deduplicate = name in {'hccl-diagnose-node03-20261105-' + str(i) for i in range(901, 921)}
+    deduplicate = name in ({'hccl-diagnose-node03-20261105-' + str(i) for i in range(901, 921)}
+                          | {'hccl-diagnose-node03-20261106-' + str(i) for i in range(1002, 1021)})
     if deduplicate:
         manifest['content_deduplicated'] = True
     if not manifest["files"]:

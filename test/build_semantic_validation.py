@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import time
 
+LOWLOG_ROOT = 'gpt2-lowlog-20261106-001'
 
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -33,15 +34,32 @@ def finalize_existing(root):
 
 
 def build(root):
-    if root.parent != Path('/workspace') or root.name != 'semantic-coverage-20261102':
+    if root.parent != Path('/workspace') or root.name not in {'semantic-coverage-20261102', LOWLOG_ROOT}:
         raise ValueError('unexpected owned build directory')
-    source = root / 'src/hcomm'
+    original = root / 'src/hcomm'
+    source = original
+    compatibility = None
+    if root.name == LOWLOG_ROOT:
+        source = root / 'build-source/hcomm'
+        shutil.copytree(original, source)
+        patch = root / 'src/test/anomaly_injection/hcomm_gcc12_build_compat.patch'
+        subprocess.run(['patch', '-p2', '-i', str(patch)], cwd=source, check=True, timeout=30)
+        changed = {str(p.relative_to(original)) for p in original.rglob('*')
+            if p.is_file() and sha(p) != sha(source / p.relative_to(original))}
+        if changed != {'src/platform/resource/netdev/hccl_net_dev_v1.cc',
+                'src/platform/resource/notify/notify_pool_impl.h',
+                'src/platform/resource/transport/host/transport_direct_npu.cc'}:
+            raise ValueError('unexpected compatibility patch scope')
+        compatibility = dict(patch_sha256=sha(patch), files=sorted(changed),
+            purpose='reuse the reviewed isolated GCC12 build compatibility patch; no communication-path change')
     metadata = [p for p in source.rglob('._*') if p.is_file()]
     for path in metadata:
         path.unlink()
     before = {str(p.relative_to(source)): sha(p) for p in source.rglob('*') if p.is_file()}
     result = dict(source_files=before, started_unix_ns=time.time_ns(), status='building',
                   ignored_archive_metadata=[str(p.relative_to(source)) for p in metadata])
+    if compatibility:
+        result['build_compatibility'] = compatibility
     (root / 'logs').mkdir(exist_ok=True)
     try:
         for side, targets in [('host', ['hcomm']), ('device', ['generate_device_aicpu_package'])]:
@@ -80,6 +98,12 @@ def build(root):
         result.update(status='built', host_sha256=sha(destination / 'libhcomm.so'),
                       host_libraries={p.name: sha(p) for p in destination.glob('*.so')},
                       device_sha256=sha(root / 'input/aicpu_hcomm.tar.gz'))
+        if root.name == LOWLOG_ROOT:
+            result['dependency_libraries'] = result['host_libraries']
+            result['host_libraries'] = {name: sha(destination / name)
+                for name in ('libhcomm.so', 'libhccl_alg.so', 'libhccl_plf.so')}
+            result['verified_current_producer_files'] = {'hcomm/' + str(p.relative_to(original)): sha(p)
+                for p in original.rglob('*') if p.is_file()}
     except BaseException as error:
         result.update(status='failed', error=str(error))
         raise

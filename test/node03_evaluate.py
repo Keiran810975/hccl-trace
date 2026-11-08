@@ -10,6 +10,13 @@ from hccl.tools.diagnosis.clock_alignment import raw_to_profiler
 
 
 def network_active_interval(activity):
+    if activity.get('window_mode') == 'single_collective':
+        begin, end = activity['started_raw_ns'], activity['finished_raw_ns']
+        if (type(begin) is not int or type(end) is not int or not
+                activity['first_confirmed_limit_raw_ns'] <= begin < end
+                <= activity['restore_started_raw_ns'] <= activity['restore_verified_raw_ns']):
+            raise ValueError('invalid device-completed single-collective window')
+        return begin, end
     begin = activity.get("first_confirmed_limit_raw_ns", activity["started_raw_ns"])
     end = activity["finished_raw_ns"]
     if (type(begin) is not int or type(end) is not int or end <= begin
@@ -20,6 +27,12 @@ def network_active_interval(activity):
 
 
 def validate_network_window(data, case, activity):
+    if case.get('experiment_contract', {}).get('profile') == 'roce-single-collective-v1':
+        if __package__:
+            from .roce_single_collective import audit_public_window
+        else:
+            from roce_single_collective import audit_public_window
+        return audit_public_window(data.parent, case, activity)
     window = activity.get("measurement_window", {})
     first = window.get("first_full_iteration")
     injection = case["injection"]

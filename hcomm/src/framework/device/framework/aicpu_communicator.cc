@@ -3568,8 +3568,13 @@ HcclResult HcclCommAicpu::OrchestrateHcclOp(const std::string &algName, OpParam 
     }
 
     // 打印当前展开的算子信息
-    HCCL_INFO("[HcclCommAicpu][OrchestrateHcclOp] opUnfoldIdx_[%u] opType[%d] curRank[%u] rankSize[%u]", opUnfoldIdx_, param.opType, topoInfo_.userRank, GetRankSize());
-    HCCL_INFO("[HcclCommAicpu][OrchestrateHcclOp] inputPtr[0x%016llx] inputSize[%llu] outputPtr[0x%016llx] outputSize[%llu]", param.inputPtr, param.inputSize, param.outputPtr, param.outputSize);
+    if (IsTaskSemanticTraceEnabled()) {
+        HCCL_RUN_INFO("[HcclCommAicpu][OrchestrateHcclOp] opUnfoldIdx_[%u] opType[%d] curRank[%u] rankSize[%u]", opUnfoldIdx_, param.opType, topoInfo_.userRank, GetRankSize());
+        HCCL_RUN_INFO("[HcclCommAicpu][OrchestrateHcclOp] inputPtr[0x%016llx] inputSize[%llu] outputPtr[0x%016llx] outputSize[%llu]", param.inputPtr, param.inputSize, param.outputPtr, param.outputSize);
+    } else {
+        HCCL_INFO("[HcclCommAicpu][OrchestrateHcclOp] opUnfoldIdx_[%u] opType[%d] curRank[%u] rankSize[%u]", opUnfoldIdx_, param.opType, topoInfo_.userRank, GetRankSize());
+        HCCL_INFO("[HcclCommAicpu][OrchestrateHcclOp] inputPtr[0x%016llx] inputSize[%llu] outputPtr[0x%016llx] outputSize[%llu]", param.inputPtr, param.inputSize, param.outputPtr, param.outputSize);
+    }
     opUnfoldIdx_ += 1;
 
     // 检查算子展开的动态缓存, 确认是否可以跳过算子展开

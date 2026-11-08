@@ -129,7 +129,7 @@ def main():
         state["validation_passed"] = True
     except BaseException as error:
         state.update(status="failed", error=str(error))
-        repeat20 = args.formal_case and json.loads(args.formal_case.read_text()).get('experiment_contract', {}).get('profile') == 'multinode20-v1'
+        repeat20 = args.formal_case and json.loads(args.formal_case.read_text()).get('experiment_contract', {}).get('profile') in {'multinode20-v1', 'roce-single-collective-v1'}
         if (args.communication_calibration or args.short_copy_burst or repeat20) and validation_process is not None:
             try:
                 cancel_capture(root)

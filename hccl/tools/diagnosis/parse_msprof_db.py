@@ -54,6 +54,10 @@ TASK_KIND_BY_EVENT = {
     "NOTIFY_RECORD_SQE": "notify_record",
     "NOTIFY_WAIT_SQE": "notify_wait",
 }
+COMMUNICATION_ONLY_TASK_TYPES = frozenset(TASK_KIND_BY_EVENT) | frozenset((
+    "EVENT_RECORD", "EVENT_WAIT", "KERNEL_AICPU", "PLACE_HOLDER_SQE",
+    "PROFILING_DISABLE", "PROFILING_ENABLE", "WRITE_VALUE_SQE",
+))
 
 
 class MsprofDbError(ValueError):
@@ -115,6 +119,12 @@ def _validate_contract(connection: sqlite3.Connection, path: str) -> str:
     )}
     for table, required in REQUIRED_COLUMNS.items():
         if table not in tables:
+            # Native communication-only captures can omit this metadata table entirely.
+            if table == "COMPUTE_TASK_INFO":
+                kinds = {str(row[0] or "").upper() for row in connection.execute(
+                    "SELECT DISTINCT s.value FROM TASK t LEFT JOIN STRING_IDS s ON s.id=t.taskType")}
+                if kinds and kinds <= COMMUNICATION_ONLY_TASK_TYPES:
+                    continue
             raise MsprofDbError(
                 "unsupported msprof DB {!r}: missing table {}".format(path, table)
             )
@@ -206,6 +216,11 @@ def parse_file(path: str, default_node_id: str = "") -> List[ProfilerTask]:
         communication_type_join = (
             "LEFT JOIN STRING_IDS AS communication_type ON communication_type.id = communication.taskType"
             if has_communication_type else "")
+        has_compute = bool(_table_columns(connection, "COMPUTE_TASK_INFO"))
+        compute_name = "compute_name.value" if has_compute else "NULL"
+        compute_joins = ("LEFT JOIN COMPUTE_TASK_INFO AS compute ON compute.globalTaskId = task.globalTaskId "
+                         "LEFT JOIN STRING_IDS AS compute_name ON compute_name.id = compute.name"
+                         if has_compute else "")
         rows = connection.execute(
             """
             SELECT
@@ -221,7 +236,7 @@ def parse_file(path: str, default_node_id: str = "") -> List[ProfilerTask]:
                 task_type.value AS task_type,
                 {communication_type} AS communication_type,
                 {size_column} AS size_bytes,
-                compute_name.value AS compute_name,
+                {compute_name} AS compute_name,
                 communication.notifyId AS notify_id,
                 communication.srcRank AS src_rank,
                 communication.dstRank AS dst_rank,
@@ -232,10 +247,7 @@ def parse_file(path: str, default_node_id: str = "") -> List[ProfilerTask]:
             FROM TASK AS task
             JOIN STRING_IDS AS task_type
               ON task_type.id = task.taskType
-            LEFT JOIN COMPUTE_TASK_INFO AS compute
-              ON compute.globalTaskId = task.globalTaskId
-            LEFT JOIN STRING_IDS AS compute_name
-              ON compute_name.id = compute.name
+            {compute_joins}
             LEFT JOIN COMMUNICATION_TASK_INFO AS communication
               ON communication.globalTaskId = task.globalTaskId
             {communication_type_join}
@@ -248,7 +260,8 @@ def parse_file(path: str, default_node_id: str = "") -> List[ProfilerTask]:
             WHERE UPPER(task_type.value) <> 'AI_CORE'
             ORDER BY task.startNs, task.endNs, task.streamId, task.taskId, task.contextId
             """.format(communication_type=communication_type, size_column=size_column,
-                       communication_type_join=communication_type_join)
+                       communication_type_join=communication_type_join,
+                       compute_name=compute_name, compute_joins=compute_joins)
         )
         tasks = []
         for row in rows:

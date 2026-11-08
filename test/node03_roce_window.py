@@ -11,6 +11,7 @@ import re
 import shutil
 import socket
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 import sys
 import time
 
@@ -76,6 +77,36 @@ def card_processes(text, card):
     return found
 
 
+def chip_processes(text):
+    """Parse one explicit chip's native proc-mem query, failing closed on unknown output."""
+    if text.strip() == "No process in device.":
+        return set()
+    lines = [line for line in text.splitlines() if line.strip()]
+    if any('Process id:' in line for line in lines):
+        rows = [re.fullmatch(r'\s*Process id:(\d+)\s+Process name:\S+\s+Process memory\(MB\):(\d+)\s*', line)
+                for line in lines]
+        if not rows or any(row is None for row in rows):
+            raise ValueError('unexpected native per-chip process row')
+        return {int(row.group(1)) for row in rows}
+    headers = [i for i, line in enumerate(lines) if re.search(r'process\s+id', line, re.I)]
+    if len(headers) != 1:
+        raise ValueError('unrecognized native per-chip process report')
+    result = set()
+    for line in lines[headers[0] + 1:]:
+        if not line.strip():
+            continue
+        cells = ([cell.strip() for cell in next(csv.reader([line], delimiter='|')) if cell.strip()]
+                 if '|' in lines[headers[0]] else re.split(r'\s+', line.strip()))
+        if not cells or all(set(cell) <= set('+-= ') for cell in cells):
+            continue
+        if not cells[0].isdigit() or len(cells) < 2:
+            raise ValueError('unexpected native per-chip process row')
+        result.add(int(cells[0]))
+    if not result:
+        raise ValueError('empty per-chip table without the native empty sentinel')
+    return result
+
+
 class Window:
     def __init__(self, root):
         self.root = scope(root)
@@ -131,12 +162,22 @@ class Window:
         expected = []
         for path in (self.root / "hold/device-1.json", self.root / "gpt-output/runtime/rank-0.json"):
             expected.append(json.loads(path.read_text())["pid"])
-        text = self.run(["npu-smi", "info"])
-        observed = card_processes(text, 4)
+        # Query both chips of the one authorized card instead of scanning all sixteen chips.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            reports = list(pool.map(lambda chip: self.run(
+                ["npu-smi", "info", "-t", "proc-mem", "-i", "4", "-c", str(chip)]), (0, 1)))
+        observed = set().union(*(chip_processes(text) for text in reports))
         if not observed or not observed <= set(expected):
             raise ValueError("unknown process on the shared target whole card; do not shape it")
 
     def watch(self):
+        config = json.loads((self.root / "input/case.json").read_text())
+        if config.get('experiment_contract', {}).get('profile') == 'roce-single-collective-v1':
+            if __package__:
+                from .roce_single_collective import watch
+            else:
+                from roce_single_collective import watch
+            return watch(self)
         evidence = json.loads((self.root / "input/network-baseline.json").read_text())
         baseline_active(evidence)
         config = json.loads((self.root / "input/case.json").read_text())["injection"]

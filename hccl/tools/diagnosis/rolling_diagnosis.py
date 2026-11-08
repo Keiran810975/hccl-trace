@@ -54,7 +54,7 @@ class RollingOptions:
     source_policy: str = "legacy"
 
     def validate(self):
-        if self.source_policy not in {"legacy", "dual", "dual-v2"}:
+        if self.source_policy not in {"legacy", "dual", "dual-v2", "parallel", "cluster-top1", "cluster-top1-time", "cluster-top1-cohort"}:
             raise ValueError("unknown source policy")
         if self.candidate_policy not in candidate_screening.POLICIES:
             raise ValueError("unknown experimental candidate policy")
@@ -233,7 +233,7 @@ def analyze(rows, edges, coordinates, options=RollingOptions(), *, preparations=
     coordinates = validate_coordinates(list(coordinates.values()))
     comparison.evidence_adjacency(rows, edges)
     tasks = compare_tasks(rows, edges, coordinates, options)
-    roots, traces = ([], []) if options.source_policy in {"dual", "dual-v2"} else wait_backtrace.trace_sources(rows, edges, tasks, options, alignment=alignment)
+    roots, traces = ([], []) if options.source_policy in {"dual", "dual-v2", "parallel", "cluster-top1", "cluster-top1-time", "cluster-top1-cohort"} else wait_backtrace.trace_sources(rows, edges, tasks, options, alignment=alignment)
     if options.completion_fallback:
         from .completion_sources import support_local_completion
         support_local_completion(roots, rows, edges, options)

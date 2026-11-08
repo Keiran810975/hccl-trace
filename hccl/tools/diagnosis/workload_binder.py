@@ -38,36 +38,72 @@ class Binding:
 
 
 def _read_calls(path):
-    records = [json.loads(line) for line in Path(path).read_text(encoding="utf-8-sig").splitlines() if line.strip()]
-    header, calls, completions = records[0], [], {}
-    if records[-1].get("event") != "capture_end" or records[-1].get("pending_sequences"):
-        raise ValueError("SDK capture is incomplete or missing a user-controlled completion boundary")
-    for record in records[1:]:
-        if record["event"] == "call":
-            if record.get("status") != "submitted":
-                raise ValueError("failed public collective cannot be bound")
-            if any(record.get(k) != header[k] for k in ("run_id", "node_id", "user_rank", "device_id")):
-                raise ValueError("public call changed runtime identity")
-            calls.append(record)
-        elif record["event"] == "completion":
-            for sequence in record["sequences"]:
-                if sequence in completions:
-                    raise ValueError("duplicate public completion observation")
-                completions[sequence] = record["clocks"]["raw_ns"]
-        elif record["event"] != "capture_end":
-            raise ValueError("unsupported SDK event")
+    header, calls, completions, pending, ended = None, [], {}, set(), False
+    try:
+        with Path(path).open(encoding='utf-8-sig') as stream:
+            for line in stream:
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                if not isinstance(record, dict) or record.get('schema_version') != 1:
+                    raise ValueError('expected SDK schema 1 records')
+                if header is None:
+                    if (record.get('event') != 'runtime'
+                            or any(not isinstance(record.get(k), str) or not record[k] for k in ('run_id', 'node_id'))
+                            or any(type(record.get(k)) is not int or record[k] < 0 for k in ('user_rank', 'device_id'))):
+                        raise ValueError('SDK log requires explicit runtime identity')
+                    header = record
+                    continue
+                if ended:
+                    raise ValueError('SDK events occur after capture_end')
+                if record['event'] == 'call':
+                    if record.get('status') != 'submitted':
+                        raise ValueError('failed public collective cannot be bound')
+                    if any(record.get(k) != header[k] for k in ('run_id', 'node_id', 'user_rank', 'device_id')):
+                        raise ValueError('public call changed runtime identity')
+                    sequence = record['sequence']
+                    if type(sequence) is not int or sequence != len(calls):
+                        raise ValueError('complete unique SDK call/completion sequence required')
+                    calls.append(record)
+                    pending.add(sequence)
+                elif record['event'] == 'completion':
+                    sequences = record['sequences']
+                    if not isinstance(sequences, list) or any(type(s) is not int for s in sequences):
+                        raise ValueError('invalid public completion sequence')
+                    for sequence in sequences:
+                        if sequence not in pending:
+                            raise ValueError('duplicate or premature public completion observation')
+                        pending.remove(sequence)
+                        completions[sequence] = record['clocks']['raw_ns']
+                elif record['event'] == 'capture_end':
+                    if record.get('pending_sequences') != [] or pending:
+                        raise ValueError('SDK capture is incomplete or missing a user-controlled completion boundary')
+                    ended = True
+                else:
+                    raise ValueError('unsupported SDK event')
+    except (KeyError, TypeError, json.JSONDecodeError) as error:
+        raise ValueError('invalid SDK log {}: {}'.format(path, error)) from error
+    if header is None or not ended:
+        raise ValueError('SDK capture is incomplete or missing a user-controlled completion boundary')
     if [c["sequence"] for c in calls] != list(range(len(calls))) or set(completions) != set(range(len(calls))):
         raise ValueError("complete unique SDK call/completion sequence required")
     for call in calls:
-        before, after, complete = call["before"]["raw_ns"], call["after"]["raw_ns"], completions[call["sequence"]]
+        try:
+            before, after, complete = call["before"]["raw_ns"], call["after"]["raw_ns"], completions[call["sequence"]]
+        except (KeyError, TypeError) as error:
+            raise ValueError('missing public call/completion clock observations') from error
         if any(type(v) is not int or v < 0 for v in (before, after, complete)) or not before <= after <= complete:
             raise ValueError("invalid public call/completion clock observations")
+        if 'preparation_start_raw_ns' in call:
+            start = call['preparation_start_raw_ns']
+            if type(start) is not int or not 0 <= start <= before:
+                raise ValueError('preparation start must be an actual earlier raw-clock observation')
         call["completion_raw_ns"] = complete
         if "input_buffer_ptr" in call and (type(call["input_buffer_ptr"]) is not int or not 0 < call["input_buffer_ptr"] < 2**64):
             raise ValueError("invalid observed input buffer identity")
-        if (call.get("stage") not in {"warmup", "measured"}
+        if (not isinstance(call.get('stage'), str) or call['stage'] not in {"warmup", "measured"}
                 or any(type(call.get(k)) is not int or call[k] < 0 for k in ("iteration", "occurrence", "element_count"))
-                or not call.get("call_site") or not call.get("group_id")):
+                or any(not isinstance(call.get(k), str) or not call[k].strip() for k in ('call_site', 'group_id'))):
             raise ValueError("invalid SDK workload location")
     return header, calls
 
@@ -286,6 +322,7 @@ def bind_capture(capture, work, *, mode):
         coordinates.append(dict(operation_scope=scope, **dict(zip(("group_id", "stage", "iteration", "call_site", "occurrence"), key)), evidence=proof))
         evidence.append(dict(operation_id=op_id, participants=participants, group_id=key[0],
                              operation_type=signature[1], dtype=signature[2], element_count=signature[3],
+                             reduction=signature[4],
                              operation_connection_ids=[e["op"]["connectionId"] for e in entries],
                              named_api_connection_ids=[e["op"]["api"]["connectionId"] for e in entries],
                              api_binding_methods=[e["op"]["api_binding_method"] for e in entries],
