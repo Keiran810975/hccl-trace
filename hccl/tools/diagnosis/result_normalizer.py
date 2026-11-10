@@ -136,6 +136,9 @@ def normalize(report, *, mode, run_id, rows, edges, pipeline, binding_evidence, 
     if "peer_read_policy" in report:
         normalized.update(peer_read_policy=report["peer_read_policy"],
                           peer_read_observations=report["peer_read_observations"])
+    if "input_copy_overlap_policy" in report:
+        normalized.update(input_copy_overlap_policy=report["input_copy_overlap_policy"],
+                          input_copy_overlap_observations=report["input_copy_overlap_observations"])
     tasks = [dict(t, **classify_task(lookup[t["graph_id"]]), reference_value_ns=t.get("reference_mean_ns" if mode == "rolling" else "baseline_median_ns"),
                   reference_metric=metric) for t in report["tasks"]]
     return normalized, roots, tasks

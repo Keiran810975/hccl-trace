@@ -191,7 +191,12 @@ def trace_sources(rows, edges, tasks, options, *, alignment=None):
                     # starting earlier than history can conceal that relative delay.
                     follow_order(key, path)
                 continue
-            intrinsic = (item["duration_slow"] and kind in WORK_KINDS
+            overlap_explained = item.get("copy_overlap_explained", False)
+            if overlap_explained:
+                boundary(key, path, "input_copy_duration_explained_by_overlap")
+                if not item.get("start_late") and not item["gap_slow"]:
+                    continue
+            intrinsic = (item["duration_slow"] and not overlap_explained and kind in WORK_KINDS
                          and classify_task(row)["task_domain"] == "hccl_internal")
             if intrinsic:
                 source(key, path)
@@ -222,7 +227,8 @@ def trace_sources(rows, edges, tasks, options, *, alignment=None):
     observations = []
     for item in tasks:
         key = item["graph_id"]
-        if item["duration_slow"] and item["task_kind"] in WORK_KINDS and key not in connected:
+        if (item["duration_slow"] and not item.get("copy_overlap_explained")
+                and item["task_kind"] in WORK_KINDS and key not in connected):
             observations.append(dict(item, root_id=stable_id("isolated", (key,)), component="execution", status="isolated_slow_task",
                 reason="Execution increased, but no slow Wait backtrace established its propagation",
                 affected_wait_graph_ids=[], evidence_paths={}, upstream_slow_graph_ids=[], traversal_truncated=False, physical_cause="unknown"))
@@ -245,6 +251,8 @@ def trace_sources(rows, edges, tasks, options, *, alignment=None):
     covered = {w for root in roots.values() for w in root["affected_wait_graph_ids"]}
     for item in tasks:
         item["role"] = ("source_candidate" if item["graph_id"] in connected else "propagated_wait" if item["graph_id"] in covered
+                        else "slow_unattributed_task" if item["gap_slow"]
+                        else "input_copy_overlap_explained" if item.get("copy_overlap_explained")
                         else "slow_unattributed_task" if item["is_slow"] else "not_flagged")
     return list(roots.values()) + observations, traces
 

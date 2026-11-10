@@ -171,8 +171,11 @@ def build_view_model(report):
                        controls=[dict(rank=f["user_rank"], peer=f["peer_rank"], duration=duration(f["duration_ns"]))
                                  for f in item["other_receivers"]])
                   for item in report.get("peer_read_observations", [])]
+    overlaps = report.get("input_copy_overlap_observations", [])
+    explained_pairs = sum(o["disposition"] == "explained_by_input_copy_overlap" for o in overlaps)
     return dict(summary=report["summary"], candidates=candidates, nodes=nodes,
                 peer_read_observations=peer_reads,
+                input_copy_overlap_summary=dict(explained_pairs=explained_pairs, retained_pairs=len(overlaps) - explained_pairs),
                 analysis_scope=report.get("analysis_scope"),
                 unresolved_observations=visible[:UNRESOLVED_PREVIEW_LIMIT],
                 unresolved_observation_count=len(unresolved), unresolved_in_view_count=len(visible),
@@ -226,6 +229,7 @@ details{border-top:1px solid #d9dde2;margin-top:20px;padding-top:12px}summary{cu
 </style></head><body>
 <header><div><h1>异常传播诊断</h1><div id="report-counts" class="muted"></div><div id="analysis-scope" class="muted" hidden></div></div>
 <nav class="downloads" aria-label="诊断结果"><a href="root_causes.json">根因候选 JSON</a><a href="execution.html">执行依赖图</a></nav></header>
+<p id="input-copy-overlap-summary" class="muted" style="margin:16px 24px" hidden></p>
 <details id="unresolved-section" style="margin:16px 24px"><summary id="unresolved-title">未归因观测</summary><p>没有完整证据的慢任务或等待，不作为通信内部根因。</p><div id="unresolved-items"></div></details>
 <details id="peer-read-section" style="margin:16px 24px" hidden><summary id="peer-read-title">疑似对端读取影响</summary><p>比较同次通信的同阶段、同一步和同字节数。这里是方向性慢化线索，不是 Notify 依赖边，也未证明对端物理故障。</p><div id="peer-read-items"></div></details>
 <div class="layout" id="layout"><aside><label for="search">按类别查看</label><input id="search" type="search" placeholder="Rank / iter / 任务名" autocomplete="off"><nav id="candidates" aria-label="分类诊断结果"></nav><p id="no-matches" class="muted" hidden>没有匹配的结果</p></aside>
@@ -248,6 +252,8 @@ const target=chain=>model.nodes[chain.target_wait_graph_id];
 const edgeLabel=hop=>hop.kind==="direct_stream_order_observed"?"同流顺序":hop.kind.includes("notify_sync")?"Record → Wait 通知配对":hop.kind;
 const metric=(label,value,extra="")=>`<div class="metric"><span>${esc(label)}</span><strong class="${extra}">${esc(value)}</strong></div>`;
 $("report-counts").textContent=`${model.summary.communication_source_count??model.summary.candidate_count} 个通信内部候选 · ${model.summary.external_clue_count??0} 个外部线索 · ${model.summary.chain_count} 条已报告路径`;
+const copyOverlap=model.input_copy_overlap_summary;
+if(copyOverlap.explained_pairs||copyOverlap.retained_pairs){const p=$("input-copy-overlap-summary");p.hidden=false;p.textContent=`双流输入 Copy：${copyOverlap.explained_pairs} 对的单条慢化已由重叠解释；${copyOverlap.retained_pairs} 对未排除。证据见根因 JSON。`;}
 const peerReads=model.peer_read_observations;
 $("peer-read-section").hidden=!peerReads.length;
 $("peer-read-title").textContent=`疑似对端读取影响（${peerReads.length} 条）`;

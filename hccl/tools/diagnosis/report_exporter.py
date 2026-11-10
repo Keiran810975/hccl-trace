@@ -144,6 +144,7 @@ def publish_final_report(directory, output, normalized, roots, comparisons):
         primary_source_candidate_id=normalized.get("primary_source_id", normalized["primary_candidate_id"]), reference=normalized["reference"],
         unresolved_observations=normalized["unresolved_observations"])
     report["peer_read_observations"] = normalized.get("peer_read_observations", [])
+    report["input_copy_overlap_observations"] = normalized.get("input_copy_overlap_observations", [])
     if normalized.get("analysis_scope"):
         report["analysis_scope"] = normalized["analysis_scope"]
     by_id = {c["candidate_id"]: c for c in report["candidates"]}

@@ -92,7 +92,8 @@ def observe(rows, tasks, candidates, options):
             copies = local[scope, rank["_node_id"], rank["_device_id"], rank["_user_rank"], size]
             return [(r, by_task[r["_graph_id"]]) for r in copies]
 
-        peer_witnesses = [_fact(r, t) for r, t in input_copies(peer) if _comparable(t) and t["duration_slow"]]
+        peer_witnesses = [_fact(r, t) for r, t in input_copies(peer)
+                          if _comparable(t) and t["duration_slow"] and not t.get("copy_overlap_explained")]
         if not peer_witnesses:
             continue
         copies = input_copies(reader)

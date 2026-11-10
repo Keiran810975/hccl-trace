@@ -11,7 +11,7 @@ from pathlib import Path
 
 from . import analyze_waits as waits
 from . import compare_diagnosis as comparison
-from . import peer_read, source_events, wait_backtrace
+from . import copy_overlap, peer_read, source_events, wait_backtrace
 from .notify_comparison import comparison_keys
 from .report_contract import CLEAN_TASK_REFERENCE
 from .task_classifier import classify_task, source_category, INTERNAL, EXTERNAL, UNRESOLVED
@@ -95,7 +95,7 @@ def _slow(value, center, mad, options, *, propagation=False):
             and value - center >= Decimal(options.mad_multiplier) * mad)
 
 
-def compare_tasks(rows, edges, coordinates, options):
+def compare_tasks(rows, edges, coordinates, options, *, overlapping_copies=frozenset()):
     groups, by_slot = comparison.operation_groups(rows), {}
     unknown = set(coordinates) - set(groups)
     if unknown:
@@ -162,9 +162,11 @@ def compare_tasks(rows, edges, coordinates, options):
             task["comparison_status"] = "ambiguous_task_location"
             continue
         buffer = accepted[(position(coord), shapes[scope], key, row["_node_id"], row["_device_id"])]
+        solo_history = row["_graph_id"] not in overlapping_copies
         if not buffer:
             task["comparison_status"] = "no_prior_comparable_sample"
-            buffer.append((coord["iteration"], row))
+            if solo_history:
+                buffer.append((coord["iteration"], row))
             continue
         iterations, history = map(list, zip(*buffer))
         history_scopes = [r["_operation_scope"] for r in history]
@@ -172,7 +174,10 @@ def compare_tasks(rows, edges, coordinates, options):
                     "duration or gap growth; {}; no ordinal, inferred phase or injection truth").format(
                         "unique same-capture physical channel or typed task between unique semantic anchors"
                         if physical_notify else "unique semantic location")
-        center, mad = _statistics([waits.duration(r) for r in history])
+        durations = [waits.duration(r) for r in history]
+        center, mad = _statistics(durations)
+        if not solo_history:
+            task["copy_solo_max_ns"] = max(durations)
         start_center, start_mad = _statistics([waits.ns(r, "start") - origins[(r["_operation_scope"], r["_node_id"])] for r in history])
         representative = min(history, key=lambda r: (abs(Decimal(waits.duration(r)) - center), r["_graph_id"]))
         task.update(comparison_status=CLEAN_TASK_REFERENCE,
@@ -196,7 +201,7 @@ def compare_tasks(rows, edges, coordinates, options):
                         gap_delta_ns=str(Decimal(task["gap_before_ns"]) - gap_center),
                         gap_slow=_slow(task["gap_before_ns"], gap_center, gap_mad, options))
         task["is_slow"] = task["duration_slow"] or task["gap_slow"]
-        if not task["is_slow"]:
+        if solo_history and not task["is_slow"]:
             buffer.append((coord["iteration"], row))
     return tasks
 
@@ -205,7 +210,10 @@ def analyze(rows, edges, coordinates, options=RollingOptions(), *, preparations=
     options.validate()
     coordinates = validate_coordinates(list(coordinates.values()))
     comparison.evidence_adjacency(rows, edges)
-    tasks = compare_tasks(rows, edges, coordinates, options)
+    pairs, overlapping = copy_overlap.discover(rows, {scope for scope, c in coordinates.items()
+                                                       if c["stage"] == "measured"})
+    tasks = compare_tasks(rows, edges, coordinates, options, overlapping_copies=overlapping)
+    copy_observations = copy_overlap.explain(pairs, tasks)
     roots, traces = wait_backtrace.trace_sources(rows, edges, tasks, options, alignment=alignment)
     host_roots = source_events.preparation_sources(preparations, rows, edges, coordinates, tasks, options, alignment=alignment)
     roots.extend(host_roots)
@@ -221,10 +229,10 @@ def analyze(rows, edges, coordinates, options=RollingOptions(), *, preparations=
             trace.setdefault("host_activity_ids", []).append(root["source_activity_id"])
             if not trace["source_root_ids"]:
                 trace["status"] = "external_clue_found"
-    return backtrace_report(rows, tasks, roots, traces, preparations, options)
+    return backtrace_report(rows, tasks, roots, traces, preparations, options, copy_observations)
 
 
-def backtrace_report(rows, tasks, roots, traces, preparations, options):
+def backtrace_report(rows, tasks, roots, traces, preparations, options, copy_observations=()):
     lookup = {r["_graph_id"]: r for r in rows}
     explained = {key for r in roots if r["status"] == "dependency_supported_candidate"
                  for key, path in r["evidence_paths"].items() if path}
@@ -247,7 +255,7 @@ def backtrace_report(rows, tasks, roots, traces, preparations, options):
             task["role"] = "suspected_peer_read_impact"
     counts = Counter(source_category(r, lookup[r["graph_id"]]) for r in candidates)
     compared = sum(t["reference_count"] > 0 for t in tasks)
-    return dict(schema_version=1, source_policy_version=10, source_ranking_version=0,
+    return dict(schema_version=1, source_policy_version=11, source_ranking_version=0,
         candidate_admission=None, source_regions=[], recommended_candidate_ids=[], primary_source_candidate_id=None,
         reference_mode=CLEAN_TASK_REFERENCE, options=asdict(options),
         status="analyzed" if compared else "no_comparable_history",
@@ -262,10 +270,12 @@ def backtrace_report(rows, tasks, roots, traces, preparations, options):
         source_status_counts=dict(Counter(r["status"] for r in candidates + unresolved)),
         tasks=tasks, root_causes=candidates, unresolved_observations=unresolved, primary_external_clue_id=None,
         peer_read_policy=peer_read.POLICY, peer_read_observations=peer_reads,
+        input_copy_overlap_policy=copy_overlap.POLICY, input_copy_overlap_observations=list(copy_observations),
         category_counts=dict(counts, unresolved_observation=len(unresolved)),
         limits=["All dependency-supported candidates are peers; no cluster, Top1, or primary candidate.",
                 "Slow Waits and tasks that only start late are propagation evidence, not root candidates.",
                 "Late release cannot explain an increase in the task's own execution duration.",
+                "Only evidenced single-node Ring input-copy pairs within the prior solo budget qualify for an overlap explanation; timing is not proof of a hardware bottleneck.",
                 "Directional Ring read observations are not Notify edges or proved physical causes; local confounds keep the candidate.",
                 "Unpaired, ambiguous or time-incompatible dependencies and isolated slow tasks remain unresolved.",
                 "Cross-node protocol evidence needs calibrated clocks and does not prove RDMA hardware completion.",
