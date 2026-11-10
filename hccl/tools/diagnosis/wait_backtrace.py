@@ -7,6 +7,7 @@ from . import compare_diagnosis as comparison
 from .dependency_model import stable_id
 from .task_classifier import classify_task
 from .clock_alignment import models_from_report
+from .dependency_timing import edge_observation
 from . import wait_arrival
 
 
@@ -56,6 +57,7 @@ def trace_sources(rows, edges, tasks, options, *, alignment=None):
     seeds = [t for t in tasks if t["task_kind"] == "notify_wait" and t["duration_slow"]]
     roots, traces = {}, []
     clocks = models_from_report(alignment) if options.calibrated_release_intervals else {}
+    protocol_clocks = models_from_report(alignment)
     quantization = {}
     if clocks:
         for item in alignment.get("profiler_calibrations", []):
@@ -127,7 +129,7 @@ def trace_sources(rows, edges, tasks, options, *, alignment=None):
                 boundary(key, path, "iteration_boundary")
                 continue
             if kind == "notify_wait":
-                uncomparable = item["reference_count"] != 5
+                uncomparable = not item["reference_count"]
                 if uncomparable:
                     boundary(key, path, "notify_wait_not_comparable:" + item["comparison_status"])
                 if mode == "wait_duration" or item["duration_slow"] or uncomparable:
@@ -144,6 +146,21 @@ def trace_sources(rows, edges, tasks, options, *, alignment=None):
                             boundary(key, path, "unsupported_notify_producer_kind")
                             continue
                         remote = src["_node_id"] != row["_node_id"]
+                        if remote:
+                            try:
+                                observation = edge_observation(edge_by_id[edge_id], changes[producer], item, protocol_clocks)
+                            except ValueError:
+                                observation = dict(status="cross_node_clock_coverage_boundary")
+                            trace["release_checks"].append(dict(observation, edge_id=edge_id,
+                                wait_graph_id=key, producer_graph_id=producer,
+                                timing_status=observation["status"], dependency_identity_preserved=True))
+                            if observation["status"] == "accepted":
+                                queue.append((producer, (edge_id,) + path, "completion"))
+                            else:
+                                boundary(key, path, observation["status"])
+                            if mode != "wait_duration" and (item.get("start_late") or item["gap_slow"]):
+                                follow_order(key, path)
+                            continue
                         timing = "rdma_completion_unmeasured" if src.get("profiler_task_kind") == "rdma" else "remote_clock_boundary"
                         interval = None
                         if not remote and src.get("profiler_task_kind") == "notify_record":
@@ -183,7 +200,7 @@ def trace_sources(rows, edges, tasks, options, *, alignment=None):
                     continue
             if item["gap_slow"]:
                 boundary(key, path, "unattributed_pre_task_gap")
-            if kind in WORK_KINDS and item["reference_count"] != 5:
+            if kind in WORK_KINDS and not item["reference_count"]:
                 boundary(key, path, "execution_not_comparable:" + item["comparison_status"])
             if kind == "rdma":
                 boundary(key, path, "rdma_submission_is_not_payload_completion")
@@ -191,7 +208,8 @@ def trace_sources(rows, edges, tasks, options, *, alignment=None):
         trace["visited_count"] = len(seen)
         if len(syncs[target]) == 1 and clocks:
             producer = nodes[syncs[target][0][0]]
-            arrival = wait_arrival.observe(nodes[target], producer, seed, nodes, syncs, clocks, quantization, origins)
+            arrival = wait_arrival.observe(nodes[target], producer, seed, nodes, syncs, clocks, quantization, origins,
+                                           comparisons=changes)
             if arrival is not None:
                 trace["arrival_observation"] = arrival
         trace["source_root_ids"] = sorted(set(trace["source_root_ids"]))
@@ -231,10 +249,11 @@ def trace_sources(rows, edges, tasks, options, *, alignment=None):
     return list(roots.values()) + observations, traces
 
 
-def coverage(tasks, traces):
-    eligible = [t for t in tasks if t["stage"] == "measured" and t["iteration"] >= 5]
+def coverage(tasks, traces, *, minimum_iteration=5):
+    eligible = [t for t in tasks if t["stage"] == "measured" and t["iteration"] >= minimum_iteration]
     reasons = Counter(b["reason"] for trace in traces for b in trace["boundaries"])
-    return dict(history_eligible_task_count=len(eligible), comparable_task_count=sum(t["reference_count"] == 5 for t in eligible),
+    return dict(history_eligible_task_count=len(eligible), comparable_task_count=sum(t["reference_count"] > 0 for t in eligible),
+                reference_sample_counts=dict(Counter(t["reference_count"] for t in eligible)),
                 comparison_status_counts=dict(Counter(t["comparison_status"] for t in eligible)),
                 unbound_task_kind_counts=dict(Counter(t["task_kind"] for t in tasks if t["stage"] == "unbound")),
                 wait_backtrace_count=len(traces), boundary_reason_counts=dict(reasons),

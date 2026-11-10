@@ -99,7 +99,9 @@ class NotifyComparisonTests(unittest.TestCase):
                     if row['_graph_id'] in {'i2p1', 'i2p2'}:
                         row['_notify_id' if change == 'resource' else '_device_id'] += 1
             tasks = rolling.compare_tasks(rows, edges, coords, rolling.RollingOptions())
-            self.assertTrue(all(t['reference_count'] == 0 for t in tasks if t['graph_id'] in {'i5p1', 'i5p2'}))
+            for task in tasks:
+                if task['graph_id'] in {'i5p1', 'i5p2'}:
+                    self.assertEqual(task['reference_iterations'], [0, 1, 3, 4])
 
     def test_cross_node_and_nonexact_edges_are_not_this_comparison_basis(self):
         for change in ('node', 'confidence'):

@@ -8,12 +8,9 @@ from pathlib import Path
 
 from . import analyze_waits as waits
 from . import compare_diagnosis as comparison
-from . import critical_path as critical
 from .dependency_model import stable_id
 from .clock_alignment import models_from_report
 from .workload_coordinates import position, location_fields
-from .task_classifier import classify_task, source_category, INTERNAL
-from .source_ranking import rank_regions
 
 
 def statistics(values):
@@ -27,43 +24,6 @@ def slow(value, center, mad, options):
     value = Decimal(value)
     return (value > center and value >= center * Decimal(options.slowdown_factor)
             and value - center >= Decimal(options.mad_multiplier) * mad)
-
-
-def operation_events(rows, coordinates, options):
-    groups = defaultdict(list)
-    for row in rows:
-        if row.get("_operation_scope") in coordinates:
-            groups[(row["_operation_scope"], row["_node_id"])].append(row)
-    events, slots = [], {}
-    for (scope, node), group in sorted(groups.items()):
-        coord = coordinates[scope]
-        start = min(waits.ns(r, "start") for r in group)
-        stop = max(waits.ns(r, "stop") for r in group)
-        event = dict(event_id=stable_id("event", (node, scope)), operation_scope=scope, node_id=node,
-                     **location_fields(coord),
-                     observed_start_ns=start, observed_stop_ns=stop, duration_ns=stop - start,
-                     reference_iterations=[], reference_mean_ns=None, reference_mad_ns=None,
-                     delta_ns=None, is_slow=False, shape_id=comparison.operation_shape(group),
-                     comparison_status="insufficient_history")
-        events.append(event)
-        slots[(node, coord["stage"], coord["iteration"], position(coord))] = event
-    for event in events:
-        if event["stage"] != "measured" or event["iteration"] < options.window:
-            continue
-        iterations = list(range(event["iteration"] - options.window, event["iteration"]))
-        history = [slots.get((event["node_id"], "measured", i, position(event))) for i in iterations]
-        if any(item is None for item in history):
-            event["comparison_status"] = "missing_previous_iteration"
-            continue
-        if any(item["shape_id"] != event["shape_id"] for item in history):
-            event["comparison_status"] = "operation_structure_changed"
-            continue
-        center, mad = statistics([item["duration_ns"] for item in history])
-        event.update(reference_iterations=iterations, reference_mean_ns=str(center), reference_mad_ns=str(mad),
-                     delta_ns=str(Decimal(event["duration_ns"]) - center),
-                     is_slow=slow(event["duration_ns"], center, mad, options),
-                     comparison_status="previous_five_iteration_mean")
-    return events
 
 
 def validate_preparations(records, rows, coordinates):
@@ -211,56 +171,3 @@ def preparation_sources(records, rows, edges, coordinates, tasks, options, *, al
             physical_cause="unknown"))
         roots[-1].update(task_domain="host_preparation", task_domain_evidence="public_preparation_and_bound_api")
     return roots
-
-
-def rank_sources(roots, rows, edges, coordinates, options, *, tasks=()):
-    events = operation_events(rows, coordinates, options)
-    by_event = {(e["operation_scope"], e["node_id"]): e for e in events}
-    grouped_rows, grouped_edges = defaultdict(list), defaultdict(list)
-    lookup = {r["_graph_id"]: r for r in rows}
-    for row in rows:
-        grouped_rows[(row.get("_operation_scope"), row["_node_id"])].append(row)
-    for edge in edges:
-        src, dst = lookup[edge["src"]], lookup[edge["dst"]]
-        if src["_node_id"] == dst["_node_id"] and src.get("_operation_scope") == dst.get("_operation_scope"):
-            grouped_edges[(src.get("_operation_scope"), src["_node_id"])].append(edge)
-    candidates = defaultdict(list)
-    for root in roots:
-        root.setdefault("task_domain", classify_task(lookup[root["graph_id"]])["task_domain"])
-        root["diagnosis_category"] = source_category(root, lookup[root["graph_id"]])
-        event = by_event.get((root["operation_scope"], root["node_id"]))
-        root.update(event_id=event["event_id"] if event else None, event_slow=bool(event and event["is_slow"]),
-                    primary_eligible=root["diagnosis_category"] == INTERNAL and not root["traversal_truncated"],
-                    modeled_execution_gain_ns=None, impact_status="not_assessed", impact_scope="source_operation_on_node",
-                    selection_reason="Source evidence is evaluated independently of call-span or critical-path impact")
-        root["affected_operation_count"] = len({lookup[key].get("_operation_scope") for key in root["affected_wait_graph_ids"]})
-        root["affected_rank_count"] = len({lookup[key]["_user_rank"] for key in root["affected_wait_graph_ids"]})
-        if root["component"] == "host_preparation":
-            root.update(external_clue_supported=root["status"] == "dependency_supported_candidate" and bool(root["observed_wait_overlap_ns"]),
-                        selection_reason=("Measured Host interval plus actual late producer-to-peer-Wait evidence; physical cause unknown"
-                                          if root["status"] == "dependency_supported_candidate" else
-                                          "Measured Host preparation growth only; downstream attribution remains unsupported"))
-        elif root["component"] == "execution" and root["status"] in {"dependency_supported_candidate", "isolated_slow_task", "local_completion_supported_candidate"}:
-            candidates[(root["operation_scope"], root["node_id"])].append(root)
-    for key, group in candidates.items():
-        try:
-            report = critical.analyze_critical_path(grouped_rows[key], grouped_edges[key], impact_limit=0)
-            task_info = {t["graph_id"]: t for t in report["tasks"]}
-            reductions = {r["graph_id"]: min(r["duration_ns"], int(Decimal(r["delta_ns"]))) for r in group
-                          if task_info[r["graph_id"]]["cost_kind"] == "task_execution"}
-            gains = critical.execution_reduction_gains(report, reductions)
-            for root in group:
-                gain = gains.get(root["graph_id"])
-                root.update(modeled_execution_gain_ns=gain, critical_path_status=report["status"],
-                            critical_path_slack_ns=task_info[root["graph_id"]]["slack_ns"],
-                            impact_status="positive_local_model_gain" if gain else "zero_local_model_gain" if gain == 0 else "unavailable")
-        except ValueError as error:
-            for root in group:
-                root.update(impact_detail="Local critical path unavailable: " + str(error), critical_path_status="unavailable", impact_status="unavailable")
-    regions = rank_regions(roots, tasks)
-    ranks = Counter()
-    for root in roots:
-        ranks[root["diagnosis_category"]] += 1
-        root["category_rank"] = ranks[root["diagnosis_category"]]
-    primary = next((r["root_id"] for r in roots if r["primary_eligible"]), None)
-    return events, primary, regions

@@ -13,7 +13,7 @@ from . import analyze_waits as waits
 from . import source_propagation as propagation
 from . import source_propagation_view as presentation
 from .capture_discovery import read_json, write_json
-from .report_contract import without_critical_path
+from .report_contract import CLEAN_TASK_REFERENCE, without_critical_path
 
 
 FINAL_FILES = {"execution.html", "root_causes.json", "propagation.html"}
@@ -21,7 +21,8 @@ FINAL_FILES = {"execution.html", "root_causes.json", "propagation.html"}
 
 def publish_selected_iteration_report(directory, output, normalized, roots, tasks, *, full_graph_retained=False):
     import csv
-    epochs = sorted({c['iteration'] for c in normalized.get('source_candidates', normalized['candidates'])})
+    epochs = sorted({c['iteration'] for c in normalized.get('source_candidates', normalized['candidates'])
+                     + normalized.get('peer_read_observations', [])})
     formal = [t for t in tasks if t.get('stage') == 'measured' and type(t.get('iteration')) is int]
     if not formal:
         raise ValueError('selected-iteration view requires explicit formal coordinates')
@@ -110,6 +111,23 @@ def validate_final(directory):
         _References().feed(text)
 
 
+def _attach_chain_ids(normalized, by_id):
+    internal = normalized["candidates"]
+    sources = internal + normalized.get("external_anomaly_clues", [])
+    # The public-field filter copies lists independently. Relink aliases before
+    # adding propagation IDs so all public views expose the same candidates.
+    if normalized.get("schema_version") == 2:
+        if normalized.get("communication_source_candidates") != internal:
+            raise ValueError("internal candidate aliases disagree before publication")
+        normalized["communication_source_candidates"] = internal
+    if "source_candidates" in normalized:
+        if normalized["source_candidates"] != sources:
+            raise ValueError("combined source candidates disagree before publication")
+        normalized["source_candidates"] = sources
+    for candidate in sources:
+        candidate["chain_ids"] = [c["chain_id"] for c in by_id[candidate["id"]]["chains"]]
+
+
 def publish_final_report(directory, output, normalized, roots, comparisons):
     directory, output = Path(directory), Path(output)
     if output.exists() or output.is_symlink():
@@ -125,11 +143,11 @@ def publish_final_report(directory, output, normalized, roots, comparisons):
     report = propagation.build_report(rows, edges, roots, comparisons,
         primary_source_candidate_id=normalized.get("primary_source_id", normalized["primary_candidate_id"]), reference=normalized["reference"],
         unresolved_observations=normalized["unresolved_observations"])
+    report["peer_read_observations"] = normalized.get("peer_read_observations", [])
     if normalized.get("analysis_scope"):
         report["analysis_scope"] = normalized["analysis_scope"]
     by_id = {c["candidate_id"]: c for c in report["candidates"]}
-    for candidate in normalized["candidates"] + normalized.get("external_anomaly_clues", []):
-        candidate["chain_ids"] = [c["chain_id"] for c in by_id[candidate["id"]]["chains"]]
+    _attach_chain_ids(normalized, by_id)
     normalized["propagation"] = dict(report["summary"], exhaustive_downstream_search=False,
                                      physical_causation_proven=False)
     diagnosis = without_critical_path(read_json(directory / "diagnosis.json"))
@@ -172,17 +190,25 @@ def publish_final_report(directory, output, normalized, roots, comparisons):
                 node_roles.setdefault(key, "chain")
             node_roles[chain["target_wait_graph_id"]] = "wait"
         node_roles[anchor] = "host_anchor" if root["source"]["component"] == "host_preparation" else "candidate"
+    peer_reads = {item["graph_id"]: item for item in report["peer_read_observations"]}
     for node in model["nodes"]:
         node["taskDomain"] = classifications.get(node["id"], "unknown")
         if node["id"] in node_roles:
             node["diagnosisRole"] = node_roles[node["id"]]
+        if node["id"] in peer_reads:
+            item = peer_reads[node["id"]]
+            node["peerReadObservation"] = dict(peerRank=item["peer"]["user_rank"], disposition=item["disposition"])
     model["candidatePathEdges"] = {key: list(dict.fromkeys(value)) for key, value in paths.items()}
     model["observedHostSources"] = host_source_displays(roots, rows, model, alignment)
     primary = next((r for r in roots if r["root_id"] == normalized.get("primary_source_id", normalized["primary_candidate_id"])), None)
     if primary:
         model["initialSelection"] = primary["graph_id"]
     model = without_critical_path(model)
-    model["caseNote"] = "Reference: " + ("previous five measured iteration mean" if normalized["mode"] == "rolling" else "independent baseline median (explicit or structural reference)")
+    reference_kind = normalized["reference"].get("kind")
+    if reference_kind == CLEAN_TASK_REFERENCE:
+        model["caseNote"] = "Device reference: mean of up to five earlier comparable samples not flagged slow"
+    else:
+        model["caseNote"] = "Reference: " + ("previous five measured iteration mean" if normalized["mode"] == "rolling" else "independent baseline median (explicit or structural reference)")
     scope = normalized.get("analysis_scope", {})
     if scope.get("kind") == "selected_iteration_slice_from_original_artifacts":
         model["caseNote"] += "; original graph slice, measured iteration " + ", ".join(map(str, scope["iterations"])) + "; not the complete capture"

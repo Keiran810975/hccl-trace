@@ -1,42 +1,21 @@
 #!/usr/bin/env python3
-"""Past-five-iteration comparison over evidenced workload call coordinates."""
+"""Rolling task comparison over evidenced workload call coordinates."""
 from __future__ import annotations
 
-import argparse
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from dataclasses import asdict, dataclass
 from decimal import Decimal
-import html
+from itertools import chain
 import json
-import os
 from pathlib import Path
-import sys
 
-if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from diagnosis import compare_diagnosis as comparison
-    from diagnosis import analyze_waits as waits
-    from diagnosis import visualize_dependency_graph as graph
-    from diagnosis import visualize_html as view
-    from diagnosis import source_events
-    from diagnosis import wait_backtrace
-    from diagnosis import candidate_screening
-    from diagnosis.notify_comparison import comparison_keys
-    from diagnosis.task_classifier import classify_task, source_category, INTERNAL, EXTERNAL
-    from diagnosis.workload_coordinates import position, location_fields
-    from diagnosis.schema import write_csv
-else:
-    from . import compare_diagnosis as comparison
-    from . import analyze_waits as waits
-    from . import visualize_dependency_graph as graph
-    from . import visualize_html as view
-    from . import source_events
-    from . import wait_backtrace
-    from . import candidate_screening
-    from .notify_comparison import comparison_keys
-    from .task_classifier import classify_task, source_category, INTERNAL, EXTERNAL
-    from .workload_coordinates import position, location_fields
-    from .schema import write_csv
+from . import analyze_waits as waits
+from . import compare_diagnosis as comparison
+from . import peer_read, source_events, wait_backtrace
+from .notify_comparison import comparison_keys
+from .report_contract import CLEAN_TASK_REFERENCE
+from .task_classifier import classify_task, source_category, INTERNAL, EXTERNAL, UNRESOLVED
+from .workload_coordinates import position, location_fields
 
 
 @dataclass(frozen=True)
@@ -44,26 +23,17 @@ class RollingOptions:
     window: int = 5
     slowdown_factor: str = "1.5"
     mad_multiplier: str = "3"
-    context_ns: int = 100000
-    max_figures: int = 5
     traversal_limit: int = 4096
-    wait_slowdown_factor: str | None = None
+    wait_slowdown_factor: str = "1.2"
     calibrated_release_intervals: bool = False
-    completion_fallback: bool = False
-    candidate_policy: str = "all"
-    source_policy: str = "legacy"
 
     def validate(self):
-        if self.source_policy not in {"legacy", "dual", "dual-v2", "parallel", "cluster-top1", "cluster-top1-time", "cluster-top1-cohort"}:
-            raise ValueError("unknown source policy")
-        if self.candidate_policy not in candidate_screening.POLICIES:
-            raise ValueError("unknown experimental candidate policy")
         if self.window != 5:
             raise ValueError("the rolling reference requires exactly five iterations")
         factor, multiplier = Decimal(self.slowdown_factor), Decimal(self.mad_multiplier)
         if not factor.is_finite() or factor <= 1 or not multiplier.is_finite() or multiplier < 0:
             raise ValueError("finite slowdown > 1 and nonnegative MAD multiplier required")
-        if self.context_ns < 0 or self.max_figures < 0 or self.traversal_limit <= 0:
+        if self.traversal_limit <= 0:
             raise ValueError("invalid rolling report limits")
         if self.wait_slowdown_factor is not None:
             wait_factor = Decimal(self.wait_slowdown_factor)
@@ -120,7 +90,7 @@ def _statistics(values):
 def _slow(value, center, mad, options, *, propagation=False):
     # No absolute increase floor. The current value never enters its reference.
     value = Decimal(value)
-    factor = options.wait_slowdown_factor if propagation and options.wait_slowdown_factor is not None else options.slowdown_factor
+    factor = options.wait_slowdown_factor if propagation else options.slowdown_factor
     return (value > center and value >= center * Decimal(factor)
             and value - center >= Decimal(options.mad_multiplier) * mad)
 
@@ -148,8 +118,14 @@ def compare_tasks(rows, edges, coordinates, options):
     for scope, group in groups.items():
         for row in group:
             signatures[scope][signature(row)].append(row)
+    accepted = defaultdict(lambda: deque(maxlen=options.window))
+    # Admit observations in measured-iteration order, not graph row order.
+    measured = set(by_slot.values())
+    scopes = sorted(by_slot.values(), key=lambda scope: coordinates[scope]["iteration"])
+    ordered_rows = chain((row for row in rows if row.get("_operation_scope") not in measured),
+                             (row for scope in scopes for row in groups[scope]))
     tasks = []
-    for row in rows:
+    for row in ordered_rows:
         scope, key = row.get("_operation_scope", ""), signature(row)
         physical_notify = key[0] in {'same_capture_unique_notify_channel','same_capture_anchored_notify_channel','same_capture_anchored_task'}
         coord = coordinates.get(scope)
@@ -179,32 +155,28 @@ def compare_tasks(rows, edges, coordinates, options):
         if coord["stage"] != "measured":
             task["comparison_status"] = "warmup_excluded"
             continue
-        if coord["iteration"] < options.window:
-            task["comparison_status"] = "insufficient_history"
-            continue
         if not physical_notify and not all(row.get(field, "") for field in ("algorithm", "phase", "event")):
             task["comparison_status"] = "unannotated_task_location"
             continue
         if len(signatures[scope][key]) != 1:
             task["comparison_status"] = "ambiguous_task_location"
             continue
-        iterations = list(range(coord["iteration"] - options.window, coord["iteration"]))
-        history_scopes = [by_slot.get((i, position(coord))) for i in iterations]
-        if any(s is None for s in history_scopes):
-            task["comparison_status"] = "missing_previous_iteration"
+        buffer = accepted[(position(coord), shapes[scope], key, row["_node_id"], row["_device_id"])]
+        if not buffer:
+            task["comparison_status"] = "no_prior_comparable_sample"
+            buffer.append((coord["iteration"], row))
             continue
-        if any(shapes[s] != shapes[scope] for s in history_scopes):
-            task["comparison_status"] = "operation_structure_changed"
-            continue
-        candidates = [signatures[s].get(key, []) for s in history_scopes]
-        if any(len(items) != 1 for items in candidates):
-            task["comparison_status"] = "ambiguous_history_location"
-            continue
-        history = [items[0] for items in candidates]
+        iterations, history = map(list, zip(*buffer))
+        history_scopes = [r["_operation_scope"] for r in history]
+        evidence = ("Public call coordinates; up to five earlier comparable formal samples not flagged for "
+                    "duration or gap growth; {}; no ordinal, inferred phase or injection truth").format(
+                        "unique same-capture physical channel or typed task between unique semantic anchors"
+                        if physical_notify else "unique semantic location")
         center, mad = _statistics([waits.duration(r) for r in history])
         start_center, start_mad = _statistics([waits.ns(r, "start") - origins[(r["_operation_scope"], r["_node_id"])] for r in history])
         representative = min(history, key=lambda r: (abs(Decimal(waits.duration(r)) - center), r["_graph_id"]))
-        task.update(comparison_status="previous_five_iteration_mean", reference_count=5,
+        task.update(comparison_status=CLEAN_TASK_REFERENCE,
+                    reference_count=len(history),
                     reference_iterations=iterations, reference_graph_ids=[r["_graph_id"] for r in history],
                     reference_operation_scopes=history_scopes,
                     reference_mean_ns=str(center), reference_mad_ns=str(mad),
@@ -213,8 +185,7 @@ def compare_tasks(rows, edges, coordinates, options):
                     start_late=_slow(task["start_offset_ns"], start_center, start_mad, options, propagation=True),
                     reference_graph_id=representative["_graph_id"],
                     reference_operation_scope=representative["_operation_scope"],
-                    reference_evidence=("Public call coordinates; previous five measured iterations; unique same-capture physical channel or typed task between unique semantic anchors; no ordinal, inferred phase or injection truth" if physical_notify else
-                        "Public evidenced call coordinates; exactly the previous five measured iterations; unique semantic location; no task ordinal or injection truth"),
+                    reference_evidence=evidence,
                     delta_ns=str(Decimal(task["duration_ns"]) - center),
                     slowdown_factor=str(Decimal(task["duration_ns"]) / center) if center else None,
                     duration_slow=_slow(task["duration_ns"], center, mad, options,
@@ -225,6 +196,8 @@ def compare_tasks(rows, edges, coordinates, options):
                         gap_delta_ns=str(Decimal(task["gap_before_ns"]) - gap_center),
                         gap_slow=_slow(task["gap_before_ns"], gap_center, gap_mad, options))
         task["is_slow"] = task["duration_slow"] or task["gap_slow"]
+        if not task["is_slow"]:
+            buffer.append((coord["iteration"], row))
     return tasks
 
 
@@ -233,10 +206,7 @@ def analyze(rows, edges, coordinates, options=RollingOptions(), *, preparations=
     coordinates = validate_coordinates(list(coordinates.values()))
     comparison.evidence_adjacency(rows, edges)
     tasks = compare_tasks(rows, edges, coordinates, options)
-    roots, traces = ([], []) if options.source_policy in {"dual", "dual-v2", "parallel", "cluster-top1", "cluster-top1-time", "cluster-top1-cohort"} else wait_backtrace.trace_sources(rows, edges, tasks, options, alignment=alignment)
-    if options.completion_fallback:
-        from .completion_sources import support_local_completion
-        support_local_completion(roots, rows, edges, options)
+    roots, traces = wait_backtrace.trace_sources(rows, edges, tasks, options, alignment=alignment)
     host_roots = source_events.preparation_sources(preparations, rows, edges, coordinates, tasks, options, alignment=alignment)
     roots.extend(host_roots)
     traces_by_wait = {t["wait_graph_id"]: t for t in traces}
@@ -251,165 +221,54 @@ def analyze(rows, edges, coordinates, options=RollingOptions(), *, preparations=
             trace.setdefault("host_activity_ids", []).append(root["source_activity_id"])
             if not trace["source_root_ids"]:
                 trace["status"] = "external_clue_found"
-    events, primary, regions = source_events.rank_sources(roots, rows, edges, coordinates, options, tasks=tasks)
-    admission = candidate_screening.select_candidates(roots, tasks, policy=options.candidate_policy,
-        wait_impacts=candidate_screening.local_wait_impacts(roots, rows, edges) if options.candidate_policy == "wait_critical_path" else None)
-    admitted = set(admission["selected_candidate_ids"])
-    primary = next((r["root_id"] for r in roots if r["primary_eligible"] and r["root_id"] in admitted), None)
-    compared = sum(t["reference_count"] == 5 for t in tasks)
-    policy = 7
-    return dict(schema_version=1, source_policy_version=policy, source_ranking_version=2,
-                candidate_admission=admission,
-                source_regions=regions, recommended_candidate_ids=[key for key in regions[0]["candidate_ids"] if key in admitted] if regions else [],
-                reference_mode="previous_five_iteration_mean", options=asdict(options),
-                status="analyzed" if compared else "no_comparable_history",
-                diagnosis_status="localized_candidate" if primary else "external_clues" if host_roots else "no_comparable_history" if not compared else "unresolved_slow_event" if any(e["is_slow"] for e in events) else "unresolved_waits" if traces else "no_slow_event",
-                events=events, slow_event_count=sum(e["is_slow"] for e in events),
-                wait_backtraces=traces, coverage=wait_backtrace.coverage(tasks, traces),
-                public_preparation_count=len(preparations),
-                primary_eligible_count=sum(r["primary_eligible"] for r in roots),
-                task_count=len(tasks), compared_task_count=compared,
-                slow_task_count=sum(t["is_slow"] for t in tasks),
-                gap_observation_count=sum(r["status"] == "unattributed_gap" for r in roots),
-                supported_execution_candidate_count=sum(r["status"] == "dependency_supported_candidate" and r["component"] == "execution" for r in roots),
-                supported_host_candidate_count=sum(r["status"] == "dependency_supported_candidate" and r["component"] == "host_preparation" for r in roots),
-                source_status_counts=dict(Counter(r["status"] for r in roots)),
-                primary_source_candidate_id=primary, tasks=tasks, root_causes=roots,
-                primary_external_clue_id=next((r["root_id"] for r in roots if r["diagnosis_category"] == EXTERNAL), None),
-                category_counts=dict(Counter(r["diagnosis_category"] for r in roots)),
-                limits=["Only the preceding five measured iterations are used; warmup, current and future iterations are excluded.",
-                        "The reference is an arithmetic mean; MAD is median absolute deviation around the five-sample median.",
-                        "No absolute increase floor; a zero reference requires strictly positive observed increase.",
-                        "Missing or nonunique semantic task locations stay uncomparable; no ordinal matching.",
-                        "Root candidates require actual dependency evidence; temporal overlap alone does not prove physical causation.",
-                        "Internal execution sources, external preparation clues and unresolved observations are ranked separately. Unknown mixed kernels are not assumed external compute.",
-                        "Backtraces may cross calls only within the same verified measured iteration; missing iteration identity is an explicit boundary.",
-                        "Source localization follows a slow Wait's actual producer and observed prerequisites across calls; no guessed edges or gap roots.",
-                        "A control task's normal duration or early call-relative start is not a backtrace boundary; common arrival shifts can conceal upstream execution growth.",
-                        "Optional separate Wait sensitivity and local-completion support are reported explicitly; local completion is not evidence of slow Notify propagation.",
-                        "Call-span growth and critical-path gain are impact annotations, not mandatory source-localization thresholds.",
-                        "Source ranking groups adjacent iterations on the same node/rank/communication group. Its bounded execution-excess budget counts each execution once; it is a heuristic, not measured causal contribution or workload loss. Other regions remain visible.",
-                        "Host sources need public preparation intervals and independently bound call/API identities. Same-node support requires an exact Notify relation; cross-node support requires a unique observed protocol Notify relation and overlap beyond estimated independent clock-error margins. An RDMA submission is not hardware transfer completion; the device graph anchor is not a Host task.",
-                        "Event and critical-path effects are local to the selected call and node, not a calibrated global workload gain; fixed releases can conceal real effects.",
-                        "Absent public preparation observations cannot be reconstructed from injection truth or arbitrary idle gaps; GEMM/device completion ownership may remain unresolved.",
-                        "No injection truth or external baseline is consumed. Rolling references may adapt to a sustained slowdown.",
-                        "Public iteration bindings must be verified against capture evidence; configuration alone is not a binding."])
+    return backtrace_report(rows, tasks, roots, traces, preparations, options)
 
 
-def export_report(report, rows, edges, directory, options=RollingOptions()):
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=False)
+def backtrace_report(rows, tasks, roots, traces, preparations, options):
     lookup = {r["_graph_id"]: r for r in rows}
-    gaps = comparison.local_gaps(rows, edges)
-    figures = []
-    def host_panel(interval, anchor):
-        model, window = comparison.focus_model(rows, edges, interval["operation_scope"], {anchor}, options.context_ns)
-        source_rows = [r for r in rows if r.get("_operation_scope") == interval["operation_scope"] and r["_node_id"] == root["node_id"]]
-        origin = min(waits.ns(r, "start") for r in source_rows)
-        start, stop = interval["start_ns"] - origin, interval["stop_ns"] - origin
-        model["observedHostSource"] = dict(nodeId=root["node_id"], rank=root["user_rank"], device=root["device_id"],
-                                           startUs=start / 1000, stopUs=stop / 1000,
-                                           durationUs=(stop - start) / 1000)
-        model["caseNote"] = "Host preparation is a public observed interval, not a device kernel. The selected device task is only its call/dependency anchor."
-        # Include the actual Host interval in the viewport without adding task nodes.
-        return model, (min(window[0], start - options.context_ns), max(window[1], stop + options.context_ns))
-
-    for index, root in enumerate(report["root_causes"][:options.max_figures], 1):
-        paths = {edge for path in root["evidence_paths"].values() for edge in path}
-        core = {root["graph_id"], *root["affected_wait_graph_ids"]}
-        core.update(p for e in edges if e["edge_id"] in paths for p in (e["src"], e["dst"]))
-        gap = root["component"] == "pre_task_gap"
-        host = root["component"] == "host_preparation"
-        if host:
-            model, window = host_panel(dict(operation_scope=root["operation_scope"], start_ns=root["observed_start_ns"],
-                                            stop_ns=root["observed_stop_ns"]), root["graph_id"])
+    explained = {key for r in roots if r["status"] == "dependency_supported_candidate"
+                 for key, path in r["evidence_paths"].items() if path}
+    candidates, unresolved = [], []
+    for root in roots:
+        if root["component"] == "wait_boundary" and root["graph_id"] in explained:
+            continue
+        category = source_category(root, lookup[root["graph_id"]])
+        if root["status"] == "dependency_supported_candidate" and category in {INTERNAL, EXTERNAL}:
+            candidates.append(dict(root, diagnosis_category=category, source_selection_policy="wait_backtrace_v1"))
         else:
-            model, window = comparison.focus_model(rows, edges, root["operation_scope"], core,
-                                                  options.context_ns, (root["graph_id"], root["duration_ns"]) if gap else None,
-                                                  include_path_scopes=True)
-        panels = [("current", root["graph_id"], model, window, paths)]
-        if host:
-            for iteration, interval in zip(root["reference_iterations"], root["reference_preparations"]):
-                key = interval["anchor_graph_id"]
-                if key is not None:
-                    reference, bounds = host_panel(interval, key)
-                    panels.append(("iteration-{}".format(iteration), key, reference, bounds, set()))
-        else:
-            for iteration, key in zip(root["reference_iterations"], root["reference_graph_ids"]):
-                reference, bounds = comparison.focus_model(rows, edges, lookup[key]["_operation_scope"], {key},
-                                                           options.context_ns, (key, gaps[key]) if gap else None)
-                panels.append(("iteration-{}".format(iteration), key, reference, bounds, set()))
-        common = min(p[3][0] for p in panels), max(p[3][1] for p in panels)
-        name = "focus-{:03d}".format(index)
-        body = "<h1>Rolling source comparison</h1><p>Reference: arithmetic mean of measured iterations {}. Mean {} ns; current {} ns. Each image is an actual recorded task, not a synthetic average.</p>".format(
-            html.escape(str(root["reference_iterations"])), root["reference_mean_ns"], root["duration_ns"])
-        for label, key, model, _, links in panels:
-            comparison.frame_model(model, common, key, links)
-            stem = name + "-" + label
-            view.write_html(directory / (stem + ".html"), label, model)
-            if host:
-                body += '<section><h2>{}</h2><p>Red bracket: observed Host preparation, not a device task.</p><iframe title="{}" src="{}.html" style="width:100%;height:620px;border:1px solid #ddd"></iframe></section>'.format(label, label, stem)
-            else:
-                comparison.write_focus_svg(directory / (stem + ".svg"), label, model, key)
-                body += '<section><h2>{}</h2><a href="{}.html">Interactive trace</a><img src="{}.svg" alt="{}"></section>'.format(label, stem, stem, label)
-        comparison.write_page(directory / (name + ".html"), "Rolling source comparison", body)
-        root["focus_page"] = name + ".html"
-        figures.append(dict(root_id=root["root_id"], page=root["focus_page"], window_ns=common))
-    report["figures"] = figures
-    (directory / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    for name, items in (("wait_backtraces", report["wait_backtraces"]), ("events", report["events"]), ("task_comparison", report["tasks"]), ("slow_tasks", [t for t in report["tasks"] if t["is_slow"]]),
-                        ("root_causes", report["root_causes"])):
-        fields = list(dict.fromkeys(k for item in items for k in item)) if items else ["graph_id", "status"]
-        values = [{k: json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) else v for k, v in item.items()} for item in items]
-        write_csv(str(directory / (name + ".csv")), fields, values)
-    body = "<h1>Previous-five-iteration diagnosis</h1><p>{}: {} comparable tasks, {} slow tasks/gaps. No external baseline or absolute increase floor.</p>".format(
-        report["status"], report["compared_task_count"], report["slow_task_count"])
-    body += '<p>{}: {} slow local call events; {} primary-eligible candidates.</p>'.format(report["diagnosis_status"], report["slow_event_count"], report["primary_eligible_count"])
-    body += '<p><a href="wait_backtraces.csv">Wait-driven backtraces and evidence boundaries</a>. Comparison coverage: {} / {} history-eligible tasks.</p>'.format(report["coverage"]["comparable_task_count"], report["coverage"]["history_eligible_task_count"])
-    body += '<p><a href="report.json">JSON report</a> <a href="events.csv">Call events</a> <a href="slow_tasks.csv">Slow tasks</a> <a href="root_causes.csv">Source candidates</a></p>'
-    for root in report["root_causes"]:
-        title = "Rank {} / iteration {} / block {} / bucket {} / {} / {}".format(
-            root["user_rank"], root["iteration"], root["block"], root["bucket"], root["phase"], root["status"])
-        body += '<p><a href="{}">{}</a>: {}</p>'.format(root.get("focus_page", "root_causes.csv"), html.escape(title), html.escape(root["reason"]))
-    body += "<ul>" + "".join("<li>{}</li>".format(html.escape(v)) for v in report["limits"]) + "</ul>"
-    comparison.write_page(directory / "index.html", "Rolling diagnosis", body)
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("artifact_dir", type=Path)
-    parser.add_argument("--iteration-map", required=True, type=Path)
-    parser.add_argument("--preparation-map", type=Path, help="Independently bound public Host preparation intervals; no injection truth")
-    parser.add_argument("-o", "--output-dir", required=True, type=Path)
-    parser.add_argument("--slowdown-factor", default="1.5")
-    parser.add_argument("--mad-multiplier", default="3")
-    parser.add_argument("--wait-slowdown-factor")
-    parser.add_argument("--calibrated-release-intervals", action="store_true")
-    parser.add_argument("--completion-fallback", action="store_true")
-    parser.add_argument("--candidate-policy", choices=candidate_screening.POLICIES, default="all", help="experimental admission; deferred observations remain in the public JSON; not a validated accuracy guarantee")
-    parser.add_argument("--max-figures", default=5, type=int)
-    args = parser.parse_args()
-    options = RollingOptions(slowdown_factor=args.slowdown_factor, mad_multiplier=args.mad_multiplier, max_figures=args.max_figures,
-                             wait_slowdown_factor=args.wait_slowdown_factor,
-                             calibrated_release_intervals=args.calibrated_release_intervals,
-                             completion_fallback=args.completion_fallback, candidate_policy=args.candidate_policy)
-    try:
-        gate = args.artifact_dir / "pipeline_result.json"
-        if not gate.is_file() or json.loads(gate.read_text())["status"] != "passed":
-            raise ValueError("rolling diagnosis requires a passed strict capture/graph pipeline")
-        rows = graph.read_graph_artifact_nodes(args.artifact_dir / "dep_graph_nodes.csv")
-        edges = graph.read_graph_artifact_edges(args.artifact_dir / "dep_graph_edges.csv")
-        report = analyze(rows, edges, load_coordinates(args.iteration_map), options,
-                         preparations=source_events.load_preparations(args.preparation_map),
-                         alignment=json.loads((args.artifact_dir / "clock_alignment.json").read_text())
-                         if (args.artifact_dir / "clock_alignment.json").exists() else None)
-        export_report(report, rows, edges, args.output_dir, options)
-    except (OSError, ValueError, KeyError, ArithmeticError) as error:
-        parser.exit(1, "rolling diagnosis failed: {}\n".format(error))
-    print("compared={} slow={} sources={} report={}".format(report["compared_task_count"], report["slow_task_count"],
-          len(report["root_causes"]), args.output_dir / "index.html"))
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+            unresolved.append(dict(root, diagnosis_category=UNRESOLVED))
+    peer_reads = peer_read.observe(rows, tasks, candidates, options)
+    peer_impacts = {o["graph_id"] for o in peer_reads if o["disposition"] == "reported_as_suspected_peer_read_impact"}
+    candidates = [r for r in candidates if r["graph_id"] not in peer_impacts]
+    for task in tasks:
+        if task["graph_id"] in explained:
+            task["role"] = "propagated_wait"
+        elif task["graph_id"] in peer_impacts:
+            task["role"] = "suspected_peer_read_impact"
+    counts = Counter(source_category(r, lookup[r["graph_id"]]) for r in candidates)
+    compared = sum(t["reference_count"] > 0 for t in tasks)
+    return dict(schema_version=1, source_policy_version=10, source_ranking_version=0,
+        candidate_admission=None, source_regions=[], recommended_candidate_ids=[], primary_source_candidate_id=None,
+        reference_mode=CLEAN_TASK_REFERENCE, options=asdict(options),
+        status="analyzed" if compared else "no_comparable_history",
+        diagnosis_status=("localized_candidate" if counts[INTERNAL] else "external_clues" if counts[EXTERNAL] else
+                          "suspected_peer_read_impact" if peer_impacts else
+                          "no_comparable_history" if not compared else "unresolved_waits" if unresolved else "no_slow_event"),
+        events=[], slow_event_count=0, wait_backtraces=traces, coverage=wait_backtrace.coverage(tasks, traces, minimum_iteration=1),
+        public_preparation_count=len(preparations), primary_eligible_count=0,
+        task_count=len(tasks), compared_task_count=compared, slow_task_count=sum(t["is_slow"] for t in tasks),
+        gap_observation_count=sum(r["status"] == "unattributed_gap" for r in unresolved),
+        supported_execution_candidate_count=counts[INTERNAL], supported_host_candidate_count=counts[EXTERNAL],
+        source_status_counts=dict(Counter(r["status"] for r in candidates + unresolved)),
+        tasks=tasks, root_causes=candidates, unresolved_observations=unresolved, primary_external_clue_id=None,
+        peer_read_policy=peer_read.POLICY, peer_read_observations=peer_reads,
+        category_counts=dict(counts, unresolved_observation=len(unresolved)),
+        limits=["All dependency-supported candidates are peers; no cluster, Top1, or primary candidate.",
+                "Slow Waits and tasks that only start late are propagation evidence, not root candidates.",
+                "Late release cannot explain an increase in the task's own execution duration.",
+                "Directional Ring read observations are not Notify edges or proved physical causes; local confounds keep the candidate.",
+                "Unpaired, ambiguous or time-incompatible dependencies and isolated slow tasks remain unresolved.",
+                "Cross-node protocol evidence needs calibrated clocks and does not prove RDMA hardware completion.",
+                "Device references use up to five earlier comparable formal samples; observations flagged for execution or gap growth never enter later references.",
+                "With no prior comparison, the first comparable observation seeds its location. Small histories are not evidence of normality.",
+                "Host preparation retains its consecutive-five reference. Injection truth is never read."])

@@ -20,9 +20,8 @@ if __package__ in (None, ""):
     from diagnosis.schema import MERGED_FIELDS, write_csv
     from diagnosis.validate_trace import validate_rows
     from diagnosis.validate_dependency_graph import validate_dependency_artifacts
-    from diagnosis.parse_msprof_db import parse_operations, parse_communication_details, COMMUNICATION_DETAIL_FIELDS
+    from diagnosis.parse_msprof_db import parse_operations
     from diagnosis.control_trace import parse_build_spans, BUILD_FIELDS
-    from diagnosis import rdma_completion
 else:
     from . import merge_timeline as merge
     from . import visualize_dependency_graph as execution
@@ -31,9 +30,8 @@ else:
     from .schema import MERGED_FIELDS, write_csv
     from .validate_trace import validate_rows
     from .validate_dependency_graph import validate_dependency_artifacts
-    from .parse_msprof_db import parse_operations, parse_communication_details, COMMUNICATION_DETAIL_FIELDS
+    from .parse_msprof_db import parse_operations
     from .control_trace import parse_build_spans, BUILD_FIELDS
-    from . import rdma_completion
 
 
 UINT32_MAX = (1 << 32) - 1
@@ -327,8 +325,6 @@ def replay_manifest(manifest_path: Path, output_dir: Path, min_match_rate: float
         if any(record.node_id != node_id for record in semantics + correlations):
             raise ValueError("plog node_id conflicts with manifest: {}".format(node_id))
         profilers = merge.parse_msprof_inputs(msprof_db_dir=node["msprof_db_dir"], node_id=node_id)
-        write_csv(str(node_dir / "communication_tasks.csv"), COMMUNICATION_DETAIL_FIELDS,
-                  parse_communication_details(node["msprof_db_dir"], run_id + "/" + node_id))
         for operation in parse_operations(node["msprof_db_dir"], node_id):
             local_scope = OperationScopeIdentity(operation.group_name, operation.op_name).stable_id
             scope = bindings.get((node_id, operation.device_id, local_scope),
@@ -347,11 +343,6 @@ def replay_manifest(manifest_path: Path, output_dir: Path, min_match_rate: float
         build_spans = parse_build_spans(merge._semantic_log_paths(node["plog_dir"]), node_id, profilers)
         write_csv(str(node_dir / "build_spans.csv"), BUILD_FIELDS, build_spans)
         stats["build_spans_observed"] = len(build_spans)
-        completion_events = rdma_completion.parse_inputs(
-            merge._semantic_log_paths(node["plog_dir"]), run_id + "/" + node_id)
-        write_csv(str(node_dir / "rdma_completion_events.csv"), rdma_completion.EVENT_FIELDS,
-                  (rdma_completion.asdict(event) for event in completion_events))
-        stats["rdma_completion_events"] = len(completion_events)
         write_csv(str(node_dir / "merged.csv"), MERGED_FIELDS, rows)
         ok, _ = validate_rows([{key: str(value) for key, value in row.items()} for row in rows], min_match_rate)
         if stats["duplicate_graph_correlation_keys"] or stats["ambiguous_semantic"]:

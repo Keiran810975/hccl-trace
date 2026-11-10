@@ -19,10 +19,9 @@
 - [AlltoAllVC](./02_collectives/08_alltoallvc/)
 - [Scatter](./02_collectives/09_scatter/)
 
-## AI 框架
+## 训练诊断
 
-- [PyTorch](./03_ai_framework/01_pytorch/)
-- [Tensorflow](./03_ai_framework/02_tensorflow/)
+- [无注入 GPT-2 Small](../../examples/gpt2_normal.py)
 
 ## 自定义点对点通信算子
 

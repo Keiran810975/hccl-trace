@@ -39,7 +39,7 @@ class SourcePropagationTests(unittest.TestCase):
         self.assertEqual(chain["evidence_confidence"],"observed")
         self.assertEqual(report["nodes"]["i5p0"]["comparison"]["reference_mean_ns"],"10000")
         self.assertFalse(report["physical_causation_proven"])
-        self.assertEqual(report["candidates"][0]["source"]["source_region_rank"], 1)
+        self.assertIsNone(report["candidates"][0]["source"]["source_region_rank"])
         page = presentation.render_html(report)
         self.assertIn('id="source-region"', page)
 
@@ -61,7 +61,7 @@ class SourcePropagationTests(unittest.TestCase):
     def test_existing_cross_call_path_is_not_clipped(self):
         rows,edges,coordinates=cross_call_capture()
         diagnosis=rolling.analyze(rows,edges,coordinates)
-        roots=[r for r in diagnosis["root_causes"] if r["primary_eligible"]]
+        roots=diagnosis["root_causes"]
         report=propagation.build_report(rows,edges,roots,diagnosis["tasks"])
         chain=report["candidates"][0]["chains"][0]
         self.assertTrue(chain["path_complete"])
@@ -141,51 +141,9 @@ class SourcePropagationTests(unittest.TestCase):
         self.assertEqual(chain["edge_ids"],["other-sync"])
         self.assertEqual(report["candidates"][0]["anchor_graph_id"],"i5p1")
 
-    def test_exports_readable_chain_and_structured_steps_without_overwrite(self):
-        report=self.build(diagnosed())
-        with tempfile.TemporaryDirectory() as temporary:
-            directory=Path(temporary)/"out"
-            propagation.export_report(report,directory)
-            self.assertEqual(json.loads((directory/"report.json").read_text())["summary"]["complete_chain_count"],1)
-            with (directory/"steps.csv").open() as stream:
-                steps=list(csv.DictReader(stream))
-            self.assertEqual([r["graph_id"] for r in steps],["i5p0","i5p1","i5p2"])
-            self.assertIn("前5轮均值",(directory/"chains.md").read_text())
-            page=(directory/"index.html").read_text()
-            self.assertIn('id="flow"',page)
-            self.assertIn('id="evidence"',page)
-            self.assertIn("异常传播诊断",page)
-            self.assertIn("等待",(directory/"chains.md").read_text())
-            with self.assertRaises(FileExistsError):
-                propagation.export_report(report,directory)
-
     def test_empty_candidate_report_is_an_explicit_empty_result(self):
         report=propagation.build_report([],[],[])
         self.assertEqual(report["summary"]["chain_count"],0)
-        with tempfile.TemporaryDirectory() as temporary:
-            propagation.export_report(report,Path(temporary)/"empty")
-
-    def test_legacy_candidate_csv_literal_paths_are_parsed_not_evaluated(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            path=Path(temporary)/"candidates.csv"
-            with path.open("w",newline="") as stream:
-                writer=csv.DictWriter(stream,fieldnames=["root_id","affected_wait_graph_ids","evidence_paths"])
-                writer.writeheader()
-                writer.writerow(dict(root_id="a",affected_wait_graph_ids=["wait"],evidence_paths={"wait":["a-b","b-w"]}))
-            row,=propagation.load_csv_records(path,candidates=True)
-            self.assertEqual(row["evidence_paths"],{"wait":["a-b","b-w"]})
-
-    def test_materialized_csv_keeps_native_integer_coordinate_types(self):
-        native = dict(iteration=25, block=3, bucket=1, occurrence=0, user_rank=4)
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "comparisons.csv"
-            with path.open("w", newline="") as stream:
-                writer = csv.DictWriter(stream, fieldnames=list(native))
-                writer.writeheader()
-                writer.writerow(native)
-            materialized, = propagation.load_csv_records(path)
-            self.assertEqual(materialized, native)
-            self.assertTrue(all(type(materialized[k]) is int for k in native))
 
     def test_explicit_iteration_slice_scope_is_preserved_for_visible_report_label(self):
         report = self.build(diagnosed())

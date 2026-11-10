@@ -3,10 +3,11 @@
 ## 已收敛的用户入口
 
 - `hccl-diag capture -o capture -- 训练启动命令`：节点本地低日志/L1/PMU关闭采集，不改驱动或包。
-- `hccl-diag analyze capture`：按真实节点身份自动选择单机局部簇＋Host路径或多机P95单簇路径。
+- `hccl-diag analyze capture`：单机/多机同一慢Wait回溯路径，不分候选簇或选Top1；不把已解释的下游等待列为根因。
 - `hccl-diag join node0-capture node3-capture -o capture`：可选的本地汇集及SHA验证，不删输入。
-- 新三文件报告不发布关键路径模型/收益；保留真实依赖传播链、覆盖率、证据边界和簇内平行候选。
-- 旧11个评分/回放入口归档在`test/archive/diagnosis_20261108/`；活动服务器快照、历史报告、分母不改。
+- 新三文件报告不发布关键路径模型/收益；保留真实依赖传播链、覆盖率、证据边界和平行候选。
+- `hccl-diag clock-probe`：为多机采集提供前后软件校时证据。
+- 唯一训练样例为[正常 GPT-2](../../../examples/gpt2_normal.py)。旧实验、策略和结果口径留在`nf`。
 
 ## 待验收
 

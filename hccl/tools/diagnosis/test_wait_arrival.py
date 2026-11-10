@@ -53,7 +53,7 @@ class WaitArrivalTests(unittest.TestCase):
         self.assertEqual(public["coverage"]["unpaired_or_ambiguous_slow_wait_count"], 0)
         self.assertEqual(public["coverage"]["paired_slow_wait_count"], 1)
 
-    def test_no_calibration_or_contradictory_history_does_not_explain_wait(self):
+    def test_no_calibration_or_slow_producer_reference_does_not_explain_wait(self):
         rows, edges, coordinates = self.early_waiter()
         report = rolling.analyze(rows, edges, coordinates)
         self.assertFalse(any(t.get("arrival_observation") for t in report["wait_backtraces"]))
@@ -61,7 +61,10 @@ class WaitArrivalTests(unittest.TestCase):
         producer.update(_start=4300, _stop=4301, _start_order=Decimal(4300), _stop_order=Decimal(4301))
         report = rolling.analyze(rows, edges, coordinates,
             rolling.RollingOptions(calibrated_release_intervals=True), alignment=clocks())
-        self.assertFalse(next(t for t in report["wait_backtraces"] if t["wait_graph_id"] == "i5p2").get("arrival_observation"))
+        arrival = next(t for t in report["wait_backtraces"] if t["wait_graph_id"] == "i5p2")["arrival_observation"]
+        self.assertNotIn("i4p1", arrival["reference_producer_graph_ids"])
+        self.assertEqual(arrival["reference_count"], 4)
+        self.assertFalse(arrival["source_candidate_created"])
 
     def test_communication_peer_is_not_reassigned_as_fault_rank(self):
         rows, edges, coordinates, _ = capture(execution_delay=True)

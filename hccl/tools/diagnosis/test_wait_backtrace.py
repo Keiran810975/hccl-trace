@@ -3,9 +3,6 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import asdict
 from decimal import Decimal
-import json
-from pathlib import Path
-import tempfile
 import unittest
 
 from . import rolling_diagnosis as rolling
@@ -26,6 +23,47 @@ def cross_call_capture():
 
 
 class WaitBacktraceTests(unittest.TestCase):
+    def test_backtrace_keeps_disconnected_explaining_sources_without_clustering(self):
+        rows, edges, coords, _ = capture(execution_delay=True)
+        extra = [dict(r, _graph_id="other-" + r["_graph_id"], _operation_scope="other-" + r["_operation_scope"])
+                 for r in rows]
+        links = [dict(e, src="other-" + e["src"], dst="other-" + e["dst"], edge_id="other-" + e["edge_id"])
+                 for e in edges]
+        other = {"other-" + k: dict(v, operation_scope="other-" + k, bucket=1) for k, v in coords.items()}
+        report = rolling.analyze(rows + extra, edges + links, dict(coords, **other),
+                                 rolling.RollingOptions())
+        self.assertEqual({r["graph_id"] for r in report["root_causes"]}, {"i5p0", "other-i5p0"})
+        self.assertTrue(all(r["task_kind"] != "notify_wait" for r in report["root_causes"]))
+        self.assertIsNone(report["primary_source_candidate_id"])
+        self.assertEqual(report["source_regions"], [])
+        self.assertEqual({t["graph_id"] for t in report["tasks"] if t["role"] == "propagated_wait"},
+                         {"i5p2", "other-i5p2"})
+
+    def test_backtrace_needs_cross_node_calibration_for_explanation(self):
+        rows, edges, coords, _ = capture(execution_delay=True)
+        for row in rows:
+            if row["_user_rank"] == 1:
+                row["_node_id"] = "run/node1"
+        for edge in edges:
+            if "notify_sync" in edge["kind"]:
+                edge.update(kind="cross_node_notify_sync_observed", confidence="observed")
+        options = rolling.RollingOptions()
+        report = rolling.analyze(rows, edges, coords, options)
+        self.assertEqual(report["root_causes"], [])
+        self.assertIn("uncalibrated_cross_node_boundary", report["coverage"]["boundary_reason_counts"])
+        clocks = self.clocks()
+        clocks["models"][1].update(node_id="run/node1", estimated_error_ns=1)
+        report = rolling.analyze(rows, edges, coords, options, alignment=clocks)
+        self.assertEqual({r["graph_id"] for r in report["root_causes"]}, {"i5p0"})
+        self.assertEqual(report["root_causes"][0]["evidence_paths"]["i5p2"], ["i5e0", "i5e1"])
+
+    def test_backtrace_keeps_supported_host_without_making_wait_a_root(self):
+        rows, edges, coords, preparations = capture(host_delay=True)
+        report = rolling.analyze(rows, edges, coords, rolling.RollingOptions(),
+                                 preparations=preparations)
+        self.assertEqual([r["component"] for r in report["root_causes"]], ["host_preparation"])
+        self.assertFalse(any(r["graph_id"] == "i5p2" for r in report["unresolved_observations"]))
+
     def test_uncomparable_intermediate_wait_is_not_assumed_normal(self):
         from . import wait_backtrace
         rows, edges, coords, _ = capture(execution_delay=True)
@@ -78,7 +116,7 @@ class WaitBacktraceTests(unittest.TestCase):
         record = next(t for t in report["tasks"] if t["graph_id"] == "i5p1")
         self.assertFalse(record["start_late"])
         self.assertFalse(record["duration_slow"])
-        root = next(r for r in report["root_causes"] if r["root_id"] == report["primary_source_candidate_id"])
+        root = next(r for r in report["root_causes"] if r["graph_id"] == "i5p0")
         self.assertEqual(root["graph_id"], "i5p0")
         self.assertEqual(root["evidence_paths"]["i5p2"], ["i5e0", "i5e1"])
 
@@ -90,21 +128,6 @@ class WaitBacktraceTests(unittest.TestCase):
                     profiler_calibrations=[dict(node_id="node0", device_id=device, metadata_quantization_ns=1000)
                                            for device in (0, 1)])
 
-    def test_wait_threshold_is_independent_of_source_threshold(self):
-        rows, edges, coords, _ = capture(execution_delay=True)
-        for i in range(6):
-            wait, tail = rows[i * 4 + 2:i * 4 + 4]
-            stop = i * 1000 + (134 if i == 5 else 104)
-            wait.update(_stop=stop, _stop_order=Decimal(stop), _duration=stop - wait["_start"])
-            tail.update(_start=stop, _stop=stop + .2, _start_order=Decimal(stop),
-                        _stop_order=Decimal(str(stop + .2)))
-        original = rolling.analyze(rows, edges, coords)
-        changed = rolling.analyze(rows, edges, coords, rolling.RollingOptions(wait_slowdown_factor="1.1"))
-        self.assertIsNone(original["primary_source_candidate_id"])
-        self.assertIsNotNone(changed["primary_source_candidate_id"])
-        self.assertEqual(changed["source_policy_version"], 7)
-        self.assertEqual(next(t for t in changed["tasks"] if t["graph_id"] == "i5p0")["slowdown_factor"], "4")
-
     def test_record_can_release_before_its_profiled_execution_ends(self):
         rows, edges, coords, _ = capture(execution_delay=True)
         record = next(r for r in rows if r["_graph_id"] == "i5p1")
@@ -114,12 +137,12 @@ class WaitBacktraceTests(unittest.TestCase):
         changed = rolling.analyze(rows, edges, coords, rolling.RollingOptions(calibrated_release_intervals=True),
                                   alignment=self.clocks())
         self.assertIsNone(original["primary_source_candidate_id"])
-        self.assertIsNotNone(changed["primary_source_candidate_id"])
+        self.assertTrue(changed["root_causes"])
         self.assertEqual((rows, edges), before)
         checks = [c for t in changed["wait_backtraces"] for c in t["release_checks"]]
         self.assertTrue(any(c["timing_status"] == "producer_release_interval_compatible" for c in checks))
         from .source_propagation import build_report
-        root = next(r for r in changed["root_causes"] if r["root_id"] == changed["primary_source_candidate_id"])
+        root = next(r for r in changed["root_causes"] if r["graph_id"] == "i5p0")
         report = build_report(rows, edges, [root], changed["tasks"])
         self.assertEqual(report["candidates"][0]["chains"][0]["hops"][-1]["timing_status"],
                          "producer_release_interval_compatible")
@@ -133,7 +156,7 @@ class WaitBacktraceTests(unittest.TestCase):
                     row[key] += 5
         changed = rolling.analyze(rows, edges, coords, rolling.RollingOptions(calibrated_release_intervals=True),
                                   alignment=self.clocks(offset=5000))
-        self.assertIsNotNone(changed["primary_source_candidate_id"])
+        self.assertTrue(changed["root_causes"])
 
     def test_calibrated_mode_does_not_force_a_truly_incompatible_release(self):
         rows, edges, coords, _ = capture(execution_delay=True)
@@ -148,25 +171,13 @@ class WaitBacktraceTests(unittest.TestCase):
         rows, edges, coords = cross_call_capture()
         before = deepcopy(edges)
         report = rolling.analyze(rows, edges, coords)
-        root = next(r for r in report["root_causes"] if r["root_id"] == report["primary_source_candidate_id"])
+        root = next(r for r in report["root_causes"] if r["graph_id"] == "i5p0")
         self.assertEqual(root["graph_id"], "i5p0")
         self.assertEqual(root["operation_scope"], "op-5-0")
         self.assertEqual(root["evidence_paths"]["i5p2"], ["i5e0", "i5e1"])
         self.assertEqual(edges, before)
         trace = next(t for t in report["wait_backtraces"] if t["wait_graph_id"] == "i5p2")
         self.assertEqual(trace["status"], "source_candidates_found")
-
-    def test_cross_call_focus_keeps_real_source_and_wait_endpoints(self):
-        rows, edges, coords = cross_call_capture()
-        options = rolling.RollingOptions(max_figures=1)
-        report = rolling.analyze(rows, edges, coords, options)
-        with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / "report"
-            rolling.export_report(report, rows, edges, output, options)
-            page = (output / "focus-001-current.html").read_text()
-            model = json.JSONDecoder().raw_decode(page.split("const model=", 1)[1])[0]
-            self.assertTrue(model["multipleOperationScopes"])
-            self.assertTrue({"i5p0", "i5p2"} <= {n["id"] for n in model["nodes"]})
 
     def test_normal_execution_that_starts_late_is_not_the_root(self):
         rows, edges, coords, _ = capture(execution_delay=True)
@@ -192,7 +203,7 @@ class WaitBacktraceTests(unittest.TestCase):
         middle = next(t for t in report["tasks"] if t["graph_id"] == "middle-5")
         self.assertTrue(middle["start_late"])
         self.assertFalse(middle["duration_slow"])
-        root = next(r for r in report["root_causes"] if r["root_id"] == report["primary_source_candidate_id"])
+        root = next(r for r in report["root_causes"] if r["graph_id"] == "i5p0")
         self.assertEqual(root["graph_id"], "i5p0")
         self.assertIn("middle-record-5", root["evidence_paths"]["i5p2"])
 
@@ -223,7 +234,7 @@ class WaitBacktraceTests(unittest.TestCase):
         self.assertIsNone(report["primary_source_candidate_id"])
         self.assertIn("incompatible_stream_order_timestamps", report["coverage"]["boundary_reason_counts"])
 
-    def test_tied_slow_paths_keep_both_sources_when_single_task_gain_is_zero(self):
+    def test_tied_slow_paths_keep_both_sources(self):
         rows, edges, coords, _ = capture(execution_delay=True)
         extra_rows = []
         for row in rows:
@@ -233,9 +244,8 @@ class WaitBacktraceTests(unittest.TestCase):
         rows.extend(extra_rows)
         edges.extend(dict(e, src=e["src"] + "b", dst=e["dst"] + "b", edge_id=e["edge_id"] + "b") for e in list(edges))
         report = rolling.analyze(rows, edges, coords)
-        sources = [r for r in report["root_causes"] if r["primary_eligible"]]
+        sources = report["root_causes"]
         self.assertEqual({r["graph_id"] for r in sources}, {"i5p0", "i5p0b"})
-        self.assertTrue(all(r["modeled_execution_gain_ns"] == 0 for r in sources))
 
     def test_ambiguous_notify_producers_stay_a_boundary(self):
         rows, edges, coords, _ = capture(execution_delay=True)
@@ -274,8 +284,8 @@ class WaitBacktraceTests(unittest.TestCase):
             if "notify_sync" in edge["kind"]:
                 edge.update(kind="cross_node_notify_sync_observed", confidence="observed")
         report = rolling.analyze(rows, edges, coords)
-        self.assertIsNotNone(report["primary_source_candidate_id"])
-        self.assertTrue(any(c["timing_status"] == "remote_clock_boundary" for t in report["wait_backtraces"] for c in t["release_checks"]))
+        self.assertFalse(report["root_causes"])
+        self.assertTrue(any(c["timing_status"] == "uncalibrated_cross_node_boundary" for t in report["wait_backtraces"] for c in t["release_checks"]))
 
 
 if __name__ == "__main__":

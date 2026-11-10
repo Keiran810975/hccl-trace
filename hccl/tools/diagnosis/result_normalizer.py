@@ -4,10 +4,8 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from decimal import Decimal
 from . import analyze_waits as waits
+from .report_contract import rolling_reference
 from .task_classifier import classify_task, source_category, INTERNAL, EXTERNAL, UNRESOLVED
-
-
-CANDIDATE_STATUSES = {"dependency_supported_candidate", "isolated_slow_task"}
 
 
 def normalize(report, *, mode, run_id, rows, edges, pipeline, binding_evidence, merge_metrics=()):
@@ -18,13 +16,10 @@ def normalize(report, *, mode, run_id, rows, edges, pipeline, binding_evidence, 
         if row["_user_rank"] >= 0 and row.get("_operation_scope"):
             participants[(row["_operation_scope"], row["_user_rank"])].add((row["_node_id"], row["_device_id"]))
     metric = "mean" if mode == "rolling" else "median"
-    reference = (dict(kind="previous_five_measured", statistic="mean", window=5)
+    reference = (rolling_reference(report.get("reference_mode"))
                  if mode == "rolling" else dict(kind="independent_baseline", statistic="median", matching="explicit_or_structural"))
-    roots, candidates, external, deferred = [], [], [], []
+    roots, candidates, external = [], [], []
     unresolved = [dict(item, diagnosis_category=UNRESOLVED) for item in report.get('unresolved_observations', [])]
-    admission = report.get("candidate_admission")
-    selected = set(admission["selected_candidate_ids"]) if admission else None
-    decisions = {d["candidate_id"]: d for d in admission["decisions"]} if admission else {}
     for original in report["root_causes"]:
         source = dict(original)
         node = lookup[source["graph_id"]]
@@ -72,35 +67,23 @@ def normalize(report, *, mode, run_id, rows, edges, pipeline, binding_evidence, 
             local_completion_evidence=source.get("local_completion_evidence"),
             dependency_timing=source.get("dependency_timing", {}),
             communication_context=source.get("communication_context"),
-            observed_call_slow=source.get("event_slow"),
-            observed_call_scope="source_operation_on_node_not_full_iteration_or_workload",
-            local_model_impact_status=source.get("impact_status", "not_assessed"),
-            local_model_execution_gain_ns=source.get("modeled_execution_gain_ns"),
-            call_work_evidence=source.get("call_work_evidence"),
             workload_completion_impact_proven=False,
             component=source["component"], **{k: source.get(k) for k in ("node_id", "user_rank", "device_id", "stream_id", "task_id",
             "iteration", "group_id", "call_site", "occurrence", "block", "bucket", "phase", "step", "event", "task_kind", "graph_id")},
             operation_id=source["operation_scope"], observed_start_ns=source["observed_start_ns"], observed_stop_ns=source["observed_stop_ns"],
             observed_duration_ns=source["duration_ns"], reference_duration_ns=value, reference_statistic=metric,
             reference_count=source.get("reference_count", source.get("baseline_count", 0)),
+            reference_iterations=source.get("reference_iterations", []),
+            reference_graph_ids=source.get("reference_graph_ids", []),
             comparison_status=source.get("comparison_status"), delta_ns=source.get("delta_ns"),
             comparison_basis=source.get("comparison_basis", "algorithm_semantic_location"),
             reference_evidence=source.get("reference_evidence", ""),
             time_alignment_estimated_error_ns=source.get("time_alignment_estimated_error_ns"),
             slowdown_factor=source.get("slowdown_factor"), affected_wait_graph_ids=source.get("affected_wait_graph_ids", []),
             chain_ids=[], evidence_confidence=confidence, reason=source["reason"],
-            **{k: source.get(k) for k in ("source_region_id", "source_region_rank", "source_region_budget_ns",
-                "ranking_execution_budget_ns", "ranking_metric", "supported_wait_max_excess_ns", "supported_wait_excess_beyond_source_growth_ns")},
             limitations=["Candidate is not a proved physical fault."] +
                         (["Evidence traversal was truncated."] if source.get("traversal_truncated") else [])))
-        if category == INTERNAL and selected is not None and source["root_id"] not in selected:
-            observation = destination.pop()
-            observation.update(admission=decisions[source["root_id"]],
-                               evidence_paths=source.get("evidence_paths", {}),
-                               disposition="evidenced_source_observation_deferred_by_experimental_policy")
-            deferred.append(observation)
-        else:
-            roots.append(source)
+        roots.append(source)
     for trace in report.get("wait_backtraces", []):
         if trace.get("status") != "source_candidates_found":
             unresolved.append(dict(kind="wait_backtrace",
@@ -122,15 +105,12 @@ def normalize(report, *, mode, run_id, rows, edges, pipeline, binding_evidence, 
     if not diagnosis_status or diagnosis_status == "localized_candidate" and not candidates:
         diagnosis_status = ("localized_candidate" if candidates else "external_clues" if external else
                             "unresolved_waits" if unresolved else "no_slow_task")
-    if deferred and not candidates and not external:
-        diagnosis_status = "candidate_evidence_deferred"
     normalized = dict(schema_version=2, run_id=run_id, mode=mode, status=status,
         candidate_relationship="parallel",
         source_policy_version=report.get("source_policy_version"), detection_options=report.get("options", {}),
         diagnosis_status=diagnosis_status,
         reference=reference, coverage=coverage, binding=binding_evidence,
         primary_candidate_id=primary, candidates=candidates,
-        candidate_admission=admission, deferred_communication_source_observations=deferred,
         source_ranking_version=report.get("source_ranking_version", 1),
         source_regions=report.get("source_regions", []),
         recommended_candidate_ids=report.get("recommended_candidate_ids", []),
@@ -153,6 +133,9 @@ def normalize(report, *, mode, run_id, rows, edges, pipeline, binding_evidence, 
                      rdma_hardware_transfer_duration_available=False),
         limitations=list(report.get("limits", [])) +
             (["Baseline source selection currently covers observed work execution, not Host preparation intervals."] if mode == "baseline" else []))
+    if "peer_read_policy" in report:
+        normalized.update(peer_read_policy=report["peer_read_policy"],
+                          peer_read_observations=report["peer_read_observations"])
     tasks = [dict(t, **classify_task(lookup[t["graph_id"]]), reference_value_ns=t.get("reference_mean_ns" if mode == "rolling" else "baseline_median_ns"),
                   reference_metric=metric) for t in report["tasks"]]
     return normalized, roots, tasks

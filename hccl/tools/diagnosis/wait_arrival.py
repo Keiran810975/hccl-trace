@@ -18,12 +18,12 @@ def local_origins(rows, clocks):
     return origins
 
 
-def observe(wait, producer, task, nodes, syncs, clocks, quantization, origins):
+def observe(wait, producer, task, nodes, syncs, clocks, quantization, origins, *, comparisons=None):
     if (producer["_node_id"] != wait["_node_id"] or producer.get("profiler_task_kind") != "notify_record"
-            or producer.get("_operation_scope") != wait.get("_operation_scope") or task["reference_count"] != 5):
+            or producer.get("_operation_scope") != wait.get("_operation_scope") or not task["reference_count"]):
         return None
     history = [nodes[key] for key in task["reference_graph_ids"]]
-    if len(history) != 5 or any(len(syncs[r["_graph_id"]]) != 1 for r in history):
+    if len(history) != task["reference_count"] or any(len(syncs[r["_graph_id"]]) != 1 for r in history):
         return None
     producers = [nodes[syncs[row["_graph_id"]][0][0]] for row in history]
     if any(p["_node_id"] != w["_node_id"] or p.get("_operation_scope") != w.get("_operation_scope")
@@ -31,6 +31,12 @@ def observe(wait, producer, task, nodes, syncs, clocks, quantization, origins):
            or comparison.task_signature(p) != comparison.task_signature(producer)
            for p, w in zip(producers, history)):
         return None
+    if comparisons is not None:
+        # A normal Wait alone does not certify its paired Record as a reference.
+        matched = [(p, w) for p, w in zip(producers, history) if not comparisons[p["_graph_id"]]["is_slow"]]
+        if not matched:
+            return None
+        producers, history = zip(*matched)
     pairs = [(producer, wait), *zip(producers, history)]
     if any(r.get("_subtask_id", -1) >= 0 for pair in pairs for r in pair):
         return None
@@ -56,7 +62,7 @@ def observe(wait, producer, task, nodes, syncs, clocks, quantization, origins):
         return Decimal(raw(row, side) - origins[(row["_operation_scope"], row["_node_id"])])
 
     def delta(row, previous, side):
-        return offset(row, side) - sum(offset(r, side) for r in previous) / 5
+        return offset(row, side) - sum(offset(r, side) for r in previous) / len(previous)
 
     waiter_delta = delta(wait, history, "start")
     producer_start_delta = delta(producer, producers, "start")
@@ -70,8 +76,8 @@ def observe(wait, producer, task, nodes, syncs, clocks, quantization, origins):
     else:
         status = "mixed_or_within_timing_resolution"
     return dict(status=status, wait_graph_id=wait["_graph_id"], producer_graph_id=producer["_graph_id"],
-        timing_domain="same_node_monotonic_raw_call_offsets", reference_count=5,
-        reference_wait_graph_ids=task["reference_graph_ids"],
+        timing_domain="same_node_monotonic_raw_call_offsets", reference_count=len(history),
+        reference_wait_graph_ids=[r["_graph_id"] for r in history],
         reference_producer_graph_ids=[p["_graph_id"] for p in producers],
         waiter_start_delta_ns=str(waiter_delta), producer_start_delta_ns=str(producer_start_delta),
         producer_stop_delta_ns=str(producer_stop_delta), observed_wait_growth_ns=task["delta_ns"],

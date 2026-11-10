@@ -16,7 +16,8 @@ from unittest.mock import patch, Mock
 
 from . import cli, rolling_diagnosis as rolling, source_propagation as propagation
 from .capture_command import join
-from .recommended_policy import select
+from .report_contract import without_critical_path
+from .report_exporter import _attach_chain_ids
 from .result_normalizer import normalize
 from .test_rolling_diagnosis import repeated
 from .test_tool_cli import sdk_capture, hashes
@@ -31,21 +32,19 @@ def normalized(report, rows, edges):
 
 
 class ReviewRegressions(unittest.TestCase):
-    def test_selected_single_node_sources_survive_normalization_and_propagation(self):
-        rows, edges, coordinates = repeated()
-        for row in rows:
-            row['_node_id'] = 'review/node0'
-        report = rolling.analyze(rows, edges, coordinates, rolling.RollingOptions(source_policy='dual'))
-        chosen, _, _ = select(report, rows, edges)
-        public, roots, tasks = normalized(chosen, rows, edges)
-        self.assertTrue(chosen['root_causes'])
-        self.assertEqual(len(public['candidates']), len(chosen['root_causes']))
-        self.assertTrue(public['candidates'][0]['evidence_supported'])
-        self.assertEqual(public['candidates'][0]['support_kind'], 'slow_notify_wait')
-        view = propagation.build_report(rows, edges, roots, tasks)
-        self.assertEqual(view['summary']['candidate_count'], len(public['candidates']))
+    def test_public_candidate_aliases_keep_propagation_ids(self):
+        internal = [dict(id="copy", chain_ids=[])]
+        external = [dict(id="host", chain_ids=[])]
+        result = without_critical_path(dict(schema_version=2, candidates=internal,
+            communication_source_candidates=internal, external_anomaly_clues=external,
+            source_candidates=internal + external))
+        _attach_chain_ids(result, {"copy": {"chains": [{"chain_id": "wait-chain"}]},
+                                   "host": {"chains": [{"chain_id": "host-chain"}]}})
+        self.assertEqual(result["communication_source_candidates"], result["candidates"])
+        self.assertEqual(result["source_candidates"],
+                         [dict(id="copy", chain_ids=["wait-chain"]), dict(id="host", chain_ids=["host-chain"])])
 
-    def test_single_node_sqlite_capture_publishes_actual_execution_anomaly(self):
+    def test_single_node_sqlite_capture_keeps_isolated_slow_task_as_observation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = sdk_capture(root/'capture')
@@ -72,37 +71,19 @@ class ReviewRegressions(unittest.TestCase):
             with sqlite3.connect(first/'db/msprof_fixture.db') as database:
                 database.execute('UPDATE TASK SET endNs=startNs+1000 WHERE taskId=51')
             before = hashes(source)
-            self.assertEqual(cli.main(['diag', str(source)]), 0)
-            report = json.loads((root/'capture-report/root_causes.json').read_text())
-            self.assertEqual(report['automatic_diagnosis']['execution_mode'], 'single_node')
-            self.assertTrue(report['candidates'])
-            self.assertEqual({c['user_rank'] for c in report['candidates']}, {3})
-            self.assertEqual({c['iteration'] for c in report['candidates']}, {5})
+            self.assertEqual(cli.main(['diag', str(source), '-o', str(root/'backtrace')]), 0)
+            report = json.loads((root/'backtrace/root_causes.json').read_text())
+            self.assertEqual(report['source_candidates'], [])
+            self.assertTrue(any(r['status'] == 'isolated_slow_task' for r in report['unresolved_observations']))
             self.assertEqual(hashes(source), before)
-
-    def test_unlinked_slow_waits_remain_observations_without_new_roots(self):
-        for single in (False, True):
-            with self.subTest(single=single):
-                rows, edges, coordinates = repeated((1, 1, 1, 1, 1, 1))
-                for row in rows:
-                    if single:
-                        row['_node_id'] = 'review/node0'
-                    if row['_graph_id'] == 'i5p2':
-                        row['_stop'] += 9
-                        row['_duration'] += 9
-                    if row['_graph_id'] == 'i5p3':
-                        row['_start'] += 9
-                        row['_stop'] += 9
-                report = rolling.analyze(rows, edges, coordinates, rolling.RollingOptions(source_policy='dual'))
-                chosen, _, _ = select(report, rows, edges)
-                public, _, _ = normalized(chosen, rows, edges)
-                self.assertEqual(public['candidates'], [])
-                self.assertEqual(public['diagnosis_status'], 'unresolved_waits')
-                self.assertEqual(public['unresolved_observations'][0]['graph_id'], 'i5p2')
-                self.assertEqual(public['coverage']['not_linked_to_selected_source_slow_wait_count'], 1)
 
     def test_normalization_never_promotes_semantic_or_missing_path_evidence(self):
         rows, edges, coordinates = repeated()
+        for row in rows:
+            row["_node_id"] = "review/node0"
+        for edge in edges:
+            if "notify_sync" in edge["kind"]:
+                edge.update(kind="direct_notify_sync_exact", confidence="exact")
         report = rolling.analyze(rows, edges, coordinates)
         for missing in (False, True):
             with self.subTest(missing=missing):
@@ -129,15 +110,13 @@ class ReviewRegressions(unittest.TestCase):
                     csv.DictWriter(stream, fields).writerow(dict(status='review_fixture_ambiguity', relation_id='fixture'))
                 return directory, ready
             with patch.object(cli, 'run_pipeline', side_effect=add_issue):
-                report = cli.analyze_capture(source, root/'report', mode='rolling', source_policy='auto',
-                                             selected_iteration_view=True, keep_debug=True)
+                report = cli.analyze_capture(source, root/'report', mode='rolling', keep_debug=True)
             self.assertEqual(report['quality']['notify_ambiguity_count'], 1)
             self.assertTrue(report['analysis_scope']['original_full_graph_retained'])
             sliced = next((root/'report.debug/analysis').glob('*/selected-iteration-view'))
             with (sliced/'operation_timings.csv').open(newline='') as stream:
                 self.assertTrue(list(csv.DictReader(stream)))
-            without_debug = cli.analyze_capture(source, root/'no-debug', mode='rolling', source_policy='auto',
-                                                selected_iteration_view=True)
+            without_debug = cli.analyze_capture(source, root/'no-debug', mode='rolling')
             self.assertFalse(without_debug['analysis_scope']['original_full_graph_retained'])
             self.assertTrue(without_debug['analysis_scope']['full_graph_replayable_from_capture'])
 

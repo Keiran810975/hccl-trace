@@ -1,7 +1,6 @@
 """Unified public commands, topology selection and retired report annotations."""
 from __future__ import annotations
 
-from copy import deepcopy
 from contextlib import redirect_stdout
 import io
 import json
@@ -14,13 +13,8 @@ from unittest.mock import patch, Mock
 
 from .cli import main
 from .capture_command import capture, join
-from .recommended_policy import select
 from .report_contract import without_critical_path
 from .test_tool_cli import sdk_capture, hashes
-from .test_rolling_diagnosis import repeated
-from . import rolling_diagnosis as rolling
-from .local_slow_clusters import analyze as local_clusters
-from .source_selection import select_sources
 
 
 class UnifiedCommandsTests(unittest.TestCase):
@@ -33,7 +27,9 @@ class UnifiedCommandsTests(unittest.TestCase):
             report = root / 'capture-report'
             value = json.loads((report / 'root_causes.json').read_text())
             self.assertEqual(value['automatic_diagnosis']['node_count'], 2)
-            self.assertEqual(value['automatic_diagnosis']['selected_policy'], 'dependency_cluster_cohort_v1')
+            self.assertEqual(value['automatic_diagnosis']['selected_policy'], 'wait_backtrace_v1')
+            self.assertNotIn('source_selection', value)
+            self.assertEqual(value['source_regions'], [])
             self.assertEqual(set(p.name for p in report.iterdir()), {'root_causes.json','execution.html','propagation.html'})
             for path in report.iterdir():
                 text = path.read_text()
@@ -42,21 +38,6 @@ class UnifiedCommandsTests(unittest.TestCase):
                 self.assertNotIn('local_model_execution_gain_ns', text)
                 self.assertNotIn('critical_path', text)
             self.assertEqual(hashes(source), before)
-
-    def test_single_node_uses_original_local_cluster_and_host_rule(self):
-        rows, edges, coords = repeated()
-        for row in rows:
-            row['_node_id'] = 'run/node0'
-        self.assertEqual(len({r['_node_id'] for r in rows}), 1)
-        report = rolling.analyze(rows, edges, coords, rolling.RollingOptions(source_policy='dual'))
-        expected = select_sources(local_clusters(report['tasks'], edges),
-            [r for r in report['root_causes'] if r['component']=='host_preparation'])
-        before = deepcopy(report)
-        chosen, decision, topology = select(report, rows, edges)
-        self.assertEqual(topology['execution_mode'], 'single_node')
-        self.assertEqual(decision['policy'], 'single_node_local_dual_v1')
-        self.assertEqual([r['root_id'] for r in chosen['root_causes']], [c['candidate_id'] for c in expected['candidates']])
-        self.assertEqual(report, before)
 
     def test_single_node_multiple_ranks_is_not_misdetected_as_multi_node(self):
         with tempfile.TemporaryDirectory() as tmp:

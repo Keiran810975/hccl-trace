@@ -5,7 +5,6 @@ from __future__ import annotations
 INTERNAL = "communication_source_candidate"
 EXTERNAL = "external_anomaly_clue"
 UNRESOLVED = "unresolved_observation"
-SINGLE_NODE_SOURCE_POLICY = "single_node_local_dual_v1"
 CATEGORIES = (INTERNAL, EXTERNAL, UNRESOLVED)
 DOMAIN_LABELS = {"hccl_internal": "HCCL内部", "external_compute": "已确认外部计算", "unknown": "归属未知"}
 CATEGORY_LABELS = {INTERNAL: "通信内部源头候选", EXTERNAL: "外部异常线索", UNRESOLVED: "未归因观测"}
@@ -32,15 +31,6 @@ def source_category(source, row):
     if source.get("component") == "host_preparation":
         return EXTERNAL
     domain = classify_task(row)["task_domain"]
-    if (source.get("source_selection_policy") in {SINGLE_NODE_SOURCE_POLICY, "multinode_dual_v1", "multinode_dual_v2", "multinode_parallel_v1", "dependency_cluster_top1_time_v1", "dependency_cluster_cohort_v1"} and domain == "hccl_internal"
-            and (source.get("component"), source.get("status")) in {
-                ("execution", "unexplained_execution_growth"), ("protocol_interval", "protocol_path_candidate")}):
-        return INTERNAL
-    local = source.get("local_completion_evidence", {})
-    if (source.get("component") == "execution" and domain == "hccl_internal"
-            and source.get("status") == "local_completion_supported_candidate"
-            and local.get("validated") is True and local.get("same_node_rank_operation") is True):
-        return INTERNAL
     if (source.get("component") == "execution" and domain == "hccl_internal"
             and source.get("status") == "dependency_supported_candidate"
             and any(source.get("evidence_paths", {}).get(w) for w in source.get("affected_wait_graph_ids", []))):

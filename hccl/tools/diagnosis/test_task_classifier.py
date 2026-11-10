@@ -86,19 +86,6 @@ class CategoryPolicyTests(unittest.TestCase):
         self.assertIn("外部异常线索", page)
         self.assertIn("未归因观测", page)
 
-    def test_unpaired_host_is_visible_clue_without_any_synthetic_chain(self):
-        rows, edges, coords, prep = capture(host_delay=True)
-        edges = [e for e in edges if "notify_sync" not in e["kind"]]
-        report = rolling.analyze(rows, edges, coords, preparations=prep)
-        public, roots, tasks = self.public(rows, edges, report)
-        self.assertEqual(public["candidates"], [])
-        clue, = public["external_anomaly_clues"]
-        self.assertFalse(clue["evidence_supported"])
-        self.assertEqual(clue["status"], "unresolved_host_preparation")
-        shown = propagation.build_report(rows, edges, roots, tasks)
-        self.assertEqual(shown["summary"]["chain_count"], 0)
-        self.assertEqual(shown["candidates"][0]["chains"], [])
-
     def test_cross_node_host_rdma_anchor_is_a_real_protocol_endpoint(self):
         rows, edges, coords, prep, alignment = cross_node_capture()
         report = rolling.analyze(rows, edges, coords, preparations=prep, alignment=alignment)
@@ -115,7 +102,7 @@ class IterationBoundaryTests(unittest.TestCase):
     def test_same_iteration_cross_call_remains_supported(self):
         rows, edges, coords = cross_call_capture()
         report = rolling.analyze(rows, edges, coords)
-        root = next(r for r in report["root_causes"] if r["primary_eligible"])
+        root = next(r for r in report["root_causes"] if r["graph_id"] == "i5p0")
         self.assertTrue(root["cross_operation"])
         self.assertEqual(root["evidence_paths"]["i5p2"], ["i5e0", "i5e1"])
 

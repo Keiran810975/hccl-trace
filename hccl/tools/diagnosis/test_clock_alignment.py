@@ -130,15 +130,14 @@ class ClockAlignmentTests(unittest.TestCase):
             data = json.loads(probe.read_text())
             data["after"] = data["before"]
             probe.write_text(json.dumps(data))
-            out, ready = run_pipeline(path, root / "local", allow_uncalibrated_clock=True,
-                                      html_views=(), include_critical_path=False)
+            out, ready = run_pipeline(path, root / "local", allow_uncalibrated_clock=True)
             self.assertTrue(ready)
             result = json.loads((out / "pipeline_result.json").read_text())
             self.assertFalse(result["clock_alignment_available"])
             self.assertTrue(result["clock_alignment_error"])
             self.assertFalse((out / "clock_alignment.json").exists())
             with patch("hccl.tools.diagnosis.multi_node_trace.operation_sync_connected", return_value=False):
-                _, ready = run_pipeline(path, root / "bad-graph", allow_uncalibrated_clock=True, html_views=())
+                _, ready = run_pipeline(path, root / "bad-graph", allow_uncalibrated_clock=True)
                 self.assertFalse(ready)
 
     def test_independent_probes_map_clocks_without_changing_raw_graph(self):
@@ -165,7 +164,7 @@ class ClockAlignmentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             path, _ = create_run_fixture(root)
-            directory, ready = run_pipeline(path, root / "out", require_clock_alignment=True, html_views=())
+            directory, ready = run_pipeline(path, root / "out", require_clock_alignment=True)
             self.assertFalse(ready)
             result = json.loads((directory / "pipeline_result.json").read_text())
             self.assertEqual(result["status"], "incomplete")

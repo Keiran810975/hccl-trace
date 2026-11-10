@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 import json
+from .report_contract import CLEAN_TASK_REFERENCE
 from .task_classifier import CATEGORY_LABELS, INTERNAL, EXTERNAL
 
 
@@ -43,6 +44,11 @@ EVENT_LABELS = {
     "rx_payload_copy_start": "接收并拷贝",
     "NOTIFY_RECORD": "发出通知",
     "NOTIFY_WAIT": "等待通知",
+}
+PEER_READ_DISPOSITIONS = {
+    "reported_as_suspected_peer_read_impact": "单列疑似对端影响",
+    "retained_reader_local_slowdown": "接收方也有本地 Copy 慢化，保留候选",
+    "retained_reader_local_control_incomplete": "接收方本地对照不全，保留候选",
 }
 UNRESOLVED_PREVIEW_LIMIT = 200
 
@@ -159,7 +165,14 @@ def build_view_model(report):
     unresolved = report.get('unresolved_observations', [])
     epochs = (report.get('analysis_scope') or {}).get('iterations')
     visible = [item for item in unresolved if not epochs or item.get('iteration') in epochs]
+    peer_reads = [dict(item, disposition_label=PEER_READ_DISPOSITIONS[item["disposition"]],
+                       duration=duration(item["reader"]["duration_ns"]),
+                       reference=duration(item["reader"]["reference_mean_ns"]),
+                       controls=[dict(rank=f["user_rank"], peer=f["peer_rank"], duration=duration(f["duration_ns"]))
+                                 for f in item["other_receivers"]])
+                  for item in report.get("peer_read_observations", [])]
     return dict(summary=report["summary"], candidates=candidates, nodes=nodes,
+                peer_read_observations=peer_reads,
                 analysis_scope=report.get("analysis_scope"),
                 unresolved_observations=visible[:UNRESOLVED_PREVIEW_LIMIT],
                 unresolved_observation_count=len(unresolved), unresolved_in_view_count=len(visible),
@@ -173,8 +186,10 @@ def render_markdown(report):
         return str(value).replace("|", "\\|").replace("\n", " ").replace("\r", " ")
 
     baseline = report.get('reference', {}).get('statistic') == 'median'
-    reference_label = 'Baseline 中位数' if baseline else '前5轮均值'
+    filtered = report.get('reference', {}).get('kind') == CLEAN_TASK_REFERENCE
+    reference_label = 'Baseline 中位数' if baseline else '参考均值' if filtered else '前5轮均值'
     reference = ('参考为独立正常采集的可比任务中位数（Baseline）。' if baseline else
+                 '设备任务使用最近至多5个未标慢的可比正式样本；不足5个按实际数量取均值。Host 准备区间仍使用连续前5轮。' if filtered else
                  '参考为当前轮之前连续5个正式 iteration 的同定位任务均值。')
     lines = ["# 异常传播链", "", "{candidate_count} 个候选源头，{chain_count} 条已报告路径，"
              "{unique_target_wait_count} 个不同目标 Wait。".format(**report["summary"]), "",
@@ -236,6 +251,10 @@ def render_html(report, *, standalone=False):
         page = page.replace("参考为同一次运行前5个正式 iteration 的同定位任务均值，不是外部 baseline。",
                             "参考为独立正常采集的可比任务中位数（Baseline）；结构参考不代表跨采集任务身份。")
         page = page.replace("前5轮均值", "Baseline 中位数").replace("参考均值", "参考中位数")
+    elif report.get("reference", {}).get("kind") == CLEAN_TASK_REFERENCE:
+        page = page.replace("参考为同一次运行前5个正式 iteration 的同定位任务均值，不是外部 baseline。",
+                            "设备任务取最近至多5个未标慢的可比正式样本；不足5个按实际数量取均值。Host 准备区间仍使用连续前5轮。")
+        page = page.replace("前5轮均值", "参考均值")
     if standalone:
         start = page.index('<nav class="downloads"')
         stop = page.index('</nav>', start) + len('</nav>')
@@ -274,6 +293,7 @@ details{border-top:1px solid #d9dde2;margin-top:20px;padding-top:12px}summary{cu
 <header><div><h1>异常传播诊断</h1><div id="report-counts" class="muted"></div><div id="analysis-scope" class="muted" hidden></div></div>
 <nav class="downloads" aria-label="诊断数据"><a href="report.json">完整 JSON</a><a href="chains.csv">分支 CSV</a><a href="steps.csv">逐跳 CSV</a><a href="chains.md">文字报告</a></nav></header>
 <details id="unresolved-section" style="margin:16px 24px"><summary id="unresolved-title">未归因观测</summary><p>没有完整证据的慢任务或等待，不作为通信内部根因。</p><div id="unresolved-items"></div></details>
+<details id="peer-read-section" style="margin:16px 24px" hidden><summary id="peer-read-title">疑似对端读取影响</summary><p>比较同次通信的同阶段、同一步和同字节数。这里是方向性慢化线索，不是 Notify 依赖边，也未证明对端物理故障。</p><div id="peer-read-items"></div></details>
 <div class="layout" id="layout"><aside><label for="search">按类别查看</label><input id="search" type="search" placeholder="Rank / iter / 任务名" autocomplete="off"><nav id="candidates" aria-label="分类诊断结果"></nav><p id="no-matches" class="muted" hidden>没有匹配的结果</p></aside>
 <main id="main"><section aria-labelledby="source-title"><div class="source-top"><div><h2 id="source-title"></h2><p id="source-location"></p><p id="source-coordinate" class="muted"></p><p id="source-region" class="muted"></p></div><span id="primary-tag" class="tag"></span></div>
 <p id="peer-context" class="muted" hidden></p><div id="source-metrics" class="metrics"></div><div id="scope" class="scope"></div><p id="observed-impact" class="muted"></p><p id="completion-evidence" class="limit" hidden></p><p id="source-limit" class="limit"></p><p id="truncation" class="warning" hidden></p></section>
@@ -294,6 +314,10 @@ const target=chain=>model.nodes[chain.target_wait_graph_id];
 const edgeLabel=hop=>hop.kind==="direct_stream_order_observed"?"同流顺序":hop.kind.includes("notify_sync")?"Record → Wait 通知配对":hop.kind;
 const metric=(label,value,extra="")=>`<div class="metric"><span>${esc(label)}</span><strong class="${extra}">${esc(value)}</strong></div>`;
 $("report-counts").textContent=`${model.summary.communication_source_count??model.summary.candidate_count} 个通信内部候选 · ${model.summary.external_clue_count??0} 个外部线索 · ${model.summary.chain_count} 条已报告路径`;
+const peerReads=model.peer_read_observations;
+$("peer-read-section").hidden=!peerReads.length;
+$("peer-read-title").textContent=`疑似对端读取影响（${peerReads.length} 条）`;
+$("peer-read-items").innerHTML=peerReads.map(o=>`<p><strong>Rank ${esc(o.reader.user_rank)} 读 Rank ${esc(o.peer.user_rank)}</strong> · iter ${esc(o.iteration)} · task ${esc(o.reader.task_id)} · ${esc(o.phase)} step ${esc(o.step)}<br>${esc(o.reference)} → ${esc(o.duration)}；其他对照：${o.controls.map(c=>`Rank ${esc(c.rank)} 读 Rank ${esc(c.peer)}：${esc(c.duration)}`).join("，")}。<br>${esc(o.disposition_label)}；对端 ${o.peer_local_slow_copies.length} 条同尺寸输入 Copy 慢化。</p>`).join("");
 if(model.analysis_scope?.kind==="selected_iteration_slice_from_original_artifacts"){$("analysis-scope").hidden=false;$("analysis-scope").textContent=`原图切片 · 正式 iteration ${model.analysis_scope.iterations.join(", ")} · 非全采集`;}
 if(model.analysis_scope?.kind==="selected_call_slice_from_original_artifacts"){$("analysis-scope").hidden=false;$("analysis-scope").textContent=`原图通信调用切片 · ${model.analysis_scope.selected_operation_scopes.length} 次通信 · 非完整迭代或全采集`;}
 $("unresolved-title").textContent=`未归因观测（完整 ${model.unresolved_observation_count} · 当前视图 ${model.unresolved_in_view_count} · 展示 ${model.unresolved_observations.length}）`;

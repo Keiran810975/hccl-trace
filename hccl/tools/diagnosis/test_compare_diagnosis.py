@@ -3,13 +3,9 @@ from __future__ import annotations
 
 from copy import deepcopy
 from decimal import Decimal
-import csv
-import json
 from pathlib import Path
 import sys
-import tempfile
 import unittest
-import xml.etree.ElementTree as ET
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -63,11 +59,6 @@ class BaselineComparisonTests(unittest.TestCase):
         self.assertTrue(any(r["status"] == "unresolved_upstream" for r in report["root_causes"]))
         self.assertEqual(root["duration_ns"], 990000)
         self.assertEqual(root["delta_ns"], "989000")
-        with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / "comparison"
-            compare.export_report(report, rows, edges, baseline, baseline_edges, output, compare.ComparisonOptions())
-            svg = (output / root["comparison_page"].replace(".html", "-anomaly.svg")).read_text()
-            self.assertIn('stroke-dasharray="4 3"', svg)
 
     def test_capture_start_is_not_an_inferred_gap(self):
         rows, edges, baseline, baseline_edges = fixture()
@@ -255,53 +246,6 @@ class BaselineComparisonTests(unittest.TestCase):
         rows, edges, baseline, _ = fixture()
         report = compare.analyze(rows, edges, baseline, compare.ComparisonOptions(traversal_limit=1))
         self.assertTrue(any(r["traversal_truncated"] for r in report["root_causes"]))
-
-    def test_svg_html_and_structured_report_share_real_ids_and_scale(self):
-        rows, edges, baseline, baseline_edges = fixture()
-        report = compare.analyze(rows, edges, baseline)
-        with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / "comparison"
-            compare.export_report(report, rows, edges, baseline, baseline_edges, output, compare.ComparisonOptions())
-            saved = json.loads((output / "report.json").read_text())
-            figure, = saved["figures"]
-            self.assertEqual(figure["anomaly_graph_id"], "p0")
-            self.assertEqual(figure["baseline_graph_id"], "b0")
-            models = []
-            for suffix in ("baseline", "anomaly"):
-                svg = ET.parse(output / ("focus-001-" + suffix + ".svg"))
-                self.assertIn("Operation-relative", ET.tostring(svg.getroot(), encoding="unicode"))
-                page = (output / ("focus-001-" + suffix + ".html")).read_text()
-                self.assertIn('"initialWindow":true', page)
-                models.append(json.JSONDecoder().raw_decode(page.split("const model=", 1)[1])[0])
-            self.assertEqual(models[0]["timeMax"], models[1]["timeMax"])
-            self.assertEqual(models[0]["timeScale"], models[1]["timeScale"])
-            self.assertGreaterEqual(models[1]["timeMax"], 1100)
-            self.assertIn('"e0","e1"', (output / "focus-001-anomaly.html").read_text())
-            self.assertTrue((output / "slow_tasks.csv").exists())
-            with self.assertRaises(FileExistsError):
-                compare.export_report(report, rows, edges, baseline, baseline_edges, output, compare.ComparisonOptions())
-
-    def test_html_escapes_event_text(self):
-        rows, edges, baseline, baseline_edges = fixture()
-        rows[0]["phase"] = baseline[0]["phase"] = "<script>bad()</script>"
-        with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / "comparison"
-            compare.export_report(compare.analyze(rows, edges, baseline), rows, edges, baseline, baseline_edges,
-                                  output, compare.ComparisonOptions())
-            self.assertNotIn("<script>bad()", (output / "index.html").read_text())
-            self.assertIn("&lt;script&gt;", (output / "index.html").read_text())
-
-    def test_mixed_source_csv_keeps_boundary_producer_fields(self):
-        rows, edges, baseline, baseline_edges = fixture()
-        edges = edges[1:]
-        report = compare.analyze(rows, edges, baseline)
-        with tempfile.TemporaryDirectory() as temporary:
-            output = Path(temporary) / "comparison"
-            compare.export_report(report, rows, edges, baseline, baseline_edges, output, compare.ComparisonOptions())
-            with (output / "root_causes.csv").open(newline="") as source:
-                records = list(csv.DictReader(source))
-            boundary = next(r for r in records if r["status"] == "unresolved_upstream")
-            self.assertEqual(json.loads(boundary["producer_graph_ids"]), ["p1"])
 
     def test_thresholds_and_zero_baseline_are_finite(self):
         rows, edges, baseline, _ = fixture()

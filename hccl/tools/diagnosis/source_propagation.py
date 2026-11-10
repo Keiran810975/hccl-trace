@@ -1,29 +1,11 @@
 """Readable source-first views of already reported dependency evidence paths."""
 from __future__ import annotations
 
-import argparse
-import ast
 from collections import Counter
-import csv
-import json
-from pathlib import Path
-import sys
 
-if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from diagnosis import analyze_waits as waits
-    from diagnosis import visualize_dependency_graph as graph
-    from diagnosis import source_propagation_view as presentation
-    from diagnosis.dependency_model import stable_id
-    from diagnosis.schema import write_csv
-    from diagnosis.task_classifier import source_category, INTERNAL, EXTERNAL, UNRESOLVED
-else:
-    from . import analyze_waits as waits
-    from . import visualize_dependency_graph as graph
-    from . import source_propagation_view as presentation
-    from .dependency_model import stable_id
-    from .schema import write_csv
-    from .task_classifier import source_category, INTERNAL, EXTERNAL, UNRESOLVED
+from . import analyze_waits as waits
+from .dependency_model import stable_id
+from .task_classifier import source_category, INTERNAL, EXTERNAL, UNRESOLVED
 
 
 METRIC_FIELDS = ("comparison_status", "reference_count", "reference_iterations", "reference_mean_ns",
@@ -155,7 +137,7 @@ def build_report(rows, edges, candidates, comparisons=(), *, primary_source_cand
                                     and timing.get("wait_profiler_interval_ns") == [dst["start_ns"], dst["stop_ns"]]
                                     and "ffts" not in edge["kind"]
                                     and src["subtask_id"] < 0 and dst["subtask_id"] < 0)
-                    protocol_clock = (timing if timing and root.get("source_selection_policy") in {"multinode_dual_v1", "multinode_dual_v2", "multinode_parallel_v1", "dependency_cluster_top1_time_v1", "dependency_cluster_cohort_v1"}
+                    protocol_clock = (timing if timing and root.get("source_selection_policy") == "wait_backtrace_v1"
                         and timing.get("timing_domain") == "independent_network_probe_estimate"
                         and timing.get("status") == "accepted" and src["node_id"] != dst["node_id"]
                         and timing.get("source_profiler_interval_ns") == [src["start_ns"], src["stop_ns"]]
@@ -211,105 +193,3 @@ def build_report(rows, edges, candidates, comparisons=(), *, primary_source_cand
         candidates=exported, nodes=facts, unresolved_observations=list(unresolved_observations), limits=LIMITS, candidate_order_changed=False,
         exhaustive_downstream_search=False, physical_causation_proven=False,
         reference=reference or dict(kind="previous_five_measured", statistic="mean", window=5))
-
-
-def export_report(report, directory):
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=False)
-    (directory/"report.json").write_text(json.dumps(report,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
-    chains, steps = [], []
-    for root in report["candidates"]:
-        source = root["source"]
-        for chain in root["chains"]:
-            target = report["nodes"].get(chain["target_wait_graph_id"])
-            chains.append(dict(candidate_id=root["candidate_id"],candidate_rank=root["candidate_rank"],primary=root["primary"],
-                chain_id=chain["chain_id"],source_rank=source["user_rank"],source_task_id=source["task_id"],
-                source_duration_ns=source["duration_ns"],source_reference_mean_ns=source["reference_mean_ns"],source_delta_ns=source["delta_ns"],
-                wait_graph_id=chain["target_wait_graph_id"],wait_rank=target["user_rank"] if target else None,
-                wait_task_id=target["task_id"] if target else None,wait_duration_ns=target["duration_ns"] if target else None,
-                wait_reference_mean_ns=target["comparison"]["reference_mean_ns"] if target else None,
-                wait_delta_ns=target["comparison"]["delta_ns"] if target else None,
-                edge_count=len(chain["edge_ids"]),path_complete=chain["path_complete"],status=chain["status"],
-                evidence_confidence=chain["evidence_confidence"],edge_ids=json.dumps(chain["edge_ids"])))
-            for position, identifier in enumerate(chain["node_ids"]):
-                node = report["nodes"][identifier]
-                hop = chain["hops"][position-1] if position else None
-                steps.append(dict(candidate_id=root["candidate_id"],chain_id=chain["chain_id"],position=position,
-                    **{k:node[k] for k in ("graph_id","node_id","user_rank","device_id","stream_id","task_id","iteration","block","bucket","phase","step","event","task_kind","start_ns","stop_ns","duration_ns")},
-                    reference_mean_ns=node["comparison"]["reference_mean_ns"],delta_ns=node["comparison"]["delta_ns"],
-                    incoming_edge_id=hop["edge_id"] if hop else "",incoming_edge_kind=hop["kind"] if hop else "",
-                    evidence_confidence=hop["confidence"] if hop else "",timing_status=hop["timing_status"] if hop else "source"))
-    for name, items in (("chains",chains),("steps",steps)):
-        fields = list(dict.fromkeys(k for item in items for k in item)) if items else ["candidate_id","chain_id","status"]
-        write_csv(str(directory/(name+".csv")),fields,items)
-    (directory/"chains.md").write_text(presentation.render_markdown(report),encoding="utf-8")
-    (directory/"index.html").write_text(presentation.render_html(report),encoding="utf-8")
-
-
-def load_csv_records(path, *, candidates=False, graph_ids=None):
-    integer_fields = {"user_rank","device_id","stream_id","task_id","iteration","block","bucket","occurrence","observed_start_ns","observed_stop_ns","duration_ns","reference_count","modeled_execution_gain_ns"}
-    boolean_fields = {"duration_slow","traversal_truncated","other_backtrace_branches_truncated", "primary_eligible"}
-    records=[]
-    with Path(path).open(encoding="utf-8-sig",newline="") as stream:
-        for row in csv.DictReader(stream):
-            if graph_ids is not None and row.get("graph_id") not in graph_ids:
-                continue
-            for key in integer_fields & row.keys():
-                row[key]=int(row[key]) if row[key] else None
-            for key in boolean_fields & row.keys():
-                if row[key] not in {"True","False",""}:
-                    raise ValueError("invalid CSV boolean: "+key)
-                row[key]=row[key]=="True"
-            for key in ({"affected_wait_graph_ids","evidence_paths","reference_iterations"} if candidates else {"reference_iterations"}) & row.keys():
-                if row[key]:
-                    try:
-                        value=json.loads(row[key])
-                    except json.JSONDecodeError:
-                        # Older diagnosis CSVs used DictWriter's Python literal representation.
-                        value=ast.literal_eval(row[key])
-                    if not isinstance(value,dict if key=="evidence_paths" else list):
-                        raise ValueError("invalid structured CSV field: "+key)
-                    row[key]=value
-                else:
-                    row[key]=None
-            records.append(row)
-    return records
-
-
-def main():
-    parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("artifact_dir",type=Path)
-    parser.add_argument("-o","--output-dir",type=Path,required=True)
-    args=parser.parse_args()
-    try:
-        directory=args.artifact_dir
-        gate=json.loads((directory/"pipeline_result.json").read_text(encoding="utf-8-sig"))
-        if gate.get("status")!="passed" or not gate.get("analysis_completed") or gate.get("source_policy_version") not in {4, 5, 6}:
-            raise ValueError("source-first export requires a passed source-policy 4/5/6 diagnosis artifact")
-        if args.output_dir.exists():
-            raise FileExistsError("refusing to overwrite propagation output")
-        if gate.get("source_policy_version") == 6:
-            entries=load_csv_records(directory/"rolling/root_causes.csv",candidates=True)
-            unresolved=[r for r in entries if r.get("diagnosis_category")==UNRESOLVED]
-            roots=[r for r in entries if r.get("diagnosis_category") in {INTERNAL, EXTERNAL}]
-            primary=next((r["root_id"] for r in roots if r.get("primary_eligible")), None)
-        else:
-            roots=load_csv_records(directory/"diagnosis_candidates.csv",candidates=True)
-            primary=roots[0]["root_id"] if roots else None
-            unresolved=[]
-        rows=graph.read_graph_artifact_nodes(directory/"dep_graph_nodes.csv")
-        edges=graph.read_graph_artifact_edges(directory/"dep_graph_edges.csv")
-        path_ids={key for root in roots for path in root["evidence_paths"].values() for key in path}
-        needed={root["graph_id"] for root in roots}
-        needed.update(key for edge in edges if edge["edge_id"] in path_ids for key in (edge["src"],edge["dst"]))
-        tasks=load_csv_records(directory/"rolling/task_comparison.csv",graph_ids=needed)
-        report=build_report(rows,edges,roots,tasks,primary_source_candidate_id=primary, unresolved_observations=unresolved)
-        export_report(report,args.output_dir)
-    except (OSError,ValueError,KeyError,ArithmeticError) as error:
-        parser.exit(1,"propagation export failed: "+str(error)+"\n")
-    print(json.dumps(report["summary"]))
-    return 0
-
-
-if __name__=="__main__":
-    raise SystemExit(main())

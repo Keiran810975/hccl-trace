@@ -94,70 +94,16 @@ def hashes(root):
 
 
 class ToolCliTests(unittest.TestCase):
-    def test_parallel_policy_is_explicit_and_public_candidates_have_no_priority(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            capture = sdk_capture(root / "capture")
-            before = hashes(capture)
-            result = analyze_capture(capture, root / "report", mode="rolling", source_policy="parallel")
-            self.assertEqual(result["source_selection"]["policy"], "multinode_dual_v2")
-            self.assertLessEqual(result["source_selection"]["cluster_selection"]["selected_cluster_count"], 1)
-            self.assertEqual(result["candidate_relationship"], "parallel")
-            self.assertIsNone(result["primary_candidate_id"])
-            self.assertIsNone(result["primary_source_id"])
-            self.assertNotIn("primary_proposal", result["source_selection"])
-            validate_final(root / "report")
-            self.assertEqual(hashes(capture), before)
-            alias = analyze_capture(capture, root / "alias", mode="rolling", source_policy="cluster-top1")
-            self.assertEqual(alias["source_candidates"], result["source_candidates"])
-            self.assertEqual(alias["source_selection"]["cluster_selection"], result["source_selection"]["cluster_selection"])
-            original = analyze_capture(capture, root / "old", mode="rolling", source_policy="dual-v2")
-            self.assertEqual(result["source_candidates"], original["source_candidates"])
-            experimental = analyze_capture(capture, root / "time", mode="rolling", source_policy="cluster-top1-time")
-            self.assertEqual(experimental["source_selection"]["policy"], "dependency_cluster_top1_time_v1")
-            cohort = analyze_capture(capture, root / "cohort", mode="rolling", source_policy="cluster-top1-cohort")
-            self.assertEqual(cohort["source_selection"]["policy"], "dependency_cluster_cohort_v1")
-            self.assertLessEqual(cohort["source_selection"]["cluster_selection"]["selected_cluster_count"], 1)
-            self.assertIsNone(cohort["primary_candidate_id"])
-            self.assertEqual(cohort["candidate_relationship"], "parallel")
-
     def test_selected_iteration_view_does_not_change_diagnosis_or_inputs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             capture = sdk_capture(root / 'capture')
             before = hashes(capture)
-            full = analyze_capture(capture, root / 'full', mode='rolling', source_policy='dual-v2')
-            sliced = analyze_capture(capture, root / 'slice', mode='rolling', source_policy='dual-v2',
-                                     selected_iteration_view=True, keep_debug=True)
-            self.assertEqual(full['source_candidates'], sliced['source_candidates'])
-            self.assertEqual(full['primary_source_id'], sliced['primary_source_id'])
+            sliced = analyze_capture(capture, root / 'slice', mode='rolling', keep_debug=True)
             self.assertEqual(sliced['analysis_scope']['kind'], 'selected_iteration_slice_from_original_artifacts')
             self.assertEqual(hashes(capture), before)
             validate_final(root / 'slice')
             self.assertTrue((root / 'slice.debug').is_dir())
-
-    def test_explicit_dual_policy_preserves_strict_three_file_publication(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp)
-            capture=sdk_capture(root/'capture')
-            before=hashes(capture)
-            result=analyze_capture(capture,root/'report',mode='rolling',source_policy='dual')
-            self.assertIn('source_candidates',result)
-            self.assertIn('selected_mechanism',result['source_selection'])
-            validate_final(root/'report')
-            self.assertEqual(hashes(capture),before)
-
-    def test_refined_dual_policy_is_explicit_and_keeps_legacy_default(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            capture = sdk_capture(root / "capture")
-            before = hashes(capture)
-            result = analyze_capture(capture, root / "report", mode="rolling", source_policy="dual-v2")
-            self.assertEqual(result["source_selection"]["policy"], "multinode_dual_v2")
-            validate_final(root / "report")
-            self.assertEqual(hashes(capture), before)
-            with self.assertRaises(DiagnosisError):
-                analyze_capture(capture, root / "bad", mode="baseline", baseline=capture, source_policy="dual-v2")
 
     def test_schema_two_publication_and_legacy_report_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -291,7 +237,7 @@ class ToolCliTests(unittest.TestCase):
     def test_insufficient_history_is_not_claimed_healthy(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            result = analyze_capture(sdk_capture(root / "capture", iterations=2), root / "report", mode="rolling")
+            result = analyze_capture(sdk_capture(root / "capture", iterations=1), root / "report", mode="rolling")
             self.assertEqual(result["status"], "insufficient_history")
             self.assertEqual(result["candidates"], [])
 
@@ -459,7 +405,7 @@ class ToolCliTests(unittest.TestCase):
         self.assertEqual(after["tasks"][-4]["group_id"], "dp")
         named[2]["group_id"] = "tp"
         changed = rolling.analyze(rows, edges, rolling.validate_coordinates(named))
-        self.assertEqual(changed["tasks"][-4]["comparison_status"], "missing_previous_iteration")
+        self.assertEqual(changed["tasks"][-4]["reference_iterations"], [0, 1, 3, 4])
 
     def test_baseline_sources_use_median_without_fabricating_chains(self):
         rows, edges, normal, normal_edges = fixture()
@@ -474,7 +420,8 @@ class ToolCliTests(unittest.TestCase):
         self.assertEqual(unified["candidates"][0]["reference_statistic"], "median")
 
     def test_cli_mode_contract(self):
-        self.assertEqual(main(["analyze", "--capture", "missing", "--mode", "baseline", "-o", "absent-result"]), 2)
+        with self.assertRaises(SystemExit):
+            main(["analyze", "missing", "--source-policy", "legacy"])
 
 
 class PublicSdkTests(unittest.TestCase):

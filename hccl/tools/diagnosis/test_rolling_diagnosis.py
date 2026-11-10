@@ -2,10 +2,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
-import json
 from pathlib import Path
 import sys
-import tempfile
 import unittest
 
 if __package__ in (None, ""):
@@ -38,60 +36,61 @@ def repeated(durations=(1, 1, 1, 1, 1, 2)):
 
 
 class RollingTests(unittest.TestCase):
+    def test_backtrace_replaces_flagged_history_for_only_the_affected_task(self):
+        rows, edges, coords = repeated((1, 1, 1, 1, 1, 4, 1, 2))
+        tasks = {t["graph_id"]: t for t in rolling.compare_tasks(
+            list(reversed(rows)), edges, coords, rolling.RollingOptions())}
+        self.assertTrue(tasks["i5p0"]["duration_slow"])
+        self.assertEqual(tasks["i6p0"]["reference_iterations"], [0, 1, 2, 3, 4])
+        self.assertEqual(tasks["i7p0"]["reference_iterations"], [1, 2, 3, 4, 6])
+        self.assertEqual(tasks["i7p0"]["reference_mean_ns"], "1000")
+        self.assertEqual(tasks["i7p1"]["reference_iterations"], [2, 3, 4, 5, 6])
+
+    def test_backtrace_uses_fewer_samples_and_excludes_warmup(self):
+        rows, edges, coords = repeated((99, 1, 4, 1, 2))
+        coords["op-0"]["stage"] = "warmup"
+        tasks = {t["graph_id"]: t for t in rolling.compare_tasks(
+            rows, edges, coords, rolling.RollingOptions())}
+        self.assertEqual(tasks["i0p0"]["comparison_status"], "warmup_excluded")
+        self.assertEqual(tasks["i1p0"]["reference_count"], 0)
+        self.assertEqual(tasks["i2p0"]["reference_count"], 1)
+        self.assertTrue(tasks["i2p0"]["duration_slow"])
+        self.assertEqual(tasks["i3p0"]["reference_graph_ids"], ["i1p0"])
+        self.assertEqual(tasks["i4p0"]["reference_graph_ids"], ["i1p0", "i3p0"])
+
+    def test_backtrace_excludes_flagged_gap_even_when_execution_is_normal(self):
+        rows, edges, coords = repeated((1, 1, 1, 1, 1, 1, 1))
+        row = next(r for r in rows if r["_graph_id"] == "i5p3")
+        row["_start"] += 10
+        row["_stop"] += 10
+        tasks = {t["graph_id"]: t for t in rolling.compare_tasks(
+            rows, edges, coords, rolling.RollingOptions())}
+        self.assertFalse(tasks["i5p3"]["duration_slow"])
+        self.assertTrue(tasks["i5p3"]["gap_slow"])
+        self.assertEqual(tasks["i6p3"]["reference_iterations"], [0, 1, 2, 3, 4])
+
+    def test_backtrace_does_not_backfill_with_a_different_operation_shape(self):
+        rows, edges, coords = repeated((1, 1, 1, 4, 1, 1))
+        row = next(r for r in rows if r["_graph_id"] == "i2p3")
+        row["event"] = "different_structure"
+        tasks = {t["graph_id"]: t for t in rolling.compare_tasks(
+            rows, edges, coords, rolling.RollingOptions())}
+        self.assertEqual(tasks["i2p0"]["reference_count"], 0)
+        self.assertEqual(tasks["i5p0"]["reference_graph_ids"], ["i0p0", "i1p0", "i4p0"])
+
     def test_sub_ten_microsecond_increase_is_detected(self):
         rows, edges, coords = repeated()
-        report = rolling.analyze(rows, edges, coords)
-        task = next(t for t in report["tasks"] if t["graph_id"] == "i5p0")
+        tasks = rolling.compare_tasks(rows, edges, coords, rolling.RollingOptions())
+        task = next(t for t in tasks if t["graph_id"] == "i5p0")
         self.assertEqual(task["reference_mean_ns"], "1000")
         self.assertEqual(task["delta_ns"], "1000")
         self.assertTrue(task["duration_slow"])
-        root = next(r for r in report["root_causes"] if r["graph_id"] == "i5p0")
-        self.assertEqual(root["status"], "dependency_supported_candidate")
-        self.assertEqual(root["reference_iterations"], [0, 1, 2, 3, 4])
-        self.assertFalse(any(k.startswith("baseline_") for k in root))
-
-    def test_current_future_and_warmup_do_not_enter_reference(self):
-        rows, edges, coords = repeated((999, 1, 2, 3, 4, 5, 10, 999))
-        coords["op-0"].update(stage="warmup", iteration=0)
-        for i in range(1, 8):
-            coords["op-{}".format(i)]["iteration"] = i - 1
-        report = rolling.analyze(rows, edges, coords)
-        task = next(t for t in report["tasks"] if t["graph_id"] == "i6p0")
-        self.assertEqual(task["reference_mean_ns"], "3000")
-        self.assertEqual(task["reference_graph_ids"], ["i1p0", "i2p0", "i3p0", "i4p0", "i5p0"])
-
-    def test_first_five_measured_iterations_are_unscored(self):
-        report = rolling.analyze(*repeated((1, 1, 1, 1, 100)))
-        self.assertEqual(report["status"], "no_comparable_history")
-        self.assertEqual(report["root_causes"], [])
-        self.assertEqual({t["comparison_status"] for t in report["tasks"]}, {"insufficient_history"})
-
-    def test_missing_iteration_does_not_fall_back_to_older_sample(self):
-        rows, edges, coords = repeated((1, 1, 1, 1, 1, 1, 10))
-        del coords["op-3"]
-        task = next(t for t in rolling.analyze(rows, edges, coords)["tasks"] if t["graph_id"] == "i6p0")
-        self.assertEqual(task["comparison_status"], "missing_previous_iteration")
-        self.assertFalse(task["is_slow"])
-
-    def test_mean_not_median_and_mad_guard_remain(self):
-        report = rolling.analyze(*repeated((1, 1, 1, 1, 6, 3)))
-        task = next(t for t in report["tasks"] if t["graph_id"] == "i5p0")
-        self.assertEqual(task["reference_mean_ns"], "2000")
-        self.assertTrue(task["duration_slow"])
-        noisy = rolling.analyze(*repeated((1, 2, 3, 4, 5, 5)))
-        task = next(t for t in noisy["tasks"] if t["graph_id"] == "i5p0")
-        self.assertFalse(task["duration_slow"])
+        self.assertEqual(task["reference_iterations"], [0, 1, 2, 3, 4])
 
     def test_zero_reference_does_not_flag_all_zero_tasks(self):
         options = rolling.RollingOptions()
         self.assertFalse(rolling._slow(0, 0, 0, options))
         self.assertTrue(rolling._slow(1, 0, 0, options))
-
-    def test_same_block_and_bucket_only(self):
-        rows, edges, coords = repeated()
-        coords["op-2"]["bucket"] = 1
-        report = rolling.analyze(rows, edges, coords)
-        self.assertFalse(next(t for t in report["tasks"] if t["graph_id"] == "i5p0")["is_slow"])
 
     def test_duplicate_semantic_location_is_not_ordinal_matched(self):
         rows, edges, coords = repeated()
@@ -109,22 +108,6 @@ class RollingTests(unittest.TestCase):
             rolling.validate_coordinates([dict(values[0], injection_kind="delay")])
         with self.assertRaises(ValueError):
             rolling.validate_coordinates(values + [dict(values[0], operation_scope="another")])
-
-    def test_report_exports_actual_five_history_panels(self):
-        rows, edges, coords = repeated()
-        report = rolling.analyze(rows, edges, coords)
-        with tempfile.TemporaryDirectory() as temporary:
-            out = Path(temporary) / "rolling"
-            rolling.export_report(report, rows, edges, out)
-            saved = json.loads((out / "report.json").read_text())
-            self.assertTrue(saved["figures"])
-            self.assertTrue((out / "focus-001-current.html").exists())
-            for i in range(5):
-                self.assertTrue((out / "focus-001-iteration-{}.svg".format(i)).exists())
-            self.assertNotIn("baseline_median_ns", (out / "report.json").read_text())
-            with self.assertRaises(FileExistsError):
-                rolling.export_report(report, rows, edges, out)
-
 
 if __name__ == "__main__":
     unittest.main()

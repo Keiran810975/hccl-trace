@@ -30,7 +30,7 @@ NHR/Mesh/Ring HTML；可复核内容和
 |---|---|
 | `hcomm/` | 传统集合通信算法、平台与 trace 生产端；主要 C++ 修改位置 |
 | `hccl/` | 新算子架构与 `tools/diagnosis/` Python 消费端 |
-| `test/` | 采集、回放、开销脚本；`test/out/` 保存本地原始数据与生成物 |
+| `examples/gpt2_normal.py` | 唯一无注入训练样例；现场采集、回放和开销实验留在 `nf` |
 | `文档/` | 当前依赖关系说明 |
 | `../cann-hccl/` | 旧版原型，只读参考，除非用户明确要求不得修改 |
 
@@ -136,17 +136,15 @@ msprof consolidated DB --------------------------------+-> merged.csv
 ```bash
 python -m unittest hccl.tools.diagnosis.test_diagnosis
 
-# 对已有数据回放；新采集的命令接在 -- 后
-bash test/run_step_trace_function_test.sh \
-  --plog-dir test/out/plog --msprof-db-dir test/out/function/msprof \
-  --out-dir test/out/replay --node-id node0 --min-match-rate 95
+# 对已有完整采集执行当前诊断
+python -m hccl.tools.diagnosis.cli analyze capture --keep-debug
 
 python -m hccl.tools.diagnosis.validate_trace test/out/function/merged.csv --min-match-rate 95
 python -m hccl.tools.diagnosis.validate_dependency_graph test/out/function/dep_graph --max-boundary-nodes 8
 ```
 
 最后一行的 8 是当前样例已解释的 boundary 数，不是所有数据集的通用阈值。
-功能测试入口见 [test/README.md](test/README.md)。Linux/CANN 下进入相应目录运行
+训练样例入口见 [README.md](README.md)。Linux/CANN 下进入相应目录运行
 `bash build.sh --pkg`；Windows 离线检查不能算设备构建或新采集验收。
 
 Windows 优先用 `rg`；写文本用 UTF-8 无 BOM。`apply_patch` 失败可用小型 PowerShell
