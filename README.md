@@ -30,8 +30,4 @@ hccl-diag analyze gpt2-capture -o gpt2-report
 详见[完整教程](文档/从零开始运行训练诊断.md)、[统一命令](文档/统一采集与诊断.md)
 和[诊断实现](hccl/tools/diagnosis/README.md)。
 
-## CPU 回归
-
-```bash
-python3 -m unittest discover -s hccl/tools/diagnosis -p 'test_*.py' -t .
-```
+开发测试、旧工具和历史实验不随 `main` 的用户版发布。

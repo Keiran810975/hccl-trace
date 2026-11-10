@@ -1,22 +1,13 @@
-#!/usr/bin/env python3
 """Parse fine-grained device executions from consolidated msprof SQLite databases."""
 
 from __future__ import annotations
 
-import argparse
-import os
 import sqlite3
-import sys
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import List, Sequence
 
-if __package__ in (None, ""):
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from diagnosis.schema import PROFILER_FIELDS, ProfilerTask, normalize_task_kind, write_csv
-else:
-    from .schema import PROFILER_FIELDS, ProfilerTask, normalize_task_kind, write_csv
+from .schema import ProfilerTask, normalize_task_kind
 
 
 UINT32_MAX = 0xFFFFFFFF
@@ -408,30 +399,3 @@ def parse_inputs(
         seen_devices[device_id] = path
         tasks.extend(parsed)
     return tasks
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Parse fine-grained device executions from consolidated msprof SQLite DB."
-    )
-    source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--msprof-db", help="One consolidated msprof_*.db file.")
-    source.add_argument(
-        "--msprof-db-dir",
-        help="Directory containing one or more PROF_*/msprof_*.db files.",
-    )
-    parser.add_argument("-o", "--output", required=True)
-    parser.add_argument("--node-id", default="")
-    args = parser.parse_args()
-    try:
-        tasks = parse_inputs(
-            args.msprof_db or "", args.msprof_db_dir or "", args.node_id)
-    except MsprofDbError as error:
-        parser.error(str(error))
-    write_csv(args.output, list(PROFILER_FIELDS), (task.to_row() for task in tasks))
-    print("profiler_tasks={}".format(len(tasks)))
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

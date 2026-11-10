@@ -1,26 +1,16 @@
-#!/usr/bin/env python3
 """Explain local waits using exported execution evidence and CPU build spans."""
 from __future__ import annotations
 
-import argparse
 import csv
 import json
-import os
-import sys
 from collections import defaultdict
 from decimal import Decimal
 from pathlib import Path
 from statistics import median
 
-if __package__ in (None, ""):
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from diagnosis import visualize_dependency_graph as graph
-    from diagnosis.schema import write_csv
-    from diagnosis.visualize_html import build_wait_inventory
-else:
-    from . import visualize_dependency_graph as graph
-    from .schema import write_csv
-    from .visualize_html import build_wait_inventory
+from . import visualize_dependency_graph as graph
+from .schema import write_csv
+from .visualize_html import build_wait_inventory
 
 
 def read_csv(path):
@@ -196,30 +186,3 @@ def export_analysis(result, directory):
             "operation_scope", "algorithm", "phase", "step", "duration_ns", "baseline_median_ns",
             "category", "evidence"] if key == "candidates" else [])
         write_csv(str(directory / ("diagnosis_" + key + ".csv")), fields, values)
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("artifact_dir", type=Path)
-    parser.add_argument("--baseline-dir", type=Path)
-    parser.add_argument("--min-wait-ms", type=Decimal, default=Decimal(1))
-    parser.add_argument("--min-slow-ms", type=Decimal, default=Decimal(5))
-    args = parser.parse_args()
-    if not all(value.is_finite() and value > 0 for value in (args.min_wait_ms, args.min_slow_ms)):
-        parser.error("wait/slow thresholds must be positive finite milliseconds")
-    directory = args.artifact_dir
-    rows = graph.read_graph_artifact_nodes(directory / "dep_graph_nodes.csv")
-    edges = graph.read_graph_artifact_edges(directory / "dep_graph_edges.csv")
-    issues = read_csv(directory / "dep_graph_notify_ambiguities.csv")
-    spans = [row for path in sorted(directory.glob("node*/build_spans.csv")) for row in read_csv(path)]
-    baseline = graph.read_graph_artifact_nodes(args.baseline_dir / "dep_graph_nodes.csv") if args.baseline_dir else []
-    result = analyze(rows, edges, issues, spans, baseline,
-                     int(args.min_wait_ms * 1000000), int(args.min_slow_ms * 1000000))
-    export_analysis(result, directory)
-    print("waits={} candidates={} unresolved={}".format(len(result["waits"]), len(result["candidates"]),
-          sum(w["status"] != "paired" for w in result["waits"])))
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

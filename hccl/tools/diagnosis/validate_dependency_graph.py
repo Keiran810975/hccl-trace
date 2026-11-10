@@ -1,22 +1,12 @@
-#!/usr/bin/env python3
 """Quality gate for execution and resource dependency graph artifacts."""
 
 from __future__ import annotations
 
-import argparse
 import csv
-import os
-import sys
 from pathlib import Path
 from typing import Dict
 
-if __package__ in (None, ""):
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from diagnosis.schema import write_csv
-    from diagnosis.visualize_dependency_graph import read_graph_artifact_edges
-else:
-    from .schema import write_csv
-    from .visualize_dependency_graph import read_graph_artifact_edges
+from .visualize_dependency_graph import read_graph_artifact_edges
 
 
 FORBIDDEN_EDGE_KINDS = frozenset({
@@ -182,45 +172,3 @@ def validate_dependency_artifacts(
     else:
         stats["golden_mismatch_count"] = 0
     return not failures, stats, failures
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Validate execution/resource dependency graph artifacts."
-    )
-    parser.add_argument("artifact_prefix", type=Path)
-    parser.add_argument("--max-boundary-nodes", type=int)
-    parser.add_argument("--golden-summary", type=Path)
-    parser.add_argument("--summary-output", type=Path)
-    args = parser.parse_args()
-    prefix = args.artifact_prefix
-    ok, stats, failures = validate_dependency_artifacts(
-        prefix.with_name(prefix.name + "_summary.csv"),
-        prefix.with_name(prefix.name + "_edges.csv"),
-        prefix.with_name(prefix.name + "_resource_summary.csv"),
-        prefix.with_name(prefix.name + "_resource_edges.csv"),
-        args.max_boundary_nodes,
-        args.golden_summary,
-    )
-    for metric in sorted(stats):
-        print("{}={}".format(metric, stats[metric]))
-    if args.summary_output is not None:
-        write_csv(
-            str(args.summary_output),
-            ["metric", "value"],
-            (
-                {"metric": metric, "value": stats[metric]}
-                for metric in sorted(stats)
-            ),
-        )
-        print("summary_csv={}".format(args.summary_output))
-    if failures:
-        for failure in failures:
-            print("dependency graph validation failed: {}".format(failure))
-    else:
-        print("dependency graph validation passed")
-    return 0 if ok else 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

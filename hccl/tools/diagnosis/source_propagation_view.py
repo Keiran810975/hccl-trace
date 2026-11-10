@@ -181,66 +181,7 @@ def build_view_model(report):
                 timing_labels=TIMING_LABELS, boundary_labels=BOUNDARY_LABELS)
 
 
-def render_markdown(report):
-    def cell(value):
-        return str(value).replace("|", "\\|").replace("\n", " ").replace("\r", " ")
-
-    baseline = report.get('reference', {}).get('statistic') == 'median'
-    filtered = report.get('reference', {}).get('kind') == CLEAN_TASK_REFERENCE
-    reference_label = 'Baseline 中位数' if baseline else '参考均值' if filtered else '前5轮均值'
-    reference = ('参考为独立正常采集的可比任务中位数（Baseline）。' if baseline else
-                 '设备任务使用最近至多5个未标慢的可比正式样本；不足5个按实际数量取均值。Host 准备区间仍使用连续前5轮。' if filtered else
-                 '参考为当前轮之前连续5个正式 iteration 的同定位任务均值。')
-    lines = ["# 异常传播链", "", "{candidate_count} 个候选源头，{chain_count} 条已报告路径，"
-             "{unique_target_wait_count} 个不同目标 Wait。".format(**report["summary"]), "",
-             reference + "候选平行展示，编号不表示优先级。",
-             "路径连通不等于物理因果已证明；Wait 增量不能相加为 workload 损失。",
-             "完整节点、依赖边和精确时间见 report.json / steps.csv。", ""]
-    if not report["candidates"]:
-        lines.extend(["未输出候选根因；不能据此判断 workload 没有异常。", ""])
-    for root in report["candidates"]:
-        source = root["source"]
-        label = "Host 准备区间" if source["component"] == "host_preparation" else source.get("event") or "执行任务"
-        category = root.get("diagnosis_category", EXTERNAL if source["component"] == "host_preparation" else INTERNAL)
-        lines.extend(["## {} {}：Rank {} / {}".format(CATEGORY_LABELS[category], root["candidate_rank"],
-            source["user_rank"], cell(label)), "",
-            coordinate(source), "",
-            "{} {} → 当前 {}；增量 {}；慢化 {}。".format(reference_label, duration(reference_value(source)),
-                duration(source["duration_ns"]), duration(source["delta_ns"], signed=True), factor(source["slowdown_factor"])), "",
-            "物理原因 {}。".format(cell(source.get("physical_cause") or "unknown")), ""])
-        if root["anchor_meaning"] == "observed_device_anchor_only":
-            lines.extend(["下列设备路径从各分支实际 Record 开始；Host 区间不是设备任务，不新增 Host → 设备边。", ""])
-        if source.get("traversal_truncated") or source.get("other_backtrace_branches_truncated"):
-            lines.extend(["注意：分析器回溯存在截断，分支列表并非完整影响范围。", ""])
-        if not root["chains"]:
-            lines.extend(["没有已报告的下游路径。", ""])
-        for index, chain in enumerate(root["chains"], 1):
-            stages = []
-            for segment in compact_path(report, chain):
-                if segment["kind"] == "group":
-                    stages.append("同流推进（{} 个任务）".format(len(segment["node_ids"])))
-                else:
-                    node = report["nodes"][segment["node_ids"][0]]
-                    stages.append("Rank {} {} [stream {}, task {}]".format(
-                        node["user_rank"], cell(node["event"] or node["task_kind"]), node["stream_id"], node["task_id"]))
-            lines.extend(["### 分支 {} · {}".format(index, STATUS_LABELS[chain["status"]]), "",
-                          " → ".join(stages) or "缺少设备锚点", "", branch_summary(report, chain), ""])
-            target = report["nodes"].get(chain["target_wait_graph_id"])
-            if target:
-                lines.extend(["目标 Wait：{} {} → 当前 {}，增量 {}。".format(reference_label,
-                    duration(reference_value(target['comparison'])), duration(target["duration_ns"]),
-                    duration(target["comparison"].get("delta_ns"), signed=True)), ""])
-            lines.extend(["证据：{} 条边，最弱等级 {}。链 ID：`{}`。".format(
-                len(chain["edge_ids"]), chain["evidence_confidence"], chain["chain_id"]), ""])
-            for hop in chain["hops"]:
-                if hop["edge_id"] in chain["timing_warnings"]:
-                    lines.extend(["时间限制：{}（{}）。".format(TIMING_LABELS.get(hop["timing_status"], hop["timing_status"]), hop["edge_id"]), ""])
-            for boundary in chain["boundaries"]:
-                lines.extend(["证据断点：{}。".format(BOUNDARY_LABELS.get(boundary["reason"], boundary["reason"])), ""])
-    return "\n".join(lines) + "\n"
-
-
-def render_html(report, *, standalone=False):
+def render_html(report):
     # Absolute nanoseconds travel as strings; the browser never rounds profiler timestamps.
     data = json.dumps(build_view_model(report), ensure_ascii=False, separators=(",", ":"))
     for value, escaped in (("&", "\\u0026"), ("<", "\\u003c"), (">", "\\u003e"),
@@ -255,13 +196,6 @@ def render_html(report, *, standalone=False):
         page = page.replace("参考为同一次运行前5个正式 iteration 的同定位任务均值，不是外部 baseline。",
                             "设备任务取最近至多5个未标慢的可比正式样本；不足5个按实际数量取均值。Host 准备区间仍使用连续前5轮。")
         page = page.replace("前5轮均值", "参考均值")
-    if standalone:
-        start = page.index('<nav class="downloads"')
-        stop = page.index('</nav>', start) + len('</nav>')
-        page = page[:start] + ('<nav class="downloads" aria-label="诊断结果"><a href="root_causes.json">根因候选 JSON</a>'
-                              '<a href="execution.html">执行依赖图</a></nav>') + page[stop:]
-        page = page.replace('${esc(id)}</code><br><small>',
-                            '${esc(id)}</code> <a href="execution.html#${encodeURIComponent(id)}">定位任务</a><br><small>')
     return page
 
 
@@ -291,7 +225,7 @@ details{border-top:1px solid #d9dde2;margin-top:20px;padding-top:12px}summary{cu
 @media print{aside,.downloads,.controls{display:none}.layout{display:block}main{padding:10px}details{break-inside:avoid}}
 </style></head><body>
 <header><div><h1>异常传播诊断</h1><div id="report-counts" class="muted"></div><div id="analysis-scope" class="muted" hidden></div></div>
-<nav class="downloads" aria-label="诊断数据"><a href="report.json">完整 JSON</a><a href="chains.csv">分支 CSV</a><a href="steps.csv">逐跳 CSV</a><a href="chains.md">文字报告</a></nav></header>
+<nav class="downloads" aria-label="诊断结果"><a href="root_causes.json">根因候选 JSON</a><a href="execution.html">执行依赖图</a></nav></header>
 <details id="unresolved-section" style="margin:16px 24px"><summary id="unresolved-title">未归因观测</summary><p>没有完整证据的慢任务或等待，不作为通信内部根因。</p><div id="unresolved-items"></div></details>
 <details id="peer-read-section" style="margin:16px 24px" hidden><summary id="peer-read-title">疑似对端读取影响</summary><p>比较同次通信的同阶段、同一步和同字节数。这里是方向性慢化线索，不是 Notify 依赖边，也未证明对端物理故障。</p><div id="peer-read-items"></div></details>
 <div class="layout" id="layout"><aside><label for="search">按类别查看</label><input id="search" type="search" placeholder="Rank / iter / 任务名" autocomplete="off"><nav id="candidates" aria-label="分类诊断结果"></nav><p id="no-matches" class="muted" hidden>没有匹配的结果</p></aside>
@@ -382,7 +316,7 @@ function renderChain(){
   }).join("");
   $("boundaries").innerHTML=chain.boundaries.map(boundary=>`<p class="boundary">证据断点：${esc(model.boundary_labels[boundary.reason]||boundary.reason)}<br><code>${esc(boundary.edge_id||boundary.graph_id||"")}</code></p>`).join("");
   $("edge-count").textContent=`（${chain.node_ids.length} 个任务 / ${chain.edge_ids.length} 条边）`;
-  $("evidence-rows").innerHTML=chain.node_ids.map((id,i)=>{const node=model.nodes[id],hop=i?chain.hops[i-1]:null;return `<tr><td>${i+1}</td><td>${esc(node.location)}<br>${esc(node.event||node.task_kind)}<br><code>${esc(id)}</code><br><small>${esc(node.coordinate)}</small><br><small>节点内相对时间 ${esc(node.relative)}</small><br><code>${esc(node.start_ns)} – ${esc(node.stop_ns)} ns</code></td><td>${esc(node.duration)}<br>${esc(node.reference)}<br>${esc(node.delta)}</td><td>${hop?`${esc(edgeLabel(hop))} · ${esc(hop.confidence)}<br><code>${esc(hop.edge_id)}</code><br>${esc(model.timing_labels[hop.timing_status]||hop.timing_status)}<br><small>${esc(hop.reason)}</small>`:"源头设备锚点"}</td></tr>`;}).join("");
+  $("evidence-rows").innerHTML=chain.node_ids.map((id,i)=>{const node=model.nodes[id],hop=i?chain.hops[i-1]:null;return `<tr><td>${i+1}</td><td>${esc(node.location)}<br>${esc(node.event||node.task_kind)}<br><code>${esc(id)}</code> <a href="execution.html#${encodeURIComponent(id)}">定位任务</a><br><small>${esc(node.coordinate)}</small><br><small>节点内相对时间 ${esc(node.relative)}</small><br><code>${esc(node.start_ns)} – ${esc(node.stop_ns)} ns</code></td><td>${esc(node.duration)}<br>${esc(node.reference)}<br>${esc(node.delta)}</td><td>${hop?`${esc(edgeLabel(hop))} · ${esc(hop.confidence)}<br><code>${esc(hop.edge_id)}</code><br>${esc(model.timing_labels[hop.timing_status]||hop.timing_status)}<br><small>${esc(hop.reason)}</small>`:"源头设备锚点"}</td></tr>`;}).join("");
   const involved=[...new Set(chain.node_ids.map(id=>model.nodes[id].node_id))];
   $("time-origins").textContent="相对时间仅在各节点内部计算；起点为本报告该节点最早证据任务，不是 iteration 起点。"+involved.map(node=>`${node}: ${model.origins[node]} ns`).join("；");
 }

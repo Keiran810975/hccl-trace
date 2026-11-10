@@ -1,11 +1,7 @@
-#!/usr/bin/env python3
 """Validate merged HCCL step trace data quality."""
 
 from __future__ import annotations
 
-import argparse
-import csv
-import sys
 from collections import Counter
 
 
@@ -63,36 +59,6 @@ def step_contract_violation(row):
     return ""
 
 
-def collect_step_contract_errors(rows, limit=None):
-    """Return row-addressable Ring step errors without guessing a correction."""
-    errors = []
-    for csv_row, row in enumerate(rows, start=2):
-        reason = step_contract_violation(row)
-        if not reason:
-            continue
-        errors.append(
-            "row {row}: reason={reason} node_id={node!r} device_id={device!r} "
-            "stream_id={stream!r} task_id={task!r} phase={phase!r} "
-            "step={step!r} rank_size={rank_size!r} slice={slice!r} "
-            "event={event!r}".format(
-                row=csv_row,
-                reason=reason,
-                node=row.get("node_id", ""),
-                device=row.get("device_id", ""),
-                stream=row.get("stream_id", ""),
-                task=row.get("task_id", ""),
-                phase=row.get("phase", ""),
-                step=row.get("step", ""),
-                rank_size=row.get("rank_size", ""),
-                slice=row.get("slice", ""),
-                event=row.get("event", ""),
-            )
-        )
-        if limit is not None and len(errors) >= limit:
-            break
-    return errors
-
-
 def validate_rows(rows, min_match_rate):
     stats = Counter()
     stats["step_contract_rows"] = 0
@@ -137,23 +103,3 @@ def validate_rows(rows, min_match_rate):
     if stats.get("step_contract_violations", 0):
         ok = False
     return ok, stats
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate merged HCCL step trace coverage.")
-    parser.add_argument("merged_csv")
-    parser.add_argument("--min-match-rate", type=float, default=95.0)
-    args = parser.parse_args()
-
-    with open(args.merged_csv, "r", encoding="utf-8-sig", newline="") as source:
-        rows = list(csv.DictReader(source))
-    ok, stats = validate_rows(rows, args.min_match_rate)
-    for key in sorted(stats):
-        print("{}={}".format(key, stats[key]))
-    for error in collect_step_contract_errors(rows, limit=20):
-        print("step_contract_error={}".format(error), file=sys.stderr)
-    return 0 if ok else 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

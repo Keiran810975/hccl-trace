@@ -1,43 +1,22 @@
-#!/usr/bin/env python3
 """Merge HCCL semantic plog records with fine-grained msprof DB executions."""
 
 from __future__ import annotations
 
-import argparse
-import csv
-import os
-import sys
 from collections import Counter, defaultdict
 from dataclasses import replace
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
-if __package__ in (None, ""):
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from diagnosis.control_trace import parse_control_inputs, enrich_control_tasks, AUDIT_FIELDS as CONTROL_AUDIT_FIELDS
-    from diagnosis.dependency_model import (
-        OPERATION_SCOPE_AMBIGUOUS,
-        OPERATION_SCOPE_MISSING,
-        OPERATION_SCOPE_UNIQUE,
-        OperationScopeIdentity,
-    )
-    from diagnosis.parse_msprof_db import MsprofDbError, parse_inputs as parse_msprof_db_inputs
-    from diagnosis.parse_plog import (
-        parse_file as parse_plog_file,
-        parse_graph_correlations_file,
-    )
-    from diagnosis.schema import GraphCorrelation, MERGED_FIELDS, ProfilerTask, SemanticRecord, write_csv
-else:
-    from .control_trace import parse_control_inputs, enrich_control_tasks, AUDIT_FIELDS as CONTROL_AUDIT_FIELDS
-    from .dependency_model import (
-        OPERATION_SCOPE_AMBIGUOUS,
-        OPERATION_SCOPE_MISSING,
-        OPERATION_SCOPE_UNIQUE,
-        OperationScopeIdentity,
-    )
-    from .parse_msprof_db import MsprofDbError, parse_inputs as parse_msprof_db_inputs
-    from .parse_plog import parse_file as parse_plog_file, parse_graph_correlations_file
-    from .schema import GraphCorrelation, MERGED_FIELDS, ProfilerTask, SemanticRecord, write_csv
+from .control_trace import parse_control_inputs, enrich_control_tasks, AUDIT_FIELDS as CONTROL_AUDIT_FIELDS
+from .dependency_model import (
+    OPERATION_SCOPE_AMBIGUOUS,
+    OPERATION_SCOPE_MISSING,
+    OPERATION_SCOPE_UNIQUE,
+    OperationScopeIdentity,
+)
+from .parse_msprof_db import parse_inputs as parse_msprof_db_inputs
+from .parse_plog import parse_file as parse_plog_file, parse_graph_correlations_file
+from .schema import GraphCorrelation, ProfilerTask, SemanticRecord
 
 
 TASK_KIND_KERNEL_TYPES = {
@@ -487,13 +466,6 @@ def _ffts_ctx_match(profiler_composite_by_execution, graph_correlations, semanti
         tasks = candidates[0] if len(candidates) == 1 else []
     return (tasks[0], correlation) if len(tasks) == 1 else None
 
-
-def to_float_for_sort(value: object) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
-
 def parse_msprof_inputs(
     msprof_db: str = "",
     msprof_db_dir: str = "",
@@ -605,61 +577,3 @@ def _merged_row(status: str, semantic: SemanticRecord, profiler: ProfilerTask, d
         "match_confidence": match_confidence,
     })
     return row
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Merge HCCL semantic plog and fine-grained msprof DB executions."
-    )
-    parser.add_argument("--plog", default="")
-    parser.add_argument("--plog-dir", default="", help="Directory containing Host plog*.log and AI_CPU device-*.log files.")
-    profiler_source = parser.add_mutually_exclusive_group(required=True)
-    profiler_source.add_argument(
-        "--msprof-db", default="", help="One consolidated msprof_*.db file.")
-    profiler_source.add_argument(
-        "--msprof-db-dir",
-        default="",
-        help="Directory containing one or more PROF_*/msprof_*.db files.",
-    )
-    parser.add_argument("-o", "--output", required=True)
-    parser.add_argument("--node-id", default="")
-    parser.add_argument("--summary", default="")
-    args = parser.parse_args()
-    if not args.plog and not args.plog_dir:
-        parser.error("one of --plog or --plog-dir is required")
-    try:
-        profilers = parse_msprof_inputs(
-            args.msprof_db, args.msprof_db_dir, args.node_id)
-    except MsprofDbError as error:
-        parser.error(str(error))
-
-    try:
-        profilers, control_audit = apply_control_inputs(profilers, args.plog, args.plog_dir, args.node_id)
-        rows, stats = merge_records(
-            parse_plog_inputs(args.plog, args.plog_dir, args.node_id),
-            profilers,
-            parse_graph_correlation_inputs(
-                args.plog,
-                args.plog_dir,
-                args.node_id,
-            ),
-        )
-    except ValueError as error:
-        print("trace_evidence_error={}".format(error), file=sys.stderr)
-        return 1
-    write_csv(args.output, list(MERGED_FIELDS), rows)
-    stats["control_tasks_enriched"] = len(control_audit)
-    write_csv(str(Path(args.output).with_suffix(".control.csv")), CONTROL_AUDIT_FIELDS, control_audit)
-    for key in sorted(stats):
-        print("{}={}".format(key, stats[key]))
-    if args.summary:
-        with open(args.summary, "w", newline="", encoding="utf-8") as output:
-            writer = csv.writer(output)
-            writer.writerow(("metric", "value"))
-            for key in sorted(stats):
-                writer.writerow((key, stats[key]))
-    return 1 if stats.get("duplicate_graph_correlation_keys", 0) else 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

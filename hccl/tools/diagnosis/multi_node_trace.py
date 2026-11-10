@@ -1,37 +1,21 @@
-#!/usr/bin/env python3
 """Replay one profile run and join evidenced cross-node RDMA Notify channels."""
 
 from __future__ import annotations
 
-import argparse
 import json
-import os
 import re
-import sys
 from collections import defaultdict
 from pathlib import Path
 
-if __package__ in (None, ""):
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from diagnosis import merge_timeline as merge
-    from diagnosis import visualize_dependency_graph as execution
-    from diagnosis.dependency_model import DependencyEdgeIdentity, OperationScopeIdentity, stable_id
-    from diagnosis.resource_dependency_graph import export_resource_dependency_tables
-    from diagnosis.schema import MERGED_FIELDS, write_csv
-    from diagnosis.validate_trace import validate_rows
-    from diagnosis.validate_dependency_graph import validate_dependency_artifacts
-    from diagnosis.parse_msprof_db import parse_operations
-    from diagnosis.control_trace import parse_build_spans, BUILD_FIELDS
-else:
-    from . import merge_timeline as merge
-    from . import visualize_dependency_graph as execution
-    from .dependency_model import DependencyEdgeIdentity, OperationScopeIdentity, stable_id
-    from .resource_dependency_graph import export_resource_dependency_tables
-    from .schema import MERGED_FIELDS, write_csv
-    from .validate_trace import validate_rows
-    from .validate_dependency_graph import validate_dependency_artifacts
-    from .parse_msprof_db import parse_operations
-    from .control_trace import parse_build_spans, BUILD_FIELDS
+from . import merge_timeline as merge
+from . import visualize_dependency_graph as execution
+from .dependency_model import DependencyEdgeIdentity, OperationScopeIdentity, stable_id
+from .resource_dependency_graph import export_resource_dependency_tables
+from .schema import MERGED_FIELDS, write_csv
+from .validate_trace import validate_rows
+from .validate_dependency_graph import validate_dependency_artifacts
+from .parse_msprof_db import parse_operations
+from .control_trace import parse_build_spans, BUILD_FIELDS
 
 
 UINT32_MAX = (1 << 32) - 1
@@ -156,11 +140,6 @@ def operation_sync_connected(rows, edges, ranks, manifest):
     return set(ranks) <= covered
 
 
-def build_cross_node_edges(rows: list[dict], ranks: dict, operation_evidence: dict):
-    """Compatibility entry point for cross-node-only audits."""
-    return build_rdma_notify_edges(rows, ranks, operation_evidence, include_same_node=False)
-
-
 def build_rdma_notify_edges(rows: list[dict], ranks: dict, operation_evidence: dict,
                            include_same_node: bool = True):
     """Join complete channels; no time comparison between different nodes.
@@ -280,30 +259,6 @@ def build_rdma_notify_edges(rows: list[dict], ranks: dict, operation_evidence: d
     return edges, ambiguities, frozenset(remote_ids)
 
 
-def single_node_sync_connected(rows, edges, ranks):
-    """Require real cross-rank Notify connectivity, not merely local stream edges."""
-    expected = set(ranks)
-    if len(expected) < 2:
-        return False
-    lookup = {row["_graph_id"]: row for row in rows}
-    links = defaultdict(set)
-    for edge in edges:
-        if "notify_sync" not in edge["kind"] or edge.get("confidence") not in {"exact", "observed"}:
-            continue
-        src, dst = lookup[edge["src"]], lookup[edge["dst"]]
-        a, b = src["_user_rank"], dst["_user_rank"]
-        if a != b and a in expected and b in expected and src["_node_id"] == dst["_node_id"]:
-            links[a].add(b)
-            links[b].add(a)
-    seen, queue = set(), [min(expected)]
-    while queue:
-        rank = queue.pop()
-        if rank not in seen:
-            seen.add(rank)
-            queue.extend(links[rank] - seen)
-    return seen == expected
-
-
 def replay_manifest(manifest_path: Path, output_dir: Path, min_match_rate: float = 95.0):
     manifest = load_manifest(manifest_path)
     run_id = manifest["run_id"]
@@ -409,23 +364,3 @@ def replay_manifest(manifest_path: Path, output_dir: Path, min_match_rate: float
         {"metric": "replay_gate_passed", "value": int(ready)},
     ])
     return destination, ready
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("manifest", type=Path)
-    parser.add_argument("-o", "--output-dir", type=Path, required=True)
-    parser.add_argument("--min-match-rate", type=float, default=95.0)
-    args = parser.parse_args()
-    try:
-        destination, ok = replay_manifest(args.manifest, args.output_dir, args.min_match_rate)
-    except (OSError, ValueError, KeyError) as error:
-        parser.exit(1, "multi-node replay failed: {}\n".format(error))
-    print("output={}".format(destination))
-    print("replay_gate_passed={}".format(int(ok)))
-    print("See merge_summary.csv, run_summary.csv and dep_graph_notify_ambiguities.csv for evidence.")
-    return 0 if ok else 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

@@ -1,33 +1,19 @@
-#!/usr/bin/env python3
 """Contract execution dependencies into a resource-task dependency graph."""
 
 from __future__ import annotations
 
-import argparse
-import os
-import sys
 from collections import Counter, defaultdict
 from decimal import Decimal
 from pathlib import Path
 from typing import Dict, Iterable, List
 
-if __package__ in (None, ""):
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from diagnosis.dependency_model import (
-        DependencyEdgeIdentity,
-        GRAPH_SCHEMA_VERSION,
-        stable_id,
-    )
-    from diagnosis.schema import MERGED_FIELDS, normalize_task_kind, write_csv
-    from diagnosis import visualize_dependency_graph as execution
-else:
-    from .dependency_model import (
-        DependencyEdgeIdentity,
-        GRAPH_SCHEMA_VERSION,
-        stable_id,
-    )
-    from .schema import MERGED_FIELDS, normalize_task_kind, write_csv
-    from . import visualize_dependency_graph as execution
+from .dependency_model import (
+    DependencyEdgeIdentity,
+    GRAPH_SCHEMA_VERSION,
+    stable_id,
+)
+from .schema import MERGED_FIELDS, normalize_task_kind, write_csv
+from . import visualize_dependency_graph as execution
 
 
 RESOURCE_TASK_KINDS = frozenset({
@@ -676,37 +662,3 @@ def export_resource_dependency_tables(
         ),
     )
     return nodes_path, edges_path, ambiguities_path, summary_path, stats
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Contract an execution dependency artifact into resource tasks."
-    )
-    parser.add_argument("execution_nodes_csv", type=Path)
-    parser.add_argument("execution_edges_csv", type=Path)
-    parser.add_argument("-o", "--output-prefix", type=Path, required=True)
-    args = parser.parse_args()
-    paths = export_resource_dependency_tables(
-        args.execution_nodes_csv,
-        args.execution_edges_csv,
-        args.output_prefix,
-    )
-    for label, path in zip(
-        ("resource_nodes_csv", "resource_edges_csv",
-         "resource_ambiguities_csv", "resource_summary_csv"),
-        paths[:4],
-    ):
-        print("{}={}".format(label, path))
-    for metric in (
-        "resource_task_nodes",
-        "boundary_nodes",
-        "edge_count",
-        "contraction_ambiguities",
-        "cycle_residual_nodes",
-    ):
-        print("{}={}".format(metric, paths[4][metric]))
-    return 1 if paths[4]["contraction_ambiguities"] else 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

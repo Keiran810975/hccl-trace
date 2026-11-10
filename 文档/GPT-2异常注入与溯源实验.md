@@ -87,7 +87,7 @@ python3 -m test.run_backtrace_experiment plan --topology multi \
 `source-snapshot.json`（文件相对路径到 SHA256），配套的 `deploy/`、`input/aicpu_hcomm.tar.gz`、
 `build-receipt.json`，及现场确认的 `authorization.json`、`deployment.json`。
 需要预先留存无后台干扰且数值通过的前台端口证据 `input/network-baseline.json`。
-配置要求见[单桶RoCE保护流程](../hccl/tools/diagnosis/roce-single-collective-20261108.md)及
+配置要求见[单桶RoCE保护流程](https://github.com/Keiran810975/hccl-trace/blob/d652fb04db8e70b04ec8fbebec7960ab845ca086/hccl/tools/diagnosis/roce-single-collective-20261108.md)及
 [设备保护器](../test/node03_device_guard.py)；不能用自己编造的授权或构建凭证代替。
 
 仅在该专用根完成部署和现场授权后，从 Node0 执行：

@@ -172,7 +172,7 @@ def publish_final_report(directory, output, normalized, roots, comparisons):
         view.read_operation_timings(directory / "operation_timings.csv"), alignment=alignment)
     model.update(graphView="execution", issueCount=len(waits.read_csv(directory / "dep_graph_notify_ambiguities.csv")))
     normalized["quality"]["notify_ambiguity_count"] = model["issueCount"]
-    view.attach_diagnosis(model, diagnosis, diagnosis["waits"], "execution")
+    view.attach_diagnosis(model, diagnosis, diagnosis["waits"])
     model["waits"] = diagnosis["waits"]
     model["resultCategories"] = normalized.get("category_counts", {})
     classifications = {t["graph_id"]: t.get("task_domain", "unknown") for t in comparisons}
@@ -217,7 +217,7 @@ def publish_final_report(directory, output, normalized, roots, comparisons):
     try:
         write_json(stage / "root_causes.json", normalized)
         view.write_html(stage / "execution.html", "HCCL execution", model)
-        (stage / "propagation.html").write_text(presentation.render_html(report, standalone=True), encoding="utf-8")
+        (stage / "propagation.html").write_text(presentation.render_html(report), encoding="utf-8")
         validate_final(stage)
         if output.exists() or output.is_symlink():
             raise FileExistsError("report appeared during analysis; refusing to overwrite it")

@@ -1,8 +1,8 @@
 # HCCL 新旧版本与 HCOMM 仓库差异总结
 
 > 本文保留 2026-06-14 调研快照，其中“当前缺口”不表示今天的实现状态。
-> 最新阶段状态见 [交接归档](../../tools/diagnosis/arch-94a1ab31c3ee.md)，
-> 后续工作见 [task.md](../../tools/diagnosis/task.md)。
+> 该阶段的状态见 [交接归档](https://github.com/Keiran810975/hccl-trace/blob/d652fb04db8e70b04ec8fbebec7960ab845ca086/hccl/tools/diagnosis/arch-94a1ab31c3ee.md)，
+> 当时的后续计划见 [task.md](https://github.com/Keiran810975/hccl-trace/blob/d652fb04db8e70b04ec8fbebec7960ab845ca086/hccl/tools/diagnosis/task.md)。
 
 ## 1. 调研范围
 

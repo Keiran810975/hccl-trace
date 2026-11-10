@@ -1,38 +1,19 @@
-#!/usr/bin/env python3
 """Parse HCCL step semantic records from plog text."""
 
 from __future__ import annotations
 
-import argparse
-import os
 import re
 import shlex
-import sys
 from typing import Dict, Iterable, Iterator, List
 
-if __package__ in (None, ""):
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from diagnosis.schema import (
-        GRAPH_CORRELATION_TAG,
-        SEMANTIC_FIELDS,
-        SUPPORTED_SEMANTIC_SCHEMA_VERSIONS,
-        TRACE_TAG,
-        GraphCorrelation,
-        SemanticRecord,
-        parse_int,
-        write_csv,
-    )
-else:
-    from .schema import (
-        GRAPH_CORRELATION_TAG,
-        SEMANTIC_FIELDS,
-        SUPPORTED_SEMANTIC_SCHEMA_VERSIONS,
-        TRACE_TAG,
-        GraphCorrelation,
-        SemanticRecord,
-        parse_int,
-        write_csv,
-    )
+from .schema import (
+    GRAPH_CORRELATION_TAG,
+    SUPPORTED_SEMANTIC_SCHEMA_VERSIONS,
+    TRACE_TAG,
+    GraphCorrelation,
+    SemanticRecord,
+    parse_int,
+)
 
 
 KEY_VALUE_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=([^,\s]+)")
@@ -159,18 +140,3 @@ def parse_file(path: str) -> List[SemanticRecord]:
 def parse_graph_correlations_file(path: str) -> List[GraphCorrelation]:
     with open(path, "r", encoding="utf-8", errors="replace") as source:
         return list(parse_graph_correlation_lines(source))
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Parse [HcclTaskSemantic] plog records into CSV.")
-    parser.add_argument("plog")
-    parser.add_argument("-o", "--output", required=True)
-    args = parser.parse_args()
-    records = parse_file(args.plog)
-    write_csv(args.output, list(SEMANTIC_FIELDS), (record.to_row() for record in records))
-    print("semantic_records={}".format(len(records)))
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

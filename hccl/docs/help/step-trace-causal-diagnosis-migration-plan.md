@@ -2,8 +2,8 @@
 
 > 历史迁移方案：保留最初的目标与设计讨论，不作为当前开发清单。
 > DB 输入、schema v4 和 operation scope 等已替代文中的早期建议；当前工作见
-> [task.md](../../tools/diagnosis/task.md)、[spec.md](../../tools/diagnosis/spec.md) 和
-> [阶段归档](../../tools/diagnosis/arch-94a1ab31c3ee.md)。
+> [task.md](https://github.com/Keiran810975/hccl-trace/blob/d652fb04db8e70b04ec8fbebec7960ab845ca086/hccl/tools/diagnosis/task.md)、[spec.md](https://github.com/Keiran810975/hccl-trace/blob/d652fb04db8e70b04ec8fbebec7960ab845ca086/hccl/tools/diagnosis/spec.md) 和
+> [阶段归档](https://github.com/Keiran810975/hccl-trace/blob/d652fb04db8e70b04ec8fbebec7960ab845ca086/hccl/tools/diagnosis/arch-94a1ab31c3ee.md)。
 
 ## 1. 目标
 

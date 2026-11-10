@@ -1,69 +1,38 @@
-#!/usr/bin/env python3
 """Build evidence-labelled physical dependencies from merged msprof executions."""
 
 from __future__ import annotations
 
-import argparse
 import csv
 import math
-import os
-import sys
 from collections import Counter, defaultdict
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-if __package__ in (None, ""):
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from diagnosis.dependency_model import (
-        DependencyEdgeIdentity,
-        DirectNotifyChannelIdentity,
-        DirectNotifyRelationIdentity,
-        ExecutionIdentity,
-        GRAPH_SCHEMA_VERSION,
-        LocalNotifyChannelIdentity,
-        LocalNotifyRelationIdentity,
-        NOTIFY_ENDPOINT_RULES,
-        NOTIFY_RANK_DOMAIN_DEVICE_LOCAL,
-        NOTIFY_RANK_DOMAIN_USER,
-        NOTIFY_RELATION_AMBIGUOUS,
-        NOTIFY_RELATION_CONFLICT,
-        NOTIFY_RELATION_INCOMPLETE,
-        NOTIFY_RELATION_SINGLE,
-        NOTIFY_ROLE_CONSUMER,
-        NOTIFY_ROLE_PRODUCER,
-        NOTIFY_SEQUENCE_DB_ORDINAL,
-        NOTIFY_SEQUENCE_DB_LOCAL_ORDINAL,
-        NOTIFY_SEQUENCE_FFTS_GRAPH,
-        NotifyRelationIdentity,
-        normalize_notify_endpoint,
-    )
-    from diagnosis.schema import MERGED_FIELDS, write_csv
-else:
-    from .dependency_model import (
-        DependencyEdgeIdentity,
-        DirectNotifyChannelIdentity,
-        DirectNotifyRelationIdentity,
-        ExecutionIdentity,
-        GRAPH_SCHEMA_VERSION,
-        LocalNotifyChannelIdentity,
-        LocalNotifyRelationIdentity,
-        NOTIFY_ENDPOINT_RULES,
-        NOTIFY_RANK_DOMAIN_DEVICE_LOCAL,
-        NOTIFY_RANK_DOMAIN_USER,
-        NOTIFY_RELATION_AMBIGUOUS,
-        NOTIFY_RELATION_CONFLICT,
-        NOTIFY_RELATION_INCOMPLETE,
-        NOTIFY_RELATION_SINGLE,
-        NOTIFY_ROLE_CONSUMER,
-        NOTIFY_ROLE_PRODUCER,
-        NOTIFY_SEQUENCE_DB_ORDINAL,
-        NOTIFY_SEQUENCE_DB_LOCAL_ORDINAL,
-        NOTIFY_SEQUENCE_FFTS_GRAPH,
-        NotifyRelationIdentity,
-        normalize_notify_endpoint,
-    )
-    from .schema import MERGED_FIELDS, write_csv
+from .dependency_model import (
+    DependencyEdgeIdentity,
+    DirectNotifyChannelIdentity,
+    DirectNotifyRelationIdentity,
+    ExecutionIdentity,
+    GRAPH_SCHEMA_VERSION,
+    LocalNotifyChannelIdentity,
+    LocalNotifyRelationIdentity,
+    NOTIFY_ENDPOINT_RULES,
+    NOTIFY_RANK_DOMAIN_DEVICE_LOCAL,
+    NOTIFY_RANK_DOMAIN_USER,
+    NOTIFY_RELATION_AMBIGUOUS,
+    NOTIFY_RELATION_CONFLICT,
+    NOTIFY_RELATION_INCOMPLETE,
+    NOTIFY_RELATION_SINGLE,
+    NOTIFY_ROLE_CONSUMER,
+    NOTIFY_ROLE_PRODUCER,
+    NOTIFY_SEQUENCE_DB_ORDINAL,
+    NOTIFY_SEQUENCE_DB_LOCAL_ORDINAL,
+    NOTIFY_SEQUENCE_FFTS_GRAPH,
+    NotifyRelationIdentity,
+    normalize_notify_endpoint,
+)
+from .schema import MERGED_FIELDS, write_csv
 
 
 EDGE_COLOR = {
@@ -1388,16 +1357,6 @@ def _assert_execution_graph_integrity(stats: Counter) -> None:
         )
 
 
-def export_dependency_tables(
-    merged_csv: Path,
-    prefix: Path,
-):
-    rows = read_execution_rows(merged_csv)
-    notify_ambiguities: List[dict] = []
-    edges = build_execution_edges(rows, notify_ambiguities)
-    return export_execution_tables(rows, edges, notify_ambiguities, prefix)
-
-
 def export_execution_tables(
     rows: List[dict],
     edges: List[dict],
@@ -1464,78 +1423,3 @@ def export_execution_tables(
         ambiguity_counts,
         graph_stats,
     )
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Export evidence-labelled physical dependency tables.")
-    parser.add_argument("merged_csv", type=Path)
-    parser.add_argument("-o", "--output-prefix", type=Path)
-    args = parser.parse_args()
-    prefix = args.output_prefix or args.merged_csv.with_name(args.merged_csv.stem + "_dependency")
-    (
-        nodes_path,
-        edges_path,
-        ambiguities_path,
-        summary_path,
-        counts,
-        ambiguity_counts,
-        graph_stats,
-    ) = export_dependency_tables(args.merged_csv, prefix)
-    if __package__ in (None, ""):
-        from diagnosis.resource_dependency_graph import (
-            export_resource_dependency_tables,
-        )
-    else:
-        from .resource_dependency_graph import (
-            export_resource_dependency_tables,
-        )
-    (
-        resource_nodes_path,
-        resource_edges_path,
-        resource_ambiguities_path,
-        resource_summary_path,
-        resource_stats,
-    ) = export_resource_dependency_tables(nodes_path, edges_path, prefix)
-    for kind in PHYSICAL_EDGE_KINDS:
-        print(f"{kind}={counts[kind]}")
-    for status in (
-        NOTIFY_RELATION_SINGLE,
-        NOTIFY_RELATION_AMBIGUOUS,
-        NOTIFY_RELATION_INCOMPLETE,
-        NOTIFY_RELATION_CONFLICT,
-    ):
-        print(f"notify_relation_{status}={ambiguity_counts[status]}")
-    print(f"nodes_csv={nodes_path}")
-    print(f"edges_csv={edges_path}")
-    print(f"notify_ambiguities_csv={ambiguities_path}")
-    for metric in (
-        "node_count",
-        "edge_count",
-        "isolated_nodes",
-        "missing_edge_sources",
-        "missing_edge_destinations",
-        "cycle_residual_nodes",
-        "has_cycle",
-    ):
-        print(f"graph_{metric}={graph_stats[metric]}")
-    print(f"summary_csv={summary_path}")
-    print(f"resource_nodes_csv={resource_nodes_path}")
-    print(f"resource_edges_csv={resource_edges_path}")
-    print(f"resource_ambiguities_csv={resource_ambiguities_path}")
-    print(f"resource_summary_csv={resource_summary_path}")
-    for label, metric in (
-        ("resource_task_nodes", "resource_task_nodes"),
-        ("resource_boundary_nodes", "boundary_nodes"),
-        ("resource_edge_count", "edge_count"),
-        ("resource_contraction_ambiguities", "contraction_ambiguities"),
-        ("resource_cycle_residual_nodes", "cycle_residual_nodes"),
-    ):
-        print(f"{label}={resource_stats[metric]}")
-    return 1 if (
-        ambiguity_counts[NOTIFY_RELATION_CONFLICT]
-        or resource_stats["contraction_ambiguities"]
-    ) else 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

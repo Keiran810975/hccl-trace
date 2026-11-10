@@ -1,103 +1,39 @@
-#!/usr/bin/env python3
 """Render HCCL diagnosis views as interactive HTML canvas pages."""
 
 from __future__ import annotations
 
-import argparse
 import csv
 import html
 import json
-import math
-import os
-import sys
 from collections import defaultdict
 from decimal import Decimal
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-if __package__ in (None, ""):
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from diagnosis import visualize_dependency_graph as dep
-    from diagnosis import resource_dependency_graph as resource_dep
-    from diagnosis import visualize_timeline as timeline
-    from diagnosis.dependency_model import stable_id
-else:
-    from . import visualize_dependency_graph as dep
-    from . import resource_dependency_graph as resource_dep
-    from . import visualize_timeline as timeline
-    from .dependency_model import stable_id
+from . import visualize_dependency_graph as dep
+from . import resource_dependency_graph as resource_dep
+from .dependency_model import stable_id
 
 
-def build_timeline_model(rows: List[dict], layout: str) -> dict:
-    if not rows:
-        raise ValueError("no timeline rows to render")
-    left = 170
-    top = 92
-    lane_h = 30
-    lane_gap = 8
-    node_h = 16
-    min_w = 4
-    lanes = sorted({timeline.lane_key(row) for row in rows})
-    lane_index = {key: index for index, key in enumerate(lanes)}
-    lane_items = [
-        {
-            "key": "|".join(str(v) for v in key),
-            "label": f"rank {key[2]} dev {key[1]} stream {key[3]}",
-            "y": top + index * (lane_h + lane_gap),
-            "height": lane_h,
-        }
-        for index, key in enumerate(lanes)
-    ]
-    nodes = []
-    columns = []
-    if layout == "logical":
-        column_keys = sorted({timeline.logical_column_key(row) for row in rows})
-        col_w = 92
-        col_index = {key: index for index, key in enumerate(column_keys)}
-        per_cell: Dict[Tuple[int, int], int] = defaultdict(int)
-        for row in rows:
-            lane = lane_index[timeline.lane_key(row)]
-            col = col_index[timeline.logical_column_key(row)]
-            slot = per_cell[(lane, col)]
-            per_cell[(lane, col)] += 1
-            x = left + col * col_w + 8 + (slot % 3) * 26
-            y = lane_items[lane]["y"] + 6 + (slot // 3) * 18
-            fill, stroke = timeline.row_color(row)
-            nodes.append(node_record(row, x, y, 22, node_h, fill, stroke, timeline.short_label(row)))
-        for key, index in col_index.items():
-            _phase_order, phase, step, _event_order, event = key
-            columns.append({"x": left + index * col_w, "w": col_w, "label": f"{timeline.phase_label(phase)} s{step} {timeline.short_label({'_event': event})}"})
-        width = left + len(column_keys) * col_w + 80
-    else:
-        timeline.assign_time_slots(rows)
-        min_start = min(row["_start"] for row in rows)
-        max_stop = max(row["_stop"] for row in rows)
-        span = max(1.0, max_stop - min_start)
-        scale = max(0.06, min(3.0, 24000.0 / span))
-        slot_counts: Dict[Tuple[str, int, int, int], int] = defaultdict(int)
-        for row in rows:
-            slot_counts[timeline.lane_key(row)] = max(slot_counts[timeline.lane_key(row)], row.get("_time_slot", 0) + 1)
-        for index, key in enumerate(lanes):
-            lane_items[index]["height"] = max(lane_h, 10 + slot_counts[key] * 20)
-        y_cursor = top
-        for index, key in enumerate(lanes):
-            lane_items[index]["y"] = y_cursor
-            y_cursor += lane_items[index]["height"] + lane_gap
-        for row in rows:
-            lane = lane_index[timeline.lane_key(row)]
-            x = left + (row["_start"] - min_start) * scale
-            w = max(min_w, (row["_stop"] - row["_start"]) * scale)
-            y = lane_items[lane]["y"] + 6 + row.get("_time_slot", 0) * 20
-            fill, stroke = timeline.row_color(row)
-            nodes.append(node_record(row, x, y, w, node_h, fill, stroke, timeline.short_label(row)))
-        width = left + span * scale + 100
-    height = max(item["y"] + item["height"] for item in lane_items) + 80
-    return {
-        "kind": "timeline", "layout": layout, "timeOrigin": min(row["_start"] for row in rows),
-        "width": width, "height": height, "lanes": lane_items, "columns": columns,
-        "nodes": nodes, "edges": [], "edgeKinds": [],
-    }
+EVENT_COLOR = {
+    "allreduce_start": ("#f5f5f5", "#666666"),
+    "copy_start": ("#e7f0ff", "#376eb5"),
+    "tx_ack_start": ("#fff3c4", "#9a7500"),
+    "rx_ack_start": ("#ffe8d2", "#b26000"),
+    "tx_data_signal_start": ("#f2e6ff", "#7445b7"),
+    "rx_data_signal_start": ("#e9e1ff", "#5b43a8"),
+    "tx_payload_start": ("#ddf7e7", "#26844a"),
+    "rx_payload_reduce_start": ("#ffd9bd", "#b45f06"),
+    "rx_payload_copy_start": ("#d7f2ff", "#1683a8"),
+}
 
+HARDWARE_COLOR = {
+    "sdma": ("#d7f2ff", "#1683a8"),
+    "notify_record": ("#fff3c4", "#9a7500"),
+    "notify_wait": ("#ffe8d2", "#b26000"),
+    "reduce_inline": ("#ffd9bd", "#b45f06"),
+    "rdma": ("#ddf7e7", "#26844a"),
+}
 
 def node_record(row: dict, x: float, y: float, w: float, h: float, fill: str, stroke: str, label: str) -> dict:
     task_kind = row.get("profiler_task_kind", "")
@@ -237,10 +173,9 @@ def build_execution_dependency_model(rows: List[dict], edges: List[dict],
         x = left + relative_start * scale
         y = lane_items[lane]["y"] + 6 + slot * 20
         width = max(4, (relative_stop - relative_start) * scale)
-        fill, stroke = timeline.row_color({
-            "_event": row.get("event", ""),
-            "profiler_task_kind": row.get("profiler_task_kind", ""),
-        })
+        event = row.get("event", "")
+        colors = EVENT_COLOR if event else HARDWARE_COLOR
+        fill, stroke = colors.get(event or row.get("profiler_task_kind", ""), ("#eeeeee", "#777777"))
         if row.get("_node_kind") == "operation":
             fill, stroke = "#dce9fa", "#4476a5"
         elif row.get("_node_kind") == "protocol":
@@ -369,14 +304,13 @@ def build_wait_inventory(rows: List[dict], edges: List[dict], issues: List[dict]
 
 def write_html(output: Path, title: str, model: dict) -> None:
     payload = json.dumps(model, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
-    template = PERFETTO_DEPENDENCY_TEMPLATE if model.get("kind") == "dependency" else HTML_TEMPLATE
-    page = template.replace("__TITLE__", html.escape(title)).replace("__MODEL__", payload)
+    page = PERFETTO_DEPENDENCY_TEMPLATE.replace("__TITLE__", html.escape(title)).replace("__MODEL__", payload)
     page = page.replace('__CLOCK_LABEL__', html.escape(model.get("clockLabel", "dependency")))
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(page, encoding="utf-8")
 
 
-def attach_diagnosis(model: dict, diagnosis: dict, waits: List[dict], view: str) -> None:
+def attach_diagnosis(model: dict, diagnosis: dict, waits: List[dict]) -> None:
     """Reject mismatched analysis instead of displaying another run's findings."""
     if diagnosis.get("schema_version") != 1:
         raise ValueError("unsupported diagnosis schema")
@@ -384,83 +318,15 @@ def attach_diagnosis(model: dict, diagnosis: dict, waits: List[dict], view: str)
     diagnosed = {w["wait_graph_id"]: w for w in records}
     if len(diagnosed) != len(records):
         raise ValueError("duplicate diagnosis wait identity")
-    if view != "resource" and set(diagnosed) != {w["wait_graph_id"] for w in waits}:
+    if set(diagnosed) != {w["wait_graph_id"] for w in waits}:
         raise ValueError("diagnosis and execution wait identities differ")
     scopes = {n["operationScope"] for n in model["nodes"]}
     if any(w["operation_scope"] and w["operation_scope"] not in scopes for w in records):
         raise ValueError("diagnosis operation does not belong to graph")
     node_ids = {n["id"] for n in model["nodes"]}
-    if view != "resource" and any(c["graph_id"] not in node_ids for c in diagnosis.get("candidates", [])):
+    if any(c["graph_id"] not in node_ids for c in diagnosis.get("candidates", [])):
         raise ValueError("diagnosis candidate execution missing")
     model["diagnosis"] = diagnosis
-    if view == "waits":
-        model["waits"] = [diagnosed[w["wait_graph_id"]] for w in waits]
-
-
-def write_dependency_svg(output: Path, title: str, model: dict) -> None:
-    """Write a static SVG from the same artifact-backed dependency model."""
-    node_by_id = {node["id"]: node for node in model["nodes"]}
-    parts = [
-        '<?xml version="1.0" encoding="UTF-8"?>',
-        '<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" '
-        'viewBox="0 0 {} {}">'.format(
-            int(model["width"]),
-            int(model["height"]),
-            int(model["width"]),
-            int(model["height"]),
-        ),
-        "<title>{}</title>".format(html.escape(title)),
-        '<rect width="100%" height="100%" fill="#fff"/>',
-        '<text x="12" y="24" font-family="Arial" font-size="12">{}</text>'.format(
-            html.escape(model.get("clockLabel", "dependency"))),
-    ]
-    for lane in model.get("lanes", []):
-        parts.append(
-            '<rect x="0" y="{y}" width="{w}" height="{h}" fill="#fafbfc" '
-            'stroke="#e4e7eb"/><text x="12" y="{ty}" font-family="Arial" '
-            'font-size="11" fill="#30343b">{label}</text>'.format(
-                y=lane["y"],
-                w=model["width"],
-                h=lane["height"],
-                ty=lane["y"] + 17,
-                label=html.escape(str(lane["label"])),
-            )
-        )
-    for edge in model.get("edges", []):
-        src = node_by_id.get(edge["src"])
-        dst = node_by_id.get(edge["dst"])
-        if src is None or dst is None:
-            continue
-        parts.append(
-            '<path d="M {x1} {y1} L {x2} {y2}" fill="none" '
-            'stroke="{color}" stroke-width="1" opacity=".65">'
-            "<title>{title}</title></path>".format(
-                x1=src["x"] + src["w"],
-                y1=src["y"] + src["h"] / 2,
-                x2=dst["x"],
-                y2=dst["y"] + dst["h"] / 2,
-                color=html.escape(edge["color"]),
-                title=html.escape(edge["title"]),
-            )
-        )
-    for node in model["nodes"]:
-        parts.append(
-            '<rect id="{id}" x="{x}" y="{y}" width="{w}" height="{h}" '
-            'rx="2" fill="{fill}" stroke="{stroke}"><title>{title}</title>'
-            "</rect>".format(
-                id=html.escape(node["id"]),
-                x=node["x"],
-                y=node["y"],
-                w=max(1, node["w"]),
-                h=node["h"],
-                fill=html.escape(node["fill"]),
-                stroke=html.escape(node["stroke"]),
-                title=html.escape(node["title"]),
-            )
-        )
-    parts.append("</svg>")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text("\n".join(parts), encoding="utf-8")
 
 
 PERFETTO_DEPENDENCY_TEMPLATE = r'''<!doctype html>
@@ -620,123 +486,3 @@ function drawOverview(){const W=overview.clientWidth,H=overview.clientHeight,[a,
 const colors={direct_stream_order_observed:'#444',ffts_logical_stream_order:'#5c6bc0',ffts_notify_sync_observed:'#2b8a3e',direct_notify_sync_exact:'#7b3fb3',local_notify_sync_exact:'#d9488b',resource_stream_order_observed:'#444',resource_ffts_order_observed:'#5c6bc0',resource_notify_sync_observed:'#2b8a3e',resource_notify_sync_exact:'#7b3fb3',resource_local_notify_sync_exact:'#d9488b',cross_node_notify_sync_observed:'#007c91',resource_cross_node_notify_sync_observed:'#007c91',resource_cross_node_notify_sync_semantic:'#007c91',same_node_rdma_notify_sync_observed:'#b05b00',resource_same_node_rdma_notify_sync_observed:'#b05b00',resource_same_node_rdma_notify_sync_semantic:'#b05b00'},legend=document.getElementById('legend');for(const k of model.edgeKinds){const s=text('span','', 'swatch');s.style.background=colors[k]||'#777';legend.append(s,text('span',k.replaceAll('_',' ')))}
 resize();const initialSelection=decodeURIComponent(location.hash.slice(1));if(initialSelection&&nodeById.has(initialSelection)){controls.operation.value=nodeById.get(initialSelection).operationScope||'';setSelected(initialSelection,true);renderCandidates()}else{fit();if(model.initialSelection)setSelected(model.initialSelection)}renderDetails();renderWaits();
 </script></body></html>'''
-
-
-HTML_TEMPLATE = r'''<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>__TITLE__</title>
-<style>
-html,body{margin:0;height:100%;font:13px Arial,sans-serif;color:#222;background:#fff}#bar{min-height:44px;display:flex;align-items:center;gap:8px;padding:5px 12px;border-bottom:1px solid #ddd;background:#fafafa;flex-wrap:wrap}button,select,input{height:28px;border:1px solid #bbb;background:#fff;border-radius:4px;padding:0 7px}input{width:92px}#search{width:170px}#wrap{position:fixed;left:0;right:0;top:76px;bottom:0;overflow:hidden}canvas{width:100%;height:100%;display:block;cursor:grab;outline:none}#mini{position:fixed;right:14px;bottom:14px;width:220px;height:130px;border:1px solid #bbb;background:#fff;box-shadow:0 2px 8px #0002;z-index:1;cursor:crosshair}.tip{position:fixed;display:none;max-width:560px;white-space:pre-wrap;background:#111;color:#fff;padding:8px 10px;border-radius:4px;pointer-events:none;font:12px Consolas,monospace;z-index:2}.muted{color:#666}.label{font-size:11px;color:#555}</style>
-</head><body><div id="bar"><strong>__TITLE__</strong><span class="muted">wheel pan · Ctrl+wheel zoom · hover details</span><button id="fit">Fit all</button><button id="fitSelection">Fit selection</button><button id="reset">100%</button><span class="label">device</span><select id="deviceFilter"></select><span class="label">rank</span><select id="rankFilter"></select><span class="label">stream</span><select id="streamFilter"></select><span class="label">event</span><select id="eventFilter"></select><span class="label">edge</span><select id="edgeFilter"></select><span class="label">time us</span><input id="timeStart" placeholder="start"><input id="timeStop" placeholder="stop"><input id="search" placeholder="task/event/match"><button id="clearFilters">Clear filters</button></div><div id="wrap"><canvas id="c" tabindex="0"></canvas></div><canvas id="mini" title="Click to jump"></canvas><div id="tip" class="tip"></div>
-<script>
-const model=__MODEL__;const canvas=document.getElementById('c'),ctx=canvas.getContext('2d'),mini=document.getElementById('mini'),mctx=mini.getContext('2d'),tip=document.getElementById('tip');let scale=1,ox=0,oy=0,drag=false,last=null,dirty=false;const nodeById=new Map(model.nodes.map(n=>[n.id,n]));
-const origin=model.timeOrigin||Math.min(...model.nodes.map(n=>n.start||0));const controls={device:document.getElementById('deviceFilter'),rank:document.getElementById('rankFilter'),stream:document.getElementById('streamFilter'),event:document.getElementById('eventFilter'),edge:document.getElementById('edgeFilter'),start:document.getElementById('timeStart'),stop:document.getElementById('timeStop'),search:document.getElementById('search')};
-function fillSelect(el,values){el.innerHTML='<option value="">all</option>'+[...new Set(values)].sort((a,b)=>String(a).localeCompare(String(b),undefined,{numeric:true})).map(v=>`<option>${v}</option>`).join('')}
-fillSelect(controls.device,model.nodes.map(n=>n.device));fillSelect(controls.rank,model.nodes.map(n=>n.rank));fillSelect(controls.stream,model.nodes.map(n=>n.stream));fillSelect(controls.event,model.nodes.map(n=>n.event||n.taskKind).filter(Boolean));fillSelect(controls.edge,model.edgeKinds||[...new Set((model.edges||[]).map(e=>e.kind))]);
-function nodeVisible(n){if(!n)return false;if(controls.device.value&&String(n.device)!==controls.device.value)return false;if(controls.rank.value&&String(n.rank)!==controls.rank.value)return false;if(controls.stream.value&&String(n.stream)!==controls.stream.value)return false;if(controls.event.value&&(n.event||n.taskKind)!==controls.event.value)return false;const a=parseFloat(controls.start.value),b=parseFloat(controls.stop.value),s=(n.start||0)-origin,e=(n.stop||0)-origin;if(Number.isFinite(a)&&e<a)return false;if(Number.isFinite(b)&&s>b)return false;const q=controls.search.value.trim().toLowerCase();return !q||n.title.toLowerCase().includes(q)}
-function edgeVisible(e){return(!controls.edge.value||e.kind===controls.edge.value)&&nodeVisible(nodeById.get(e.src))&&nodeVisible(nodeById.get(e.dst))}
-for(const el of Object.values(controls)){el.addEventListener('input',requestDraw);el.addEventListener('change',requestDraw)}document.getElementById('clearFilters').onclick=()=>{for(const el of Object.values(controls))el.value='';requestDraw()};
-function resize(){const d=window.devicePixelRatio||1;canvas.width=canvas.clientWidth*d;canvas.height=canvas.clientHeight*d;ctx.setTransform(d,0,0,d,0,0);mini.width=mini.clientWidth*d;mini.height=mini.clientHeight*d;mctx.setTransform(d,0,0,d,0,0);requestDraw()}window.addEventListener('resize',resize);
-function fit(){scale=Math.min(canvas.clientWidth/model.width,canvas.clientHeight/model.height)*0.96;scale=Math.max(.001,scale);ox=20;oy=20;requestDraw()}document.getElementById('fit').onclick=fit;document.getElementById('reset').onclick=()=>{scale=1;ox=0;oy=0;requestDraw()};
-function fitSelection(){const xs=model.nodes.filter(nodeVisible);if(!xs.length)return;const x0=Math.min(...xs.map(n=>n.x)),x1=Math.max(...xs.map(n=>n.x+n.w)),y0=Math.min(...xs.map(n=>n.y)),y1=Math.max(...xs.map(n=>n.y+n.h));scale=Math.max(.001,Math.min(8,Math.min((canvas.clientWidth-40)/Math.max(1,x1-x0),(canvas.clientHeight-40)/Math.max(1,y1-y0))));ox=20-x0*scale;oy=20-y0*scale;requestDraw()}document.getElementById('fitSelection').onclick=fitSelection;
-function wx(x){return (x-ox)/scale}function wy(y){return (y-oy)/scale}
-function visible(pad){return{x0:wx(0)-pad,y0:wy(0)-pad,x1:wx(canvas.clientWidth)+pad,y1:wy(canvas.clientHeight)+pad}}
-function intersects(x,y,w,h,v){return x+w>=v.x0&&x<=v.x1&&y+h>=v.y0&&y<=v.y1}
-function requestDraw(){if(dirty)return;dirty=true;requestAnimationFrame(()=>{dirty=false;draw()})}
-function draw(){ctx.clearRect(0,0,canvas.clientWidth,canvas.clientHeight);ctx.save();ctx.translate(ox,oy);ctx.scale(scale,scale);ctx.fillStyle='#fff';ctx.fillRect(wx(0),wy(0),canvas.clientWidth/scale,canvas.clientHeight/scale);const v=visible(80);drawGrid(v);drawEdges(v);drawNodes(v);ctx.restore();drawMini()}
-function drawGrid(v){ctx.font='12px Arial';ctx.textBaseline='middle';for(const col of model.columns||[]){if(col.x+col.w<v.x0||col.x>v.x1)continue;ctx.fillStyle=(Math.floor(col.x/Math.max(col.w,1))%2)?'#fff':'#fbfbfb';ctx.fillRect(col.x,Math.max(52,v.y0),col.w,Math.min(model.height-48,v.y1)-Math.max(52,v.y0));ctx.strokeStyle='#e7e7e7';ctx.beginPath();ctx.moveTo(col.x,Math.max(52,v.y0));ctx.lineTo(col.x,Math.min(model.height-48,v.y1));ctx.stroke();if(scale>.18){ctx.fillStyle='#444';ctx.fillText(col.label,col.x+8,68)}}for(const lane of model.lanes||[]){if(lane.y+lane.height<v.y0||lane.y>v.y1)continue;ctx.strokeStyle='#eee';ctx.beginPath();ctx.moveTo(Math.max(160,v.x0),lane.y+lane.height/2);ctx.lineTo(Math.min(model.width-40,v.x1),lane.y+lane.height/2);ctx.stroke();if(v.x0<170){ctx.fillStyle='#333';ctx.fillText(lane.label,22,lane.y+20)}}}
-function drawEdges(v){if(!model.edges||scale<.008)return;ctx.lineWidth=1.2;ctx.globalAlpha=scale<.22?.35:.7;for(const e of model.edges){if(!edgeVisible(e))continue;const s=nodeById.get(e.src),d=nodeById.get(e.dst);if(!s||!d)continue;const sx=s.x+s.w,sy=s.y+s.h/2,dx=d.x,dy=d.y+d.h/2;if(Math.max(sx,dx)<v.x0||Math.min(sx,dx)>v.x1||Math.max(sy,dy)<v.y0||Math.min(sy,dy)>v.y1)continue;ctx.strokeStyle=e.color||'#666';ctx.beginPath();const m=Math.max(18,Math.abs(dx-sx)*.45);ctx.moveTo(sx,sy);ctx.bezierCurveTo(sx+m,sy,dx-m,dy,dx,dy);ctx.stroke()}ctx.globalAlpha=1}
-function drawNodes(v){ctx.font='9px Arial';ctx.textAlign='center';ctx.textBaseline='middle';const showText=scale>.32;for(const n of model.nodes){if(!nodeVisible(n)||!intersects(n.x,n.y,n.w,n.h,v))continue;ctx.fillStyle=n.fill;ctx.strokeStyle=n.stroke;ctx.lineWidth=1;ctx.beginPath();ctx.roundRect(n.x,n.y,n.w,n.h,3);ctx.fill();ctx.stroke();if(showText&&n.w>18){ctx.fillStyle='#222';ctx.fillText(n.label,n.x+n.w/2,n.y+n.h/2)}}}
-function drawMini(){const w=mini.clientWidth,h=mini.clientHeight,ms=Math.min(w/model.width,h/model.height),step=Math.max(1,Math.ceil(model.nodes.length/8000));mctx.clearRect(0,0,w,h);mctx.fillStyle='#fff';mctx.fillRect(0,0,w,h);mctx.strokeStyle='#ccc';mctx.strokeRect(.5,.5,w-1,h-1);mctx.fillStyle='#7895';for(let i=0;i<model.nodes.length;i+=step){const n=model.nodes[i];if(!nodeVisible(n))continue;const x=n.x*ms,y=n.y*ms,nw=Math.max(1,n.w*ms),nh=Math.max(1,n.h*ms);if(x>w||y>h)continue;mctx.fillRect(x,y,nw,nh)}mctx.strokeStyle='#d33';mctx.lineWidth=1.5;mctx.strokeRect(wx(0)*ms,wy(0)*ms,canvas.clientWidth/scale*ms,canvas.clientHeight/scale*ms)}
-function hit(x,y){const px=wx(x),py=wy(y),v={x0:px-3/scale,y0:py-3/scale,x1:px+3/scale,y1:py+3/scale};for(let i=model.nodes.length-1;i>=0;i--){const n=model.nodes[i];if(nodeVisible(n)&&intersects(n.x,n.y,n.w,n.h,v)&&px>=n.x&&px<=n.x+n.w&&py>=n.y&&py<=n.y+n.h)return n}return null}
-function pan(dx,dy){ox+=dx;oy+=dy;requestDraw()}
-canvas.onmousedown=e=>{canvas.focus();drag=true;last=[e.clientX,e.clientY];canvas.style.cursor='grabbing'};window.onmouseup=()=>{drag=false;canvas.style.cursor='grab'};window.onmousemove=e=>{if(drag){pan(e.clientX-last[0],e.clientY-last[1]);last=[e.clientX,e.clientY];return}const n=hit(e.clientX,e.clientY-76);if(n){tip.style.display='block';tip.style.left=(e.clientX+12)+'px';tip.style.top=(e.clientY+12)+'px';tip.textContent=n.title}else{tip.style.display='none'}};
-canvas.onwheel=e=>{e.preventDefault();if(e.ctrlKey){const mx=e.clientX,my=e.clientY-76,old=scale;scale*=e.deltaY<0?1.12:.89;scale=Math.max(.001,Math.min(8,scale));ox=mx-(mx-ox)*(scale/old);oy=my-(my-oy)*(scale/old);requestDraw()}else if(e.shiftKey){pan(-e.deltaY,-e.deltaX)}else{pan(-e.deltaX,-e.deltaY)}};
-canvas.onkeydown=e=>{const step=e.shiftKey?180:60;if(e.key==='ArrowLeft'){pan(step,0);e.preventDefault()}else if(e.key==='ArrowRight'){pan(-step,0);e.preventDefault()}else if(e.key==='ArrowUp'){pan(0,step);e.preventDefault()}else if(e.key==='ArrowDown'){pan(0,-step);e.preventDefault()}else if(e.key==='0'){scale=1;ox=0;oy=0;requestDraw()}else if(e.key==='f'){fit()}};
-mini.onmousedown=e=>{const r=mini.getBoundingClientRect(),ms=Math.min(mini.clientWidth/model.width,mini.clientHeight/model.height),cx=(e.clientX-r.left)/ms,cy=(e.clientY-r.top)/ms;ox=canvas.clientWidth/2-cx*scale;oy=canvas.clientHeight/2-cy*scale;requestDraw()};
-resize();fit();
-</script></body></html>'''
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Render HCCL diagnosis views as interactive HTML canvas pages.")
-    parser.add_argument("input_csv", type=Path)
-    parser.add_argument(
-        "--view",
-        choices=("timeline", "dependency", "execution", "resource", "waits"),
-        default="timeline",
-    )
-    parser.add_argument("--layout", choices=("logical", "time"), default="logical")
-    parser.add_argument("--edges-csv", type=Path)
-    parser.add_argument("--output", type=Path)
-    parser.add_argument("--svg-output", type=Path)
-    parser.add_argument("--diagnosis", type=Path, help="Artifact-only wait analysis JSON")
-    parser.add_argument("--initial-operation", default="", help="Initially focus this exact operation scope")
-    parser.add_argument("--operations-csv", type=Path, help="Exported COMMUNICATION_OP timing artifact")
-    parser.add_argument("--issues-csv", type=Path, help="Execution Notify ambiguity artifact")
-    parser.add_argument("--waits-csv", type=Path, help="Export all local waits, including unresolved endpoints")
-    args = parser.parse_args()
-    if args.view == "timeline":
-        rows = timeline.read_rows(
-            args.input_csv,
-            include_profiler_only=args.layout == "time",
-        )
-        model = build_timeline_model(rows, args.layout)
-        output = args.output or args.input_csv.with_name(
-            args.input_csv.stem + f"_timeline_{args.layout}.html"
-        )
-        title = f"HCCL timeline ({args.layout})"
-    else:
-        if args.edges_csv is None:
-            parser.error(
-                "--edges-csv is required for dependency views; "
-                "the layout consumes exported graph artifacts"
-            )
-        rows = dep.read_graph_artifact_nodes(args.input_csv)
-        edges = dep.read_graph_artifact_edges(args.edges_csv)
-        operations = read_operation_timings(args.operations_csv) if args.operations_csv else []
-        model = build_execution_dependency_model(rows, edges, operations)
-        issues = []
-        if args.issues_csv:
-            with args.issues_csv.open(encoding="utf-8-sig", newline="") as source:
-                issues = list(csv.DictReader(source))
-        waits = build_wait_inventory(rows, edges, issues)
-        if args.view == "waits" and not waits:
-            parser.error("--view waits requires execution nodes containing NotifyWait")
-        model["waits"] = waits if args.view == "waits" else []
-        model["issueCount"] = len(issues) if args.issues_csv else None
-        model["initialOperation"] = args.initial_operation
-        if args.initial_operation and not any(n["operationScope"] == args.initial_operation for n in model["nodes"]):
-            parser.error("initial operation not present in artifact")
-        if args.diagnosis:
-            diagnosis = json.loads(args.diagnosis.read_text(encoding="utf-8-sig"))
-            try:
-                attach_diagnosis(model, diagnosis, waits, args.view)
-            except ValueError as error:
-                parser.error(str(error))
-
-        if args.waits_csv:
-            if not waits:
-                parser.error("--waits-csv requires execution nodes containing NotifyWait")
-            with args.waits_csv.open("w", encoding="utf-8", newline="") as destination:
-                writer = csv.DictWriter(destination, fieldnames=list(waits[0]))
-                writer.writeheader()
-                writer.writerows(waits)
-        graph_view = "execution" if args.view == "dependency" else args.view
-        model["graphView"] = graph_view
-        output = args.output or args.input_csv.with_name(
-            args.input_csv.stem + "_{}.html".format(graph_view)
-        )
-        title = "HCCL {} dependency graph".format(graph_view)
-    write_html(output, title, model)
-    print(f"html={output}")
-    if args.svg_output is not None:
-        if args.view == "timeline":
-            parser.error("--svg-output is supported only for dependency views")
-        write_dependency_svg(args.svg_output, title, model)
-        print(f"svg={args.svg_output}")
-    print(f"nodes={len(model['nodes'])}")
-    print(f"edges={len(model.get('edges', []))}")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Preserve vendor batch identities in a NEW consolidated DB, before diagnosis.
 
 Only this capture/export adapter reads the vendor intermediate table. Analysis
@@ -7,22 +6,14 @@ accepted, and no timestamp or stream-position matching is performed.
 """
 from __future__ import annotations
 
-import argparse
 from collections import defaultdict
 import hashlib
 import json
-import os
 from pathlib import Path
 import sqlite3
-import sys
 
-if __package__ in (None, ""):
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from diagnosis.parse_msprof_db import (MsprofDbError, TASK_BATCH_ENCODING,
-        TASK_BATCH_TABLE, _readonly_connection, _table_columns, _validate_contract)
-else:
-    from .parse_msprof_db import (MsprofDbError, TASK_BATCH_ENCODING,
-        TASK_BATCH_TABLE, _readonly_connection, _table_columns, _validate_contract)
+from .parse_msprof_db import (MsprofDbError, TASK_BATCH_ENCODING,
+    TASK_BATCH_TABLE, _readonly_connection, _table_columns, _validate_contract)
 
 
 def sha256(path: Path) -> str:
@@ -116,16 +107,3 @@ def export_identity(source_db: Path, profile: Path, output: Path) -> dict:
         source.close()
         if intermediate is not None:
             intermediate.close()
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source-db", type=Path, required=True)
-    parser.add_argument("--profile", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
-    args = parser.parse_args()
-    print(json.dumps(export_identity(args.source_db, args.profile, args.output), sort_keys=True))
-
-
-if __name__ == "__main__":
-    main()
