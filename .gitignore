@@ -20,6 +20,8 @@ Thumbs.db
 
 # build
 build/
+build_device/
+build_hccd/
 build_out/
 third_party/
 deploy/
@@ -33,6 +35,9 @@ dist/
 /.chart-data-*/
 /.codex-*/
 /captures/
+/runs/
+/reports/
+/clocks/
 /results/
 /runtime/
 /work/

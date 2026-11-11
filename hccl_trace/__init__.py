@@ -75,7 +75,16 @@ class Trace:
         self.active_iteration = stage, index
         self.occurrences = {}
         try:
-            yield self
+            before = _clocks()
+            try:
+                yield self
+            except BaseException:
+                self._write(dict(event="iteration", schema_version=1, stage=stage, iteration=index,
+                                 before=before, after=_clocks(), status="failed"))
+                raise
+            else:
+                self._write(dict(event="iteration", schema_version=1, stage=stage, iteration=index,
+                                 before=before, after=_clocks(), status="finished"))
         finally:
             self.active_iteration = None
 

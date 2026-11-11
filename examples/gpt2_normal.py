@@ -5,7 +5,6 @@ import argparse
 from contextlib import nullcontext
 import math
 import os
-import time
 
 from hccl_trace import Trace
 
@@ -97,10 +96,9 @@ def main():
                             flat = torch.cat([grad.reshape(-1) for grad in grads])
                             if flat.dtype != torch.float32:
                                 raise RuntimeError("sample expects FP32 gradients")
-                            prepare = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
                             with trace.collective(group="gpt2-data-parallel", call_site=f"gradient.bucket.{index}",
                                     operation_type="AllReduce", element_count=flat.numel(), dtype="float32",
-                                    reduction="sum", preparation_start_raw_ns=prepare):
+                                    reduction="sum"):
                                 work = dist.all_reduce(flat, op=dist.ReduceOp.SUM, async_op=True)
                             work.wait()
                             flat.div_(world)

@@ -28,7 +28,7 @@ def _complete_sdk_logs(directory):
             raise ValueError('SDK logs must be ordinary files: ' + str(path))
         runtime, calls = _read_calls(path)
         if not calls:
-            raise ValueError('SDK rank has no observable collective calls')
+            raise ValueError('SDK rank needs explicit collective observations; iteration markers alone are not sufficient')
         logs.append((path, runtime))
     return logs
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict, deque
 from dataclasses import asdict, dataclass
 from decimal import Decimal
+from heapq import nlargest
 from itertools import chain
 import json
 from pathlib import Path
@@ -44,7 +45,7 @@ class RollingOptions:
 def validate_coordinates(records):
     result, slots = {}, set()
     allowed = {"operation_scope", "stage", "iteration", "block", "bucket", "evidence",
-               "group_id", "call_site", "occurrence"}
+               "group_id", "call_site", "occurrence", "iteration_start_ns_by_rank"}
     for item in records:
         if set(item) - allowed:
             raise ValueError("call coordinates must contain only public workload binding fields")
@@ -63,6 +64,13 @@ def validate_coordinates(records):
             raise ValueError("call coordinates must be nonnegative integers")
         if not str(item.get("evidence", "")).strip():
             raise ValueError("workload-to-DB binding needs independent capture evidence")
+        if "iteration_start_ns_by_rank" in item:
+            starts = item["iteration_start_ns_by_rank"]
+            if (not named or not isinstance(starts, dict) or not starts or any(
+                    not isinstance(rank, str) or not rank.isascii() or not rank.isdecimal()
+                    or str(int(rank)) != rank or type(start) is not int or start < 0
+                    for rank, start in starts.items())):
+                raise ValueError("invalid per-rank profiler-aligned iteration origin")
         slot = (stage, item["iteration"], position(item))
         if slot in slots:
             raise ValueError("more than one operation bound to one workload call")
@@ -78,6 +86,14 @@ def load_coordinates(path):
     if any(("group_id" in item) != (data["schema_version"] == 2) for item in data["operations"]):
         raise ValueError("workload coordinate schema and location fields disagree")
     return validate_coordinates(data["operations"])
+
+
+def _iteration_offset(row, coord):
+    start = coord.get("iteration_start_ns_by_rank", {}).get(str(row["_user_rank"]))
+    if start is None:
+        return None
+    offset = waits.ns(row, "start") - start
+    return offset if offset >= 0 else None
 
 
 def _statistics(values):
@@ -172,6 +188,8 @@ def compare_tasks(rows, edges, coordinates, options, *, overlapping_copies=froze
         if coord["stage"] != "measured":
             task["comparison_status"] = "warmup_excluded"
             continue
+        if "iteration_start_ns_by_rank" in coord:
+            task["iteration_start_offset_ns"] = _iteration_offset(row, coord)
         if not physical_notify and not all(row.get(field, "") for field in ("algorithm", "phase", "event")):
             task["comparison_status"] = "unannotated_task_location"
             continue
@@ -211,6 +229,14 @@ def compare_tasks(rows, edges, coordinates, options, *, overlapping_copies=froze
                     slowdown_factor=str(Decimal(task["duration_ns"]) / center) if center else None,
                     duration_slow=_slow(task["duration_ns"], center, mad, options,
                                         propagation=task["task_kind"] == "notify_wait"))
+        offset = task.get("iteration_start_offset_ns")
+        if offset is not None:
+            previous_offsets = [_iteration_offset(r, coordinates[r["_operation_scope"]]) for r in history]
+            if all(value is not None for value in previous_offsets):
+                offset_center, offset_mad = _statistics(previous_offsets)
+                task.update(reference_iteration_start_offset_ns=str(offset_center),
+                            iteration_start_delta_ns=str(offset - offset_center),
+                            iteration_start_late=_slow(offset, offset_center, offset_mad, options, propagation=True))
         missing = copy_overlap.MIN_SOLO_SAMPLES - len(history)
         warmup_candidates = warmup_solo.get((ref_key, row["_stream_id"]), ()) if not solo_history and missing > 0 else ()
         gap_stats = None
@@ -293,6 +319,18 @@ def backtrace_report(rows, tasks, roots, traces, preparations, options, copy_obs
             task["role"] = "suspected_peer_read_impact"
     counts = Counter(source_category(r, lookup[r["graph_id"]]) for r in candidates)
     compared = sum(t["reference_count"] > 0 for t in tasks)
+    iteration_timing = {}
+    if any("iteration_start_offset_ns" in t for t in tasks):
+        late = [t for t in tasks if t.get("iteration_start_late")]
+        fields = ("graph_id", "node_id", "user_rank", "stream_id", "task_id", "iteration",
+                  "group_id", "call_site", "task_kind", "event", "iteration_start_offset_ns",
+                  "reference_iteration_start_offset_ns", "iteration_start_delta_ns",
+                  "reference_iterations", "duration_slow")
+        examples = nlargest(100, late, key=lambda t: (Decimal(t["iteration_start_delta_ns"]), t["graph_id"]))
+        iteration_timing = dict(iteration_start_observations=dict(
+            late_task_count=len(late), comparable_task_count=sum("iteration_start_delta_ns" in t for t in tasks),
+            examples=[{k: t[k] for k in fields} for t in examples],
+            meaning="Task started later relative to the recorded iteration start; not a Host preparation diagnosis."))
     return dict(schema_version=1, source_policy_version=12, source_ranking_version=0,
         candidate_admission=None, source_regions=[], recommended_candidate_ids=[], primary_source_candidate_id=None,
         reference_mode=CLEAN_TASK_REFERENCE, options=asdict(options),
@@ -309,6 +347,7 @@ def backtrace_report(rows, tasks, roots, traces, preparations, options, copy_obs
         tasks=tasks, root_causes=candidates, unresolved_observations=unresolved, primary_external_clue_id=None,
         peer_read_policy=peer_read.POLICY, peer_read_observations=peer_reads,
         input_copy_overlap_policy=copy_overlap.POLICY, input_copy_overlap_observations=list(copy_observations),
+        **iteration_timing,
         category_counts=dict(counts, unresolved_observation=len(unresolved)),
         limits=["All dependency-supported candidates are peers; no cluster, Top1, or primary candidate.",
                 "Slow Waits and tasks that only start late are propagation evidence, not root candidates.",

@@ -37,8 +37,8 @@ class Binding:
     evidence: dict
 
 
-def _read_calls(path):
-    header, calls, completions, pending, ended = None, [], {}, set(), False
+def _read_observations(path):
+    header, calls, iterations, completions, pending, ended = None, [], [], {}, set(), False
     try:
         with Path(path).open(encoding='utf-8-sig') as stream:
             for line in stream:
@@ -75,6 +75,15 @@ def _read_calls(path):
                             raise ValueError('duplicate or premature public completion observation')
                         pending.remove(sequence)
                         completions[sequence] = record['clocks']['raw_ns']
+                elif record['event'] == 'iteration':
+                    stage, index = record['stage'], record['iteration']
+                    before, after = record['before']['raw_ns'], record['after']['raw_ns']
+                    if (record.get('status') != 'finished' or stage not in ('warmup', 'measured')
+                            or type(index) is not int or index < 0
+                            or any(type(value) is not int or value < 0 for value in (before, after))
+                            or before >= after or (iterations and before < iterations[-1]['after']['raw_ns'])):
+                        raise ValueError('invalid, failed or overlapping SDK iteration markers')
+                    iterations.append(record)
                 elif record['event'] == 'capture_end':
                     if record.get('pending_sequences') != [] or pending:
                         raise ValueError('SDK capture is incomplete or missing a user-controlled completion boundary')
@@ -105,6 +114,13 @@ def _read_calls(path):
                 or any(type(call.get(k)) is not int or call[k] < 0 for k in ("iteration", "occurrence", "element_count"))
                 or any(not isinstance(call.get(k), str) or not call[k].strip() for k in ('call_site', 'group_id'))):
             raise ValueError("invalid SDK workload location")
+    if len({(r['stage'], r['iteration']) for r in iterations}) != len(iterations):
+        raise ValueError('duplicate SDK iteration marker')
+    return header, calls, iterations
+
+
+def _read_calls(path):
+    header, calls, _ = _read_observations(path)
     return header, calls
 
 
@@ -120,7 +136,6 @@ def _inventory(node):
             if not info_path.is_file():
                 raise ValueError("SDK binding needs the original profiler host/start_info clock observation")
             info = read_json(info_path)
-            offset = int(info["collectionTimeBegin"]) * 1000 - int(info["clockMonotonicRaw"])
             device, = _device_ids(db)
             ops = [dict(row) for row in db.execute(
                 "SELECT o.*,g.value AS group_name,n.value AS op_name,t.value AS operation_type "
@@ -157,7 +172,7 @@ def _inventory(node):
             if device in devices:
                 raise ValueError("duplicate per-device profiler input")
             stop_path = info_path.with_name("end_info")
-            devices[device] = dict(path=path, offset=offset, operations=linked,
+            devices[device] = dict(path=path, operations=linked,
                 clock_start=info, clock_stop=read_json(stop_path) if stop_path.is_file() else None)
     return devices
 
@@ -198,13 +213,15 @@ def bind_capture(capture, work, *, mode):
         write_json(path, manifest)
         return Binding(path, capture.iteration_map, capture.preparation_map, (),
                        dict(kind="legacy_manifest", sdk_bound_calls=0))
+    observations = {path: _read_observations(path) for path in capture.call_logs}
+    if not all(calls for _, calls, _ in observations.values()):
+        raise ValueError("explicit collective observations are required on every SDK rank")
     inventory = {n["node_id"]: _inventory(n) for n in manifest["nodes"]}
     from .aicpu_buffers import read_buffers
     pointer_facts = {}
     # Sparse optional evidence; ordinary SDK workloads still use the existing unique API proof.
     pointer_nodes = set()
-    for path in capture.call_logs:
-        header, records = _read_calls(path)
+    for header, records, _ in observations.values():
         if any("input_buffer_ptr" in call for call in records):
             if not all("input_buffer_ptr" in call for call in records):
                 raise ValueError("buffer identity observation must cover every call on a rank")
@@ -213,17 +230,17 @@ def bind_capture(capture, work, *, mode):
         if node["node_id"] in pointer_nodes:
             pointer_facts[node["node_id"]] = read_buffers(node["plog_dir"])
     bound, seen = defaultdict(list), set()
-    for path in capture.call_logs:
-        header, calls = _read_calls(path)
+    for header, calls, iterations in observations.values():
         rank, node, device = (header[k] for k in ("user_rank", "node_id", "device_id"))
         if rank in seen:
             raise ValueError("duplicate SDK rank")
         seen.add(rank)
         data = inventory[node][device]
-        ops, offset = data["operations"], data["offset"]
+        ops = data["operations"]
         clock_start, clock_stop = data["clock_start"], data["clock_stop"]
         def convert(raw, start=clock_start, stop=clock_stop):
             return raw_to_profiler(raw, start, stop)
+        rounds = {(r["stage"], r["iteration"]): r for r in iterations} if mode == "rolling" and clock_stop else {}
         if node in pointer_facts:
             with closing(_readonly_connection(str(data["path"]))) as db:
                 required = {"deviceId", "streamId", "taskId", "connectionId"}
@@ -268,8 +285,6 @@ def bind_capture(capture, work, *, mode):
                         and api["startNs"] <= op["startNs"] <= op["endNs"] <= completion_epoch):
                     matches.add(index)
             possible[call["sequence"]] = matches
-        if not calls:
-            raise ValueError("SDK rank has no observable collective calls")
         try:
             assignment = _unique_assignment(possible)
         except ValueError as error:
@@ -279,7 +294,13 @@ def bind_capture(capture, work, *, mode):
         for call in calls:
             op = ops[assignment[call["sequence"]]]
             key = tuple(call[k] for k in ("group_id", "stage", "iteration", "call_site", "occurrence"))
-            bound[key].append(dict(call=call, op=op, offset=offset, convert=convert, node_id=node, device_id=device, user_rank=rank))
+            iteration_start = None
+            marker = rounds.get(key[1:3])
+            if (marker and int(clock_start["clockMonotonicRaw"]) <= marker["before"]["raw_ns"]
+                    <= call["before"]["raw_ns"] <= call["after"]["raw_ns"] <= marker["after"]["raw_ns"]):
+                iteration_start = convert(marker["before"]["raw_ns"])
+            bound[key].append(dict(call=call, op=op, convert=convert, node_id=node,
+                                   device_id=device, user_rank=rank, iteration_start_ns=iteration_start))
     coordinates, preparations, operations, evidence = [], [], [], []
     group_names, db_owners = {}, {}
     for key, entries in sorted(bound.items()):
@@ -309,7 +330,7 @@ def bind_capture(capture, work, *, mode):
             group_names[endpoint], db_owners[owner] = op["group_name"], key[0]
             members.append(dict(node_id=entry["node_id"], device_id=entry["device_id"],
                                 group_name=op["group_name"], op_name=op["op_name"]))
-            call, api, offset = entry["call"], op["api"], entry["offset"]
+            call, api = entry["call"], op["api"]
             if "preparation_start_raw_ns" in call:
                 preparations.append(dict(operation_scope=scope, node_id=manifest["run_id"] + "/" + entry["node_id"],
                     user_rank=entry["user_rank"], device_id=entry["device_id"],
@@ -319,7 +340,11 @@ def bind_capture(capture, work, *, mode):
         if "input_buffer_ptr" in first:
             proof += "; actual DDP tensor address equals Device input address; exact reported main-stream TASK/globalTaskId/COMMUNICATION_TASK_INFO opId+groupName ownership (no task offset or order fallback)"
         operations.append(dict(operation_id=op_id, members=members, participants=participants, evidence=proof))
-        coordinates.append(dict(operation_scope=scope, **dict(zip(("group_id", "stage", "iteration", "call_site", "occurrence"), key)), evidence=proof))
+        coord = dict(operation_scope=scope, **dict(zip(("group_id", "stage", "iteration", "call_site", "occurrence"), key)), evidence=proof)
+        starts = {str(e["user_rank"]): e["iteration_start_ns"] for e in entries if e["iteration_start_ns"] is not None}
+        if starts:
+            coord["iteration_start_ns_by_rank"] = starts
+        coordinates.append(coord)
         evidence.append(dict(operation_id=op_id, participants=participants, group_id=key[0],
                              operation_type=signature[1], dtype=signature[2], element_count=signature[3],
                              reduction=signature[4],
@@ -330,8 +355,8 @@ def bind_capture(capture, work, *, mode):
     if manifest.get("operations"):
         raise ValueError("do not mix prebound legacy operations with SDK bindings")
     for node in manifest["nodes"]:
-        node["clock_validation_files"] = [str(path) for path in capture.call_logs
-            if _read_calls(path)[0]["node_id"] == node["node_id"]]
+        node["clock_validation_files"] = [str(path) for path, (header, _, _) in observations.items()
+            if header["node_id"] == node["node_id"]]
     auxiliary_count = 0
     if manifest.get("sdk_auxiliary_operation_types"):
         from .auxiliary_operations import bind_auxiliary

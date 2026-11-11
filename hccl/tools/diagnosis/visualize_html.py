@@ -82,6 +82,8 @@ def node_record(row: dict, x: float, y: float, w: float, h: float, fill: str, st
         "taskKind": task_kind, "profilerTaskKind": row.get("profiler_task_kind", ""),
         "match": row.get("match_confidence", ""),
         "start": row.get("_start", 0), "stop": row.get("_stop", 0),
+        "profilerStartNs": str(int(dep.execution_time_order_value(row, "start") * 1000)),
+        "profilerStopNs": str(int(dep.execution_time_order_value(row, "stop") * 1000)),
         "duration": row.get("_duration", 0),
         "phase": row.get("phase", row.get("_phase", "")),
         "semantic": row.get("semantic", row.get("_semantic", "")),
@@ -386,11 +388,13 @@ function renderDetails(){
  }
  sideTitle.textContent=n.nodeKind==='operation'?'Communication operation':`Task ${n.taskId}${n.subtaskId>=0?'.'+n.subtaskId:''}`;
  const kv=text('div','', 'kv');
- for(const [key,value] of [['node',n.nodeId],['device / rank',`${n.device} / ${n.rank}`],['stream',n.stream],['physical task',n.taskId],['task type',n.taskKind],['duration',`${n.duration.toFixed(3)} us`],['timing meaning',n.timingMeaning],['size (bytes)',n.sizeBytes||'unknown'],['operation',n.operationScope||'unbound'],['event',n.event||'—'],['hardware',n.hardware||'—'],['algorithm',n.algorithm||'unannotated'],['phase / step',`${n.phase||'—'} / ${n.step??'—'}`],['semantic',n.semantic||'—'],['match',n.confidence||n.match||'—'],['relative time',`+${(n.relativeStart??(n.start-(n.localTimeOrigin??model.timeMin))).toFixed(3)} – +${(n.relativeStop??(n.stop-(n.localTimeOrigin??model.timeMin))).toFixed(3)} us`]])addKV(kv,key,value??'—');
+ for(const [key,value] of [['node',n.nodeId],['device / rank',`${n.device} / ${n.rank}`],['stream',n.stream],['physical task',n.taskId],['task type',n.taskKind],['duration',`${n.duration.toFixed(3)} us`],['timing meaning',n.timingMeaning],['size (bytes)',n.sizeBytes||'unknown'],['operation',n.operationScope||'unbound'],['event',n.event||'—'],['hardware',n.hardware||'—'],['algorithm',n.algorithm||'unannotated'],['phase / step',`${n.phase||'—'} / ${n.step??'—'}`],['semantic',n.semantic||'—'],['match',n.confidence||n.match||'—'],['Observed start (ns)',n.profilerStartNs],['Observed stop (ns)',n.profilerStopNs],['relative time',`+${(n.relativeStart??(n.start-(n.localTimeOrigin??model.timeMin))).toFixed(3)} – +${(n.relativeStop??(n.stop-(n.localTimeOrigin??model.timeMin))).toFixed(3)} us`]])addKV(kv,key,value??'—');
+ const sources=(model.diagnosis?.candidates||[]).filter(c=>c.graph_id===n.id);
+ const deviceSource=sources.find(c=>c.component==='execution');
+ if(deviceSource?.delta_ns!=null)addKV(kv,'Increase (us)',(Number(deviceSource.delta_ns)/1000).toFixed(3));
  details.append(kv);
- if(n.peerReadObservation){const p=n.peerReadObservation;details.append(text('div',`Rank ${n.rank} 读取 Rank ${p.peerRank}：疑似对端影响。${p.disposition.startsWith('retained_')?'接收方本地对照未排除，保留候选。':'单列观测，不作为独立根因。'}`,'section'))}
  const host=model.observedHostSources?.[n.id];
- if(host){const box=text('div','','kv');details.append(text('div','Observed Host preparation; selected task is its device anchor, not the Host activity','section'));for(const [key,value] of [['Host rank',host.rank],['Host start (ns)',host.startNs],['Host stop (ns)',host.stopNs],['Host duration',`${host.durationUs.toFixed(3)} us`]])addKV(box,key,value);details.append(box)}
+ if(host){const box=text('div','','kv');details.append(text('div','Observed Host preparation; selected task is its device anchor, not the Host activity','section'));for(const [key,value] of [['Host rank',host.rank],['Host start (ns)',host.startNs],['Host stop (ns)',host.stopNs],['Host duration',`${host.durationUs.toFixed(3)} us`]])addKV(box,key,value);const delta=sources.find(c=>c.component==='host_preparation')?.delta_ns;if(delta!=null)addKV(box,'Host increase (us)',(Number(delta)/1000).toFixed(3));details.append(box)}
  if(n.communication){const c=n.communication,box=text('div','','kv');for(const [key,value] of [['transport',c.transport_type],['RDMA role',c.rdma_type],['reported bandwidth (Byte/s)',c.reported_bandwidth_bytes_per_s],['size/bandwidth estimate (ns)',c.bandwidth_derived_duration_ns],['duration evidence',c.duration_evidence]])addKV(box,key,value||'unavailable');details.append(box)}
  const wait=(model.waits||[]).find(w=>w.wait_graph_id===n.id);
  if(wait){details.append(text('div',`${wait.status}: ${wait.reason}`,'empty'));

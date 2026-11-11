@@ -26,7 +26,8 @@ def publish_selected_iteration_report(directory, output, normalized, roots, task
     formal = [t for t in tasks if t.get('stage') == 'measured' and type(t.get('iteration')) is int]
     if not formal:
         raise ValueError('selected-iteration view requires explicit formal coordinates')
-    epochs = epochs or [max(t['iteration'] for t in formal)]
+    late = normalized.get("iteration_start_observations", {}).get("examples", [])
+    epochs = epochs or [late[0]["iteration"] if late else max(t['iteration'] for t in formal)]
     wanted = {t['graph_id'] for t in formal if t['iteration'] in epochs}
     if not {r['graph_id'] for r in roots} <= wanted:
         raise ValueError('selected iteration does not contain every actual source anchor')
@@ -140,10 +141,8 @@ def publish_final_report(directory, output, normalized, roots, comparisons):
                                           if k != "primary_proposal"}
     rows = graph.read_graph_artifact_nodes(directory / "dep_graph_nodes.csv")
     edges = graph.read_graph_artifact_edges(directory / "dep_graph_edges.csv")
-    report = propagation.build_report(rows, edges, roots, comparisons,
-        primary_source_candidate_id=normalized.get("primary_source_id", normalized["primary_candidate_id"]), reference=normalized["reference"],
-        unresolved_observations=normalized["unresolved_observations"])
-    report["peer_read_observations"] = normalized.get("peer_read_observations", [])
+    report = propagation.build_report(rows, edges, roots, comparisons, reference=normalized["reference"],
+                                      unresolved_observations=normalized["unresolved_observations"])
     report["input_copy_overlap_observations"] = normalized.get("input_copy_overlap_observations", [])
     if normalized.get("analysis_scope"):
         report["analysis_scope"] = normalized["analysis_scope"]
@@ -152,7 +151,13 @@ def publish_final_report(directory, output, normalized, roots, comparisons):
     normalized["propagation"] = dict(report["summary"], exhaustive_downstream_search=False,
                                      physical_causation_proven=False)
     diagnosis = without_critical_path(read_json(directory / "diagnosis.json"))
-    diagnosis.update(candidates=[dict(r, id=r["root_id"], category=r["component"], evidence=r["reason"]) for r in roots],
+    # The execution model already carries exact task and Host anchor times.
+    display_candidates = [
+        dict({k: v for k, v in root.items() if k not in {"observed_start_ns", "observed_stop_ns"}},
+             id=root["root_id"], category=root["component"], evidence=root["reason"])
+        for root in roots
+    ]
+    diagnosis.update(candidates=display_candidates,
                      result_categories=normalized.get("category_counts", {}),
                      coverage=normalized["coverage"], diagnosis_status=normalized["diagnosis_status"],
                      primary_source_candidate_id=normalized["primary_candidate_id"])
@@ -175,7 +180,6 @@ def publish_final_report(directory, output, normalized, roots, comparisons):
     normalized["quality"]["notify_ambiguity_count"] = model["issueCount"]
     view.attach_diagnosis(model, diagnosis, diagnosis["waits"])
     model["waits"] = diagnosis["waits"]
-    model["resultCategories"] = normalized.get("category_counts", {})
     classifications = {t["graph_id"]: t.get("task_domain", "unknown") for t in comparisons}
     node_roles, paths = {}, {}
     for root in report["candidates"]:
@@ -191,19 +195,12 @@ def publish_final_report(directory, output, normalized, roots, comparisons):
                 node_roles.setdefault(key, "chain")
             node_roles[chain["target_wait_graph_id"]] = "wait"
         node_roles[anchor] = "host_anchor" if root["source"]["component"] == "host_preparation" else "candidate"
-    peer_reads = {item["graph_id"]: item for item in report["peer_read_observations"]}
     for node in model["nodes"]:
         node["taskDomain"] = classifications.get(node["id"], "unknown")
         if node["id"] in node_roles:
             node["diagnosisRole"] = node_roles[node["id"]]
-        if node["id"] in peer_reads:
-            item = peer_reads[node["id"]]
-            node["peerReadObservation"] = dict(peerRank=item["peer"]["user_rank"], disposition=item["disposition"])
     model["candidatePathEdges"] = {key: list(dict.fromkeys(value)) for key, value in paths.items()}
     model["observedHostSources"] = host_source_displays(roots, rows, model, alignment)
-    primary = next((r for r in roots if r["root_id"] == normalized.get("primary_source_id", normalized["primary_candidate_id"])), None)
-    if primary:
-        model["initialSelection"] = primary["graph_id"]
     model = without_critical_path(model)
     reference_kind = normalized["reference"].get("kind")
     if reference_kind == CLEAN_TASK_REFERENCE:

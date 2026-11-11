@@ -34,23 +34,14 @@ STATUS_LABELS = {
     "complete_with_timing_limits": "路径连通 · 时间证据受限",
     "complete_observed_path": "路径连通",
 }
-EVENT_LABELS = {
-    "copy_start": "Copy 数据搬运",
-    "tx_ack_start": "发出 ACK",
-    "rx_ack_start": "等待 ACK",
-    "tx_data_signal_start": "发出数据就绪通知",
-    "rx_data_signal_start": "等待数据就绪通知",
-    "rx_payload_reduce_start": "接收并归约",
-    "rx_payload_copy_start": "接收并拷贝",
-    "NOTIFY_RECORD": "发出通知",
-    "NOTIFY_WAIT": "等待通知",
+TASK_LABELS = {
+    "sdma": "SDMA Copy",
+    "reduce_inline": "Inline Reduce",
+    "reduce_tbe": "TBE Reduce",
+    "rdma": "RDMA Submit",
+    "notify_record": "Notify Record",
+    "notify_wait": "Notify Wait",
 }
-PEER_READ_DISPOSITIONS = {
-    "reported_as_suspected_peer_read_impact": "单列疑似对端影响",
-    "retained_reader_local_slowdown": "接收方也有本地 Copy 慢化，保留候选",
-    "retained_reader_local_control_incomplete": "接收方本地对照不全，保留候选",
-}
-UNRESOLVED_PREVIEW_LIMIT = 200
 
 
 def duration(value, *, signed=False):
@@ -129,7 +120,7 @@ def build_view_model(report):
     for identifier, node in report["nodes"].items():
         metrics = node["comparison"]
         nodes[identifier] = dict(node, start_ns=str(node["start_ns"]), stop_ns=str(node["stop_ns"]),
-            event_label=EVENT_LABELS.get(node["event"], node["event"] or node["task_kind"]),
+            task_label=TASK_LABELS.get(node["task_kind"], node["task_kind"] or node["event"] or "Task"),
             location=location(node), coordinate=coordinate(node), duration=duration(node["duration_ns"]),
             reference=duration(reference_value(metrics)), delta=duration(metrics.get("delta_ns"), signed=True),
             factor=factor(metrics.get("slowdown_factor")),
@@ -143,7 +134,7 @@ def build_view_model(report):
                        status_label=STATUS_LABELS[chain["status"]]) for chain in root["chains"]]
         source_label = ("跨机协议区间（不是纯传输耗时）" if source["component"] == "protocol_interval" else
                         "Host 准备区间" if source["component"] == "host_preparation" else
-                        EVENT_LABELS.get(source.get("event"), source.get("event") or "执行任务"))
+                        nodes.get(root.get("anchor_graph_id"), {}).get("task_label", source.get("event") or "Task"))
         display_source = dict(source)
         for key in ("observed_start_ns", "observed_stop_ns"):
             if display_source.get(key) is not None:
@@ -158,28 +149,13 @@ def build_view_model(report):
                              if source["component"] == "host_preparation" else location(source)),
             duration=duration(source["duration_ns"]), reference=duration(reference_value(source)),
             delta=duration(source["delta_ns"], signed=True), factor=factor(source["slowdown_factor"]),
-            region_budget=duration(source.get("source_region_budget_ns")),
-            supported_wait_excess=duration(source.get("supported_wait_max_excess_ns")),
             wait_ranks=sorted({nodes[c["target_wait_graph_id"]]["user_rank"] for c in chains
                                if c["target_wait_graph_id"] in nodes}, key=str)))
-    unresolved = report.get('unresolved_observations', [])
-    epochs = (report.get('analysis_scope') or {}).get('iterations')
-    visible = [item for item in unresolved if not epochs or item.get('iteration') in epochs]
-    peer_reads = [dict(item, disposition_label=PEER_READ_DISPOSITIONS[item["disposition"]],
-                       duration=duration(item["reader"]["duration_ns"]),
-                       reference=duration(item["reader"]["reference_mean_ns"]),
-                       controls=[dict(rank=f["user_rank"], peer=f["peer_rank"], duration=duration(f["duration_ns"]))
-                                 for f in item["other_receivers"]])
-                  for item in report.get("peer_read_observations", [])]
     overlaps = report.get("input_copy_overlap_observations", [])
     explained_pairs = sum(o["disposition"] == "explained_by_input_copy_overlap" for o in overlaps)
     return dict(summary=report["summary"], candidates=candidates, nodes=nodes,
-                peer_read_observations=peer_reads,
                 input_copy_overlap_summary=dict(explained_pairs=explained_pairs, retained_pairs=len(overlaps) - explained_pairs),
                 analysis_scope=report.get("analysis_scope"),
-                unresolved_observations=visible[:UNRESOLVED_PREVIEW_LIMIT],
-                unresolved_observation_count=len(unresolved), unresolved_in_view_count=len(visible),
-                unresolved_preview_limit=UNRESOLVED_PREVIEW_LIMIT,
                 origins={node:str(value) for node, value in origins.items()},
                 timing_labels=TIMING_LABELS, boundary_labels=BOUNDARY_LABELS)
 
@@ -192,12 +168,8 @@ def render_html(report):
         data = data.replace(value, escaped)
     page = PAGE.replace("__MODEL__", data)
     if report.get("reference", {}).get("statistic") == "median":
-        page = page.replace("参考为同一次运行前5个正式 iteration 的同定位任务均值，不是外部 baseline。",
-                            "参考为独立正常采集的可比任务中位数（Baseline）；结构参考不代表跨采集任务身份。")
         page = page.replace("前5轮均值", "Baseline 中位数").replace("参考均值", "参考中位数")
     elif report.get("reference", {}).get("kind") == CLEAN_TASK_REFERENCE:
-        page = page.replace("参考为同一次运行前5个正式 iteration 的同定位任务均值，不是外部 baseline。",
-                            "设备任务取最近至多5个未标慢的可比正式样本；不足5个按实际数量取均值。Host 准备区间仍使用连续前5轮。")
         page = page.replace("前5轮均值", "参考均值")
     return page
 
@@ -210,11 +182,10 @@ PAGE = r"""<!doctype html>
 header{padding:20px 24px 16px;border-bottom:1px solid #d9dde2;display:flex;gap:20px;align-items:center;justify-content:space-between;flex-wrap:wrap}
 h1{font-size:24px;margin:0 0 4px}h2{font-size:20px;margin:0 0 8px}h3{font-size:15px;margin:0 0 10px}p{margin:6px 0}a{color:#1268a5}small,.muted{color:#59636d}small{font-size:12px}
 code{font:12px/1.5 ui-monospace,monospace;overflow-wrap:anywhere}button,input,select{font:inherit;color:inherit}button,select{cursor:pointer}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid #1268a5;outline-offset:2px}
-#unresolved-items{overflow-wrap:anywhere}
 .downloads{display:flex;gap:16px;flex-wrap:wrap}.layout{display:grid;grid-template-columns:240px minmax(0,1fr);max-width:1600px;margin:auto}
 aside{background:#f6f7f8;border-right:1px solid #d9dde2;padding:18px 12px}aside label{display:block;font-weight:600;margin-bottom:8px}input{width:100%;padding:8px;border:1px solid #b5bec7;border-radius:4px;background:#fff;margin-bottom:12px}
 #candidates{display:grid;gap:2px}.candidate{border:0;border-left:3px solid transparent;background:transparent;text-align:left;padding:10px;min-width:0;overflow-wrap:anywhere}.candidate[aria-pressed=true]{background:#e6f1fa;border-left-color:#1268a5}.candidate strong,.candidate small{display:block}.candidate small{margin-top:3px}.candidate[hidden]{display:none}
-main{padding:22px 28px;min-width:0}.source-top{display:flex;align-items:flex-start;gap:12px;justify-content:space-between}.tag{display:inline-block;font-size:12px;background:#edf1f4;padding:3px 7px;border-radius:3px;white-space:nowrap}.primary{color:#1268a5;background:#e6f1fa}
+main{padding:22px 28px;min-width:0}.source-top{display:flex;align-items:flex-start;gap:12px;justify-content:space-between}.tag{display:inline-block;font-size:12px;background:#edf1f4;padding:3px 7px;border-radius:3px;white-space:nowrap}
 .metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin:20px 0;padding:16px 0;border-top:1px solid #e0e4e8;border-bottom:1px solid #e0e4e8}.metric span{display:block;color:#59636d;font-size:12px}.metric strong{display:block;font-size:21px;font-weight:600;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}.increase{color:#b53e20}
 .source-top>div{min-width:0;max-width:100%;overflow-wrap:anywhere}
 .scope{display:flex;gap:10px 24px;flex-wrap:wrap;margin-bottom:8px}.scope strong{font-variant-numeric:tabular-nums}.limit{font-size:12px;color:#59636d;border-left:3px solid #adb5bd;padding-left:10px;margin:12px 0}.warning{color:#845310;background:#fff5df;padding:9px 12px;border-radius:3px}.boundary{color:#a63124;background:#fdf0ed;padding:10px 12px}
@@ -230,16 +201,13 @@ details{border-top:1px solid #d9dde2;margin-top:20px;padding-top:12px}summary{cu
 <header><div><h1>异常传播诊断</h1><div id="report-counts" class="muted"></div><div id="analysis-scope" class="muted" hidden></div></div>
 <nav class="downloads" aria-label="诊断结果"><a href="root_causes.json">根因候选 JSON</a><a href="execution.html">执行依赖图</a></nav></header>
 <p id="input-copy-overlap-summary" class="muted" style="margin:16px 24px" hidden></p>
-<details id="unresolved-section" style="margin:16px 24px"><summary id="unresolved-title">未归因观测</summary><p>没有完整证据的慢任务或等待，不作为通信内部根因。</p><div id="unresolved-items"></div></details>
-<details id="peer-read-section" style="margin:16px 24px" hidden><summary id="peer-read-title">疑似对端读取影响</summary><p>比较同次通信的同阶段、同一步和同字节数。这里是方向性慢化线索，不是 Notify 依赖边，也未证明对端物理故障。</p><div id="peer-read-items"></div></details>
 <div class="layout" id="layout"><aside><label for="search">按类别查看</label><input id="search" type="search" placeholder="Rank / iter / 任务名" autocomplete="off"><nav id="candidates" aria-label="分类诊断结果"></nav><p id="no-matches" class="muted" hidden>没有匹配的结果</p></aside>
-<main id="main"><section aria-labelledby="source-title"><div class="source-top"><div><h2 id="source-title"></h2><p id="source-location"></p><p id="source-coordinate" class="muted"></p><p id="source-region" class="muted"></p></div><span id="primary-tag" class="tag"></span></div>
-<p id="peer-context" class="muted" hidden></p><div id="source-metrics" class="metrics"></div><div id="scope" class="scope"></div><p id="observed-impact" class="muted"></p><p id="completion-evidence" class="limit" hidden></p><p id="source-limit" class="limit"></p><p id="truncation" class="warning" hidden></p></section>
+<main id="main"><section aria-labelledby="source-title"><div class="source-top"><div><h2 id="source-title"></h2><p id="source-location"></p><p id="source-coordinate" class="muted"></p></div><span id="category-tag" class="tag"></span></div>
+<p id="peer-context" class="muted" hidden></p><div id="source-metrics" class="metrics"></div><p id="source-time" class="node-meta"></p><div id="scope" class="scope"></div><p id="observed-impact" class="muted"></p><p id="completion-evidence" class="limit" hidden></p><p id="source-limit" class="limit"></p><p id="truncation" class="warning" hidden></p></section>
 <div class="controls"><div><label for="rank-filter">目标 Rank</label><select id="rank-filter"></select></div><div><label for="branch-select">等待分支</label><select id="branch-select"></select></div></div>
 <section id="chain-panel" aria-labelledby="chain-title"><h3 id="chain-title">源头到等待的路径</h3><span id="chain-status" class="status"></span><p id="chain-sentence" class="sentence"></p><p id="host-anchor" class="host-anchor" hidden>Host 区间与下方设备 Record 是观测关联，不是新增的 Host → 设备依赖边。</p><ol id="flow" class="flow" aria-label="源头到目标 Wait 的有序依赖路径"></ol><div id="boundaries"></div>
 <details id="evidence"><summary>完整逐跳证据 <span id="edge-count"></span></summary><div class="table-wrap"><table class="evidence-table"><thead><tr><th>步骤</th><th>任务定位 / 图节点</th><th>任务耗时 / 参考均值 / 增量</th><th>进入此任务的依赖证据</th></tr></thead><tbody id="evidence-rows"></tbody></table></div><p id="time-origins" class="node-meta"></p></details></section>
-<details id="wait-details"><summary>关联 Wait 明细 <span id="wait-count"></span></summary><div class="table-wrap"><table class="wait-table"><thead><tr><th>Rank / stream / task</th><th>Wait</th><th>前5轮均值</th><th>当前耗时</th><th>增量</th><th>路径状态</th></tr></thead><tbody id="wait-rows"></tbody></table></div></details>
-<details id="limitations"><summary>诊断边界</summary><p>候选源头沿已报告的真实依赖关联到慢 Wait，不等于已证明物理故障类型，也不代表该 Wait 的全部增量由此源头造成。多个并发 Wait 的增量不能相加为整个 workload 的损失。</p><p>这里只展开分析器已经报告的路径，不穷尽全部下游。缺边不补边；跨节点时钟未校准时不计算全局时差。</p><p>参考为同一次运行前5个正式 iteration 的同定位任务均值，不是外部 baseline。</p></details>
+<details id="wait-details"><summary>关联 Wait 明细 <span id="wait-count"></span></summary><div class="table-wrap"><table class="wait-table"><thead><tr><th>Rank / stream / task</th><th>Wait</th><th>前5轮均值</th><th>当前耗时</th><th>增量</th><th>开始 (ns)</th><th>结束 (ns)</th><th>路径状态</th></tr></thead><tbody id="wait-rows"></tbody></table></div></details>
 <footer>候选平行展示，编号不表示优先级；不使用异常注入位置生成或筛选传播路径。</footer></main></div>
 <script id="propagation-data" type="application/json">__MODEL__</script><script>
 "use strict";
@@ -251,18 +219,12 @@ let activeBranch=0;
 const target=chain=>model.nodes[chain.target_wait_graph_id];
 const edgeLabel=hop=>hop.kind==="direct_stream_order_observed"?"同流顺序":hop.kind.includes("notify_sync")?"Record → Wait 通知配对":hop.kind;
 const metric=(label,value,extra="")=>`<div class="metric"><span>${esc(label)}</span><strong class="${extra}">${esc(value)}</strong></div>`;
+const interval=(start,stop)=>start==null||stop==null?"不可用":`${start} – ${stop} ns`;
 $("report-counts").textContent=`${model.summary.communication_source_count??model.summary.candidate_count} 个通信内部候选 · ${model.summary.external_clue_count??0} 个外部线索 · ${model.summary.chain_count} 条已报告路径`;
 const copyOverlap=model.input_copy_overlap_summary;
 if(copyOverlap.explained_pairs||copyOverlap.retained_pairs){const p=$("input-copy-overlap-summary");p.hidden=false;p.textContent=`双流输入 Copy：${copyOverlap.explained_pairs} 对的单条慢化已由重叠解释；${copyOverlap.retained_pairs} 对未排除。证据见根因 JSON。`;}
-const peerReads=model.peer_read_observations;
-$("peer-read-section").hidden=!peerReads.length;
-$("peer-read-title").textContent=`疑似对端读取影响（${peerReads.length} 条）`;
-$("peer-read-items").innerHTML=peerReads.map(o=>`<p><strong>Rank ${esc(o.reader.user_rank)} 读 Rank ${esc(o.peer.user_rank)}</strong> · iter ${esc(o.iteration)} · task ${esc(o.reader.task_id)} · ${esc(o.phase)} step ${esc(o.step)}<br>${esc(o.reference)} → ${esc(o.duration)}；其他对照：${o.controls.map(c=>`Rank ${esc(c.rank)} 读 Rank ${esc(c.peer)}：${esc(c.duration)}`).join("，")}。<br>${esc(o.disposition_label)}；对端 ${o.peer_local_slow_copies.length} 条同尺寸输入 Copy 慢化。</p>`).join("");
 if(model.analysis_scope?.kind==="selected_iteration_slice_from_original_artifacts"){$("analysis-scope").hidden=false;$("analysis-scope").textContent=`原图切片 · 正式 iteration ${model.analysis_scope.iterations.join(", ")} · 非全采集`;}
 if(model.analysis_scope?.kind==="selected_call_slice_from_original_artifacts"){$("analysis-scope").hidden=false;$("analysis-scope").textContent=`原图通信调用切片 · ${model.analysis_scope.selected_operation_scopes.length} 次通信 · 非完整迭代或全采集`;}
-$("unresolved-title").textContent=`未归因观测（完整 ${model.unresolved_observation_count} · 当前视图 ${model.unresolved_in_view_count} · 展示 ${model.unresolved_observations.length}）`;
-const arrivalText=item=>{const a=item.arrival_observation;if(!a)return "";return `<br>到达时序观测：${a.status==="waiter_advanced_without_observed_producer_delay"?"等待方更早到达，未观察到通知方晚到":a.status==="producer_later_observed"?"观察到通知方晚到，原因尚未确定":"变化混合或在时间分辨率内"}；等待开始变化 ${(Number(a.waiter_start_delta_ns)/1000).toFixed(3)} μs，通知完成变化 ${(Number(a.producer_stop_delta_ns)/1000).toFixed(3)} μs。该观测不是故障根因。`;};
-$("unresolved-items").innerHTML=model.unresolved_observations.map(item=>`<p><strong>${esc(item.status)}</strong> · ${esc(item.node_id)} · Rank ${esc(item.user_rank)} · iter ${esc(item.iteration)} · ${esc(item.graph_id||item.wait_graph_id)}${item.notify_pairing_status==="paired"?" · 已有唯一通知配对，尚未定位慢执行源头":""}<br>${esc(item.reason||JSON.stringify(item.boundary_reason_counts||{}))}${arrivalText(item)}</p>`).join("");
 function renderNavigation(){
   $("candidates").innerHTML=["communication_source_candidate","external_anomaly_clue"].map(category=>`<h3>${category==="communication_source_candidate"?"通信内部源头候选":"外部异常线索"}</h3>`+model.candidates.map((root,i)=>root.diagnosis_category!==category?"":`<button type="button" class="candidate" data-root="${i}" aria-pressed="${i===selected}"><strong>候选 ${root.category_rank} · Rank ${esc(root.source.user_rank)}</strong><span>${esc(root.source_label)}</span><small>iter ${esc(root.source.iteration)} · ${esc(root.delta)} · ${esc(root.factor)}</small></button>`).join("")).join("");
   applySearch();
@@ -280,9 +242,9 @@ function renderRoot(){
   $("peer-context").hidden=peer?.peer_identity_status!=="matched_semantic_peer_and_unique_operation_participant";
   $("peer-context").textContent=peer?`任务执行于 Rank ${peer.executing_rank}；通信对端为 ${(peer.peer_node_id||"?").split("/").pop()} / Rank ${peer.peer_rank} / device ${peer.peer_device_id??"?"}。对端信息不等于已证明的故障位置。`:"";
   $("source-coordinate").textContent=`${root.coordinate} · ${root.source.event||root.source_label} · 参考轮次 ${(root.source.reference_iterations||[]).join(", ")||"未知"}`;
-  $("source-region").textContent=root.source.source_region_rank?`源头候选段 #${root.source.source_region_rank} · 段内去重执行增量排序预算 ${root.region_budget} · 关联 Wait 最大增量 ${root.supported_wait_excess}。排序预算不是因果贡献或训练损失。`:"";
-  $("primary-tag").textContent=root.category_label;$("primary-tag").className="tag";
+  $("category-tag").textContent=root.category_label;
   $("source-metrics").innerHTML=metric("前5轮均值",root.reference)+metric("当前耗时",root.duration)+metric("耗时增量",root.delta,"increase")+metric("慢化倍数",root.factor);
+  $("source-time").textContent=`起止时间（本地 profiler）：${interval(root.source.observed_start_ns,root.source.observed_stop_ns)}`;
   const complete=root.chains.filter(c=>c.path_complete).length;
   $("scope").innerHTML=`<span>关联 Wait <strong>${root.chains.length}</strong></span><span>已连通路径 <strong>${complete}</strong></span><span>目标 Rank <strong>${esc(root.wait_ranks.join(" / ")||"无")}</strong></span>`;
   $("observed-impact").textContent=root.source.event_slow===true?"该节点上的本次通信区间也满足慢化条件；尚未证明整个 iteration 或 workload 的完成时间受影响。":root.source.event_slow===false?"局部任务和等待发生慢化，但该节点上的本次通信区间未达到整体慢化条件；不等同于已确认故障。":"通信整体完成影响尚未评估；候选不等于已确认故障。";
@@ -295,13 +257,13 @@ function renderRoot(){
   $("rank-filter").innerHTML='<option value="all">全部 Rank</option>'+root.wait_ranks.map(rank=>`<option value="${esc(rank)}">Rank ${esc(rank)}</option>`).join("");
   $("rank-filter").disabled=!root.chains.length;
   $("wait-count").textContent=`（${root.chains.length}）`;
-  $("wait-rows").innerHTML=root.chains.map((chain,i)=>{const wait=target(chain);return `<tr><td><button class="table-button" data-branch="${i}">${wait?`Rank ${esc(wait.user_rank)} / ${esc(wait.stream_id)} / ${esc(wait.task_id)}`:"端点缺失"}</button></td><td>${esc(wait?.event||"Wait")}</td><td>${esc(wait?.reference||"不可比")}</td><td>${esc(wait?.duration||"未知")}</td><td>${esc(wait?.delta||"不可比")}</td><td>${esc(chain.status_label)}</td></tr>`;}).join("");
+  $("wait-rows").innerHTML=root.chains.map((chain,i)=>{const wait=target(chain);return `<tr><td><button class="table-button" data-branch="${i}">${wait?`Rank ${esc(wait.user_rank)} / ${esc(wait.stream_id)} / ${esc(wait.task_id)}`:"端点缺失"}</button></td><td>${esc(wait?.task_label||"Notify Wait")}</td><td>${esc(wait?.reference||"不可比")}</td><td>${esc(wait?.duration||"未知")}</td><td>${esc(wait?.delta||"不可比")}</td><td>${esc(wait?.start_ns||"不可用")}</td><td>${esc(wait?.stop_ns||"不可用")}</td><td>${esc(chain.status_label)}</td></tr>`;}).join("");
   renderBranches();renderNavigation();
 }
 function renderBranches(){
   const root=model.candidates[selected], rank=$("rank-filter").value;
   const visible=root.chains.map((chain,i)=>({chain,i})).filter(({chain})=>rank==="all"||String(target(chain)?.user_rank)===rank);
-  $("branch-select").innerHTML=visible.map(({chain,i})=>{const wait=target(chain);return `<option value="${i}">分支 ${i+1} · Rank ${esc(wait?.user_rank)} · ${esc(wait?.event||"Wait")} · 增量 ${esc(wait?.delta||"不可比")}</option>`;}).join("");
+  $("branch-select").innerHTML=visible.map(({chain,i})=>{const wait=target(chain);return `<option value="${i}">分支 ${i+1} · Rank ${esc(wait?.user_rank)} · ${esc(wait?.task_label||"Notify Wait")} · 增量 ${esc(wait?.delta||"不可比")}</option>`;}).join("");
   $("branch-select").disabled=!visible.length;$("chain-panel").hidden=!visible.length;
   if(!visible.length){$("scope").insertAdjacentHTML("beforeend",'<span class="muted">没有已报告的下游路径</span>');return;}
   activeBranch=visible[0].i;renderChain();
@@ -316,9 +278,9 @@ function renderChain(){
     if(segment.kind==="group")return `<li class="stage fold"><div class="rank">Rank ${esc(node.user_rank)}</div><div class="rail"></div><div class="stage-content">${incoming}<strong>同流推进 · ${segment.node_ids.length} 个中间任务</strong><div class="node-meta">${esc(node.node_id.split("/").pop())} · stream ${esc(node.stream_id)} · observed</div></div></li>`;
     const isSource=segment.position===0&&root.anchor_meaning!=="observed_device_anchor_only";
     const kind=isSource?"source":node.task_kind==="notify_record"?"record":node.task_kind==="notify_wait"?"wait":"task";
-    const role=isSource?"慢源头候选":segment.position===0&&root.anchor_meaning==="observed_device_anchor_only"?"设备 Record 锚点":kind==="record"?"发送通知 Record":kind==="wait"?"等待通知 Wait":"中间任务";
+    const role=isSource?"慢源头候选":segment.position===0&&root.anchor_meaning==="observed_device_anchor_only"?"设备锚点":node.graph_id===chain.target_wait_graph_id?"等待端点":"中间任务";
     const warning=hop&&chain.timing_warnings.includes(hop.edge_id)?`<div class="timing-warning">${esc(model.timing_labels[hop.timing_status]||hop.timing_status)}</div>`:"";
-    return `<li class="stage node-${kind}" data-node="${esc(node.graph_id)}"><div class="rank">Rank ${esc(node.user_rank)}<small>${esc(node.node_id.split("/").pop())}</small></div><div class="rail"></div><div class="stage-content">${incoming}<div class="stage-head"><span class="role">${role}</span><strong>${esc(node.event_label)}</strong></div><div class="node-metrics"><span>当前 <b>${esc(node.duration)}</b></span><span>参考 ${esc(node.reference)}</span><span class="${node.comparison.duration_slow?"increase":""}">增量 ${esc(node.delta)}</span></div><div class="node-meta">${esc(node.event||node.task_kind)} · stream ${esc(node.stream_id)} · task ${esc(node.task_id)} · ${esc(node.coordinate)}</div>${warning}</div></li>`;
+    return `<li class="stage node-${kind}" data-node="${esc(node.graph_id)}"><div class="rank">Rank ${esc(node.user_rank)}<small>${esc(node.node_id.split("/").pop())}</small></div><div class="rail"></div><div class="stage-content">${incoming}<div class="stage-head"><span class="role">${role}</span><strong>${esc(node.task_label)}</strong></div><div class="node-metrics"><span>当前 <b>${esc(node.duration)}</b></span><span>参考 ${esc(node.reference)}</span><span class="${node.comparison.duration_slow?"increase":""}">增量 ${esc(node.delta)}</span></div><div class="node-meta">起止时间（本地 profiler）：${esc(interval(node.start_ns,node.stop_ns))}</div><div class="node-meta">${esc(node.event||node.task_kind)} · stream ${esc(node.stream_id)} · task ${esc(node.task_id)} · ${esc(node.coordinate)}</div>${warning}</div></li>`;
   }).join("");
   $("boundaries").innerHTML=chain.boundaries.map(boundary=>`<p class="boundary">证据断点：${esc(model.boundary_labels[boundary.reason]||boundary.reason)}<br><code>${esc(boundary.edge_id||boundary.graph_id||"")}</code></p>`).join("");
   $("edge-count").textContent=`（${chain.node_ids.length} 个任务 / ${chain.edge_ids.length} 条边）`;

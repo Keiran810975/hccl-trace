@@ -213,6 +213,9 @@ def main(argv=None):
         return 128 + getattr(error, 'signum', 2)
     print("status={} candidates={} chains={} output={}".format(result["status"], len(result.get("source_candidates", result["candidates"])),
           result["propagation"]["chain_count"], args.output.absolute()))
+    if "iteration_start_observations" in result:
+        print("relative late starts={} (not Host causes)".format(
+            result["iteration_start_observations"]["late_task_count"]))
     return 0
 
 
