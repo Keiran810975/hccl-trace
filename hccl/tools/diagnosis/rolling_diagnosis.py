@@ -118,6 +118,23 @@ def compare_tasks(rows, edges, coordinates, options, *, overlapping_copies=froze
     for scope, group in groups.items():
         for row in group:
             signatures[scope][signature(row)].append(row)
+
+    def reference_key(scope, row, key):
+        return position(coordinates[scope]), shapes[scope], key, row["_node_id"], row["_device_id"]
+
+    warmup_solo = defaultdict(list)
+    if overlapping_copies:
+        warmup_scopes = sorted((s for s, c in coordinates.items() if copy_overlap.is_warmup_reference(c)),
+                               key=lambda s: coordinates[s]["iteration"], reverse=True)
+        for scope in warmup_scopes:
+            for key, members in signatures[scope].items():
+                if len(members) != 1:
+                    continue
+                row = members[0]
+                if (copy_overlap.is_input_copy(row) and row["_graph_id"] not in overlapping_copies
+                        and waits.duration(row) > 0):
+                    warmup_solo[reference_key(scope, row, key), row["_stream_id"]].append(row)
+
     accepted = defaultdict(lambda: deque(maxlen=options.window))
     # Admit observations in measured-iteration order, not graph row order.
     measured = set(by_slot.values())
@@ -161,7 +178,8 @@ def compare_tasks(rows, edges, coordinates, options, *, overlapping_copies=froze
         if len(signatures[scope][key]) != 1:
             task["comparison_status"] = "ambiguous_task_location"
             continue
-        buffer = accepted[(position(coord), shapes[scope], key, row["_node_id"], row["_device_id"])]
+        ref_key = reference_key(scope, row, key)
+        buffer = accepted[ref_key]
         solo_history = row["_graph_id"] not in overlapping_copies
         if not buffer:
             task["comparison_status"] = "no_prior_comparable_sample"
@@ -176,8 +194,6 @@ def compare_tasks(rows, edges, coordinates, options, *, overlapping_copies=froze
                         if physical_notify else "unique semantic location")
         durations = [waits.duration(r) for r in history]
         center, mad = _statistics(durations)
-        if not solo_history:
-            task["copy_solo_max_ns"] = max(durations)
         start_center, start_mad = _statistics([waits.ns(r, "start") - origins[(r["_operation_scope"], r["_node_id"])] for r in history])
         representative = min(history, key=lambda r: (abs(Decimal(waits.duration(r)) - center), r["_graph_id"]))
         task.update(comparison_status=CLEAN_TASK_REFERENCE,
@@ -195,12 +211,33 @@ def compare_tasks(rows, edges, coordinates, options, *, overlapping_copies=froze
                     slowdown_factor=str(Decimal(task["duration_ns"]) / center) if center else None,
                     duration_slow=_slow(task["duration_ns"], center, mad, options,
                                         propagation=task["task_kind"] == "notify_wait"))
-        if task["gap_before_ns"] is not None and all(r["_graph_id"] in gaps for r in history):
+        missing = copy_overlap.MIN_SOLO_SAMPLES - len(history)
+        warmup_candidates = warmup_solo.get((ref_key, row["_stream_id"]), ()) if not solo_history and missing > 0 else ()
+        gap_stats = None
+        if (task["gap_before_ns"] is not None or warmup_candidates) and all(r["_graph_id"] in gaps for r in history):
             gap_center, gap_mad = _statistics([gaps[r["_graph_id"]] for r in history])
+            gap_stats = gap_center, gap_mad
+        if task["gap_before_ns"] is not None and gap_stats is not None:
             task.update(reference_gap_mean_ns=str(gap_center), reference_gap_mad_ns=str(gap_mad),
                         gap_delta_ns=str(Decimal(task["gap_before_ns"]) - gap_center),
                         gap_slow=_slow(task["gap_before_ns"], gap_center, gap_mad, options))
         task["is_slow"] = task["duration_slow"] or task["gap_slow"]
+        if not solo_history:
+            # Warmup supplements only the pair budget, never the formal slowdown reference.
+            warmup = []
+            for prior in warmup_candidates:
+                prior_id = prior["_graph_id"]
+                duration = waits.duration(prior)
+                if (_slow(duration, center, mad, options)
+                        or (gap_stats is not None and prior_id in gaps
+                            and _slow(gaps[prior_id], *gap_stats, options))):
+                    continue
+                warmup.append(dict(stage="warmup", iteration=coordinates[prior["_operation_scope"]]["iteration"],
+                                   graph_id=prior_id, duration_ns=duration))
+                if len(warmup) == missing:
+                    break
+            task["copy_solo_warmup_references"] = warmup
+            task["copy_solo_max_ns"] = max(chain(durations, (ref["duration_ns"] for ref in warmup)))
         if solo_history and not task["is_slow"]:
             buffer.append((coord["iteration"], row))
     return tasks
@@ -210,8 +247,9 @@ def analyze(rows, edges, coordinates, options=RollingOptions(), *, preparations=
     options.validate()
     coordinates = validate_coordinates(list(coordinates.values()))
     comparison.evidence_adjacency(rows, edges)
-    pairs, overlapping = copy_overlap.discover(rows, {scope for scope, c in coordinates.items()
-                                                       if c["stage"] == "measured"})
+    pairs, overlapping = copy_overlap.discover(
+        rows, {scope for scope, c in coordinates.items() if c["stage"] == "measured"},
+        warmup_scopes={scope for scope, c in coordinates.items() if copy_overlap.is_warmup_reference(c)})
     tasks = compare_tasks(rows, edges, coordinates, options, overlapping_copies=overlapping)
     copy_observations = copy_overlap.explain(pairs, tasks)
     roots, traces = wait_backtrace.trace_sources(rows, edges, tasks, options, alignment=alignment)
@@ -255,7 +293,7 @@ def backtrace_report(rows, tasks, roots, traces, preparations, options, copy_obs
             task["role"] = "suspected_peer_read_impact"
     counts = Counter(source_category(r, lookup[r["graph_id"]]) for r in candidates)
     compared = sum(t["reference_count"] > 0 for t in tasks)
-    return dict(schema_version=1, source_policy_version=11, source_ranking_version=0,
+    return dict(schema_version=1, source_policy_version=12, source_ranking_version=0,
         candidate_admission=None, source_regions=[], recommended_candidate_ids=[], primary_source_candidate_id=None,
         reference_mode=CLEAN_TASK_REFERENCE, options=asdict(options),
         status="analyzed" if compared else "no_comparable_history",
@@ -275,7 +313,7 @@ def backtrace_report(rows, tasks, roots, traces, preparations, options, copy_obs
         limits=["All dependency-supported candidates are peers; no cluster, Top1, or primary candidate.",
                 "Slow Waits and tasks that only start late are propagation evidence, not root candidates.",
                 "Late release cannot explain an increase in the task's own execution duration.",
-                "Only evidenced single-node Ring input-copy pairs within the prior solo budget qualify for an overlap explanation; timing is not proof of a hardware bottleneck.",
+                "Only evidenced single-node Ring input-copy pairs within 1.2 times the solo budget qualify for an overlap explanation. If needed, warmup rounds 6-10 only supplement that budget. Timing is not proof of a hardware bottleneck.",
                 "Directional Ring read observations are not Notify edges or proved physical causes; local confounds keep the candidate.",
                 "Unpaired, ambiguous or time-incompatible dependencies and isolated slow tasks remain unresolved.",
                 "Cross-node protocol evidence needs calibrated clocks and does not prove RDMA hardware completion.",
