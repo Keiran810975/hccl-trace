@@ -183,8 +183,8 @@ def local_fact_tables(facts, clocks):
                     "JOIN STRING_IDS n ON a.name=n.id WHERE n.value IN ('aclrtRecordEvent','aclrtStreamWaitEvent') "
                     "OR n.value LIKE 'hcom%' ORDER BY a.startNs")]
                 native = defaultdict(set)
-                for s, e, tid, _, name in launches:
-                    if name.lower().startswith("hcom"):
+                for s, e, tid, _, api_name in launches:
+                    if api_name.lower().startswith("hcom"):
                         native[s, e].add(tid)
                 api_by_thread = defaultdict(list)
                 for row in launches:

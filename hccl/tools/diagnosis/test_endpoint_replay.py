@@ -1,9 +1,11 @@
+import sqlite3
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from .endpoint_replay import Backward, merge_source_events, possible_last
-from .endpoint_replay_data import add_main_stream
+from .endpoint_replay_data import add_main_stream, local_fact_tables
+from .dependency_model import stable_id
 
 
 def node(g, a, b, kind, stream, device=0):
@@ -99,6 +101,34 @@ class DualEndpointTests(unittest.TestCase):
         self.assertEqual(len(es),1)
         self.assertEqual(raw[es[0]["src"]]["profiler_task_kind"],"event_wait")
         self.assertEqual(es[0]["dst"],"s")
+
+    def test_native_api_does_not_replace_node_identity_for_the_next_device(self):
+        def make(dev):
+            db=sqlite3.connect(":memory:")
+            db.row_factory=sqlite3.Row
+            db.executescript("""
+                CREATE TABLE TASK(deviceId, startNs, endNs, streamId, taskId, taskType, connectionId);
+                CREATE TABLE STRING_IDS(id, value);
+                CREATE TABLE CANN_API(startNs, endNs, globalTid, connectionId, name);
+                CREATE TABLE COMMUNICATION_OP(startNs,endNs,connectionId,groupName,opName);
+                INSERT INTO STRING_IDS VALUES(1,'NOTIFY_RECORD'),(2,'hcom_allReduce_'),(3,'g'),(4,'op');
+                INSERT INTO CANN_API VALUES(1,2,100,10,2);
+                INSERT INTO COMMUNICATION_OP VALUES(3,4,10,3,4);
+            """)
+            db.execute("INSERT INTO TASK VALUES(?,3,4,1,1,1,10)",(int(dev),))
+            return db
+        scope=stable_id("op",("run","op"))
+        facts=dict(manifest=dict(run_id="run",nodes=[dict(node_id="n",msprof_db_dir="unused")],
+                                 operations=[dict(operation_id="op",members=[dict(node_id="n",device_id=x,
+                                     group_name="g",op_name="op") for x in (1,2)])]),
+                   ranks={("n",x):x for x in (1,2)},coordinates={scope:{}},
+                   preparations=[dict(operation_scope=scope,user_rank=x,api_stop_ns=2,
+                                      api_start_ns=1,stop_ns=0) for x in (1,2)])
+        clocks={("run/n",x):SimpleNamespace(map_ns=lambda ns:ns) for x in (1,2)}
+        with patch("hccl.tools.diagnosis.endpoint_replay_data.discover_db_files",return_value=[1,2]), \
+                patch("hccl.tools.diagnosis.endpoint_replay_data._readonly_connection",side_effect=make):
+            records=local_fact_tables(facts,clocks)
+        self.assertEqual({k:v[scope]["aligned_start"] for k,v in records.items()},{1:3,2:3})
 
 
 if __name__=="__main__":unittest.main()
