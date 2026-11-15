@@ -272,7 +272,7 @@ def analyze(capture, *, stage_report=False):
     nodes,anchors=add_main_stream(rows,edges,measured,facts)
     changes=task_controls(nodes,coord)
     backward=Backward(nodes,edges,clocks,coord,changes)
-    event_report=StageEvents(facts,clocks,measured,rows,edges,nodes,backward) if stage_report else None
+    event_report=StageEvents(facts,clocks,measured,rows,edges,nodes,backward,det["classes"]) if stage_report else None
     history=defaultdict(dict)
     for scope,c in coord.items():history[c["group_id"],c["call_site"],c["occurrence"]][c["iteration"]]=scope
     cache={}; blocks=[]; trusted=defaultdict(list); results=[]

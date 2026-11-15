@@ -48,11 +48,11 @@ def temporal_status(a, b, uncertainty_ns):
 
 
 class StageEvents:
-    def __init__(self, facts, clocks, measured, rows, edges, nodes, backward):
+    def __init__(self, facts, clocks, measured, rows, edges, nodes, backward, operations):
         self.facts, self.clocks, self.nodes = facts, clocks, nodes
         self.backward = backward
         self.coordinates = facts["coordinates"]
-        self.ordinal = {}
+        self.operations = {o["scope"]:o for o in operations if o["category"] in {"arrival","tail","both"}}
         self.stages, self.by_anchor = {}, defaultdict(list)
         self.links = defaultdict(dict)
         self._tasks(rows)
@@ -101,7 +101,8 @@ class StageEvents:
                    *(r.get(x) for x in ("algorithm","phase","step","slice","event","semantic","_peer_rank","profiler_size_bytes")))
             s = self._stage("notify_wait" if kind=="notify_wait" else "task_execution",
                 scope, st, n,d,k,r["_start_ns"],r["_stop_ns"],anchor=r["_graph_id"],
-                task_kind=kind, task_id=r["_task_id"], stream_id=st, semantic=r.get("semantic"))
+                task_kind=kind, task_id=r["_task_id"], stream_id=st, semantic=r.get("semantic"),
+                phase=r.get("phase"), step=r.get("step"))
             if s["local_span_ns"][1]>s["local_span_ns"][0]:
                 cohorts[key][c["iteration"]].append(s)
         self._register(cohorts)
@@ -245,6 +246,7 @@ class StageEvents:
                 if (s["kind"]=="compute_readiness" and s["downstream"] and "serial_order" in s["evidence"]):
                     selected.add(k)
                     s["evidence"]["anomalous_bound_wait"] = anchor
+        selected = self._precision_selection(selected)
         result = []
         while selected:
             seed = min(selected)
@@ -269,3 +271,51 @@ class StageEvents:
                 uncertainty_ns=first["uncertainty_ns"], types=kinds,
                 alignment="estimated_reference_clock", stages=members, dependency_links=links))
         return sorted(result,key=lambda s:(s["interval_ns"],s["node_id"],s["rank"],s["types"]))
+
+    def _precision_selection(self, selected):
+        confirmed = set()
+        independent = defaultdict(list)
+        repeated = defaultdict(set)
+        for k in selected:
+            s = self.stages[k]
+            evidence = s["evidence"]
+            if s["downstream"] or (s["kind"]=="compute_readiness" and any(
+                    self.stages[q]["downstream"] for q in self.links[k])):
+                confirmed.add(k)
+                evidence["report_basis"] = "measured_downstream_blocking"
+                continue
+            op = self.operations.get(s["scope"])
+            if not op or not s["statistics"]["strong"]:
+                continue
+            excess = max(m["ns"]-m["reference_ns"] for m in op["metrics"].values() if m["flagged"])
+            delta = s["statistics"]["delta_ns"]
+            if delta < .35*excess:
+                continue
+            if s["kind"]=="notify_wait":
+                signals = [edge for edge in self.backward.incoming[s["anchor"]]
+                           if "notify_sync" in edge["kind"] and edge["src"] in self.nodes]
+                if len(signals)!=1 or signals[0]["confidence"] not in {"observed","exact"}:
+                    continue
+                evidence["observed_producer_edge"] = signals[0]["edge_id"]
+            elif s["kind"] not in {"task_execution","protocol_receive"}:
+                continue
+            independent[s["scope"],s["node_id"],s["rank"]].append(k)
+            repeated[s["scope"],s["kind"],evidence.get("phase")].add(s["rank"])
+        for options in independent.values():
+            options = [k for k in options if not any(q in confirmed for q in self.links[k])]
+            appropriate = []
+            for k in options:
+                s = self.stages[k]
+                ranks = repeated[s["scope"],s["kind"],s["evidence"].get("phase")]
+                if len(ranks)<2 and s["statistics"]["delta_ns"]<2*STRONG_GROWTH_NS:
+                    continue
+                appropriate.append(k)
+            if not appropriate:
+                continue
+            # An unproven group of slow observations is not one physical event.
+            # Keep a representative measured phase, without extending its interval.
+            best = max(appropriate,key=lambda k:(self.stages[k]["kind"]=="protocol_receive",
+                self.stages[k]["statistics"]["delta_ns"],-k))
+            self.stages[best]["evidence"]["report_basis"] = "dominant_phase_of_abnormal_operation"
+            confirmed.add(best)
+        return confirmed
