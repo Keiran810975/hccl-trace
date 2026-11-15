@@ -51,6 +51,9 @@ hccl-diag analyze "runs/$RUN_ID" -o "reports/$RUN_ID" --keep-debug
 `analyze` 只读原始采集，输出必须是采集目录之外的一个新目录。省略 `-o` 时输出到采集目录旁边的
 `<capture>-report/`。第一次建议加 `--keep-debug`，完整任务关联、依赖图和分析中间结果会留在并列的
 `<report>.debug/`。不加这个选项不会删除原始采集。
+默认滚动分析保留执行图和 Notify/拓扑校验，不生成诊断未使用的派生资源图；需要资源图和全量中间表时使用 `--keep-debug`。
+
+要额外检查跨机开工错位或完成尾段，可对同一份采集运行 [双终点回溯](hccl/tools/diagnosis/README.md#双终点回溯)。
 
 ## 3. 换成自己的训练
 
@@ -137,7 +140,7 @@ hccl-diag analyze runs/gpt2-two-node-01 -o reports/gpt2-two-node-01 --keep-debug
 | 文件 | 看什么 |
 | --- | --- |
 | `execution.html` | 看设备任务和真实依赖。默认滚动报告展示相关正式轮的原图切片，不是全程。 |
-| `root_causes.json` | 先看 `quality` 和 `coverage`，再看 `communication_source_candidates`、`external_anomaly_clues` 和 `unresolved_observations`。候选包含 Rank、轮次、通信位置、实际与参考耗时。 |
+| `root_causes.json` | 先看 `quality` 和 `coverage`，再看 `communication_source_candidates`、`external_anomaly_clues`、`cross_node_path_candidates` 和 `unresolved_observations`。候选包含 Rank、轮次、通信位置、实际与参考耗时。 |
 | `propagation.html` | 看候选通过哪些依赖到达慢 Wait，以及哪里缺少继续回溯的证据。 |
 
 两个 HTML 可离线用浏览器打开。默认诊断取最近最多五个未标慢的可比正式样本，沿已建立的依赖回查；

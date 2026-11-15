@@ -117,6 +117,7 @@ def analyze_capture(capture, output, *, mode, baseline=None, topology=None, mani
                 raise DiagnosisError(2, "capture/binding: " + str(error)) from error
             try:
                 # The core algorithms are invoked directly, not chained subprocesses.
+                live = {} if mode == "rolling" else None
                 with redirect_stdout(sys.stdout if verbose else io.StringIO()):
                     if baseline is not None:
                         reference, ready = run_pipeline(base.manifest, work / "reference",
@@ -129,15 +130,20 @@ def analyze_capture(capture, output, *, mode, baseline=None, topology=None, mani
                         preparation_map=current.preparation_map if mode == "rolling" else None,
                         min_match_rate=min_match_rate, require_clock_alignment=require_clock_alignment,
                         allow_uncalibrated_clock=allow_uncalibrated_clock,
-                        rolling_options=rolling_options, keep_debug=keep_debug)
+                        rolling_options=rolling_options, keep_debug=keep_debug, live=live)
                 pipeline = _gate(directory, ready)
-                report = read_json(directory / ("rolling/report.json" if mode == "rolling" else "comparison/report.json"))
-                rows = graph.read_graph_artifact_nodes(directory / "dep_graph_nodes.csv")
-                edges = graph.read_graph_artifact_edges(directory / "dep_graph_edges.csv")
+                if live is None:
+                    report = read_json(directory / "comparison/report.json")
+                    rows = graph.read_graph_artifact_nodes(directory / "dep_graph_nodes.csv")
+                    edges = graph.read_graph_artifact_edges(directory / "dep_graph_edges.csv")
+                else:
+                    report = live.pop("report")
+                    rows, edges = live["graph"]
                 normalized, roots, tasks = normalize(report, mode=mode,
                     run_id=current_capture.manifest["run_id"], rows=rows, edges=edges, pipeline=pipeline,
                     binding_evidence=dict(current.evidence, identity_exports=list(current_capture.identity_exports)),
-                    merge_metrics=waits.read_csv(directory / "merge_summary.csv"))
+                    merge_metrics=waits.read_csv(directory / "merge_summary.csv"), formal_only=mode == "rolling")
+                del report
                 if mode == 'rolling':
                     nodes = sorted({r['_node_id'] for r in rows})
                     normalized['automatic_diagnosis'] = dict(node_count=len(nodes), node_ids=nodes,
@@ -155,7 +161,7 @@ def analyze_capture(capture, output, *, mode, baseline=None, topology=None, mani
                 if mode == 'rolling':
                     from .report_exporter import publish_selected_iteration_report
                     return publish_selected_iteration_report(directory, output, normalized, roots, tasks,
-                                                             full_graph_retained=keep_debug)
+                        full_graph_retained=keep_debug, graph_data=(rows, edges))
                 return publish_final_report(directory, output, normalized, roots, tasks)
             except Exception as error:
                 raise DiagnosisError(5, "report publication: " + str(error)) from error

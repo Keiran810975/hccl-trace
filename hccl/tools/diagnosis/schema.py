@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional
 
 
@@ -183,8 +183,7 @@ class ProfilerTask:
 
 
 def _to_row(record, ordered_fields: Iterable[str]) -> Dict[str, object]:
-    values = {field.name: getattr(record, field.name) for field in fields(record)}
-    return {name: values.get(name, "") for name in ordered_fields}
+    return {name: getattr(record, name, "") for name in ordered_fields}
 
 
 def parse_int(value: Optional[str], default: int = -1) -> int:

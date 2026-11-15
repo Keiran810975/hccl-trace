@@ -153,7 +153,11 @@ def build_view_model(report):
                                if c["target_wait_graph_id"] in nodes}, key=str)))
     overlaps = report.get("input_copy_overlap_observations", [])
     explained_pairs = sum(o["disposition"] == "explained_by_input_copy_overlap" for o in overlaps)
+    paths = report.get("cross_node_path_candidates", [])
     return dict(summary=report["summary"], candidates=candidates, nodes=nodes,
+                cross_node_path_count=len(paths),
+                cross_node_paths=[dict(c, start_aligned_ns=str(c["start_aligned_ns"]),
+                                       stop_aligned_ns=str(c["stop_aligned_ns"])) for c in paths[:100]],
                 input_copy_overlap_summary=dict(explained_pairs=explained_pairs, retained_pairs=len(overlaps) - explained_pairs),
                 analysis_scope=report.get("analysis_scope"),
                 origins={node:str(value) for node, value in origins.items()},
@@ -201,6 +205,7 @@ details{border-top:1px solid #d9dde2;margin-top:20px;padding-top:12px}summary{cu
 <header><div><h1>异常传播诊断</h1><div id="report-counts" class="muted"></div><div id="analysis-scope" class="muted" hidden></div></div>
 <nav class="downloads" aria-label="诊断结果"><a href="root_causes.json">根因候选 JSON</a><a href="execution.html">执行依赖图</a></nav></header>
 <p id="input-copy-overlap-summary" class="muted" style="margin:16px 24px" hidden></p>
+<details id="cross-node-paths" style="margin:16px 24px" hidden><summary id="cross-node-title">跨机数据路径慢化候选</summary><p>从数据提交结束到对端数据通知，包含协议推进；不是网卡硬件传输时长，也不证明网卡故障。</p><div class="table-wrap"><table class="wait-table"><thead><tr><th>方向</th><th>轮次 / 通信位置</th><th>实际 / 参考 / 增量</th><th>对端 Wait / 校准起止</th></tr></thead><tbody id="cross-node-rows"></tbody></table></div></details>
 <div class="layout" id="layout"><aside><label for="search">按类别查看</label><input id="search" type="search" placeholder="Rank / iter / 任务名" autocomplete="off"><nav id="candidates" aria-label="分类诊断结果"></nav><p id="no-matches" class="muted" hidden>没有匹配的结果</p></aside>
 <main id="main"><section aria-labelledby="source-title"><div class="source-top"><div><h2 id="source-title"></h2><p id="source-location"></p><p id="source-coordinate" class="muted"></p></div><span id="category-tag" class="tag"></span></div>
 <p id="peer-context" class="muted" hidden></p><div id="source-metrics" class="metrics"></div><p id="source-time" class="node-meta"></p><div id="scope" class="scope"></div><p id="observed-impact" class="muted"></p><p id="completion-evidence" class="limit" hidden></p><p id="source-limit" class="limit"></p><p id="truncation" class="warning" hidden></p></section>
@@ -214,6 +219,17 @@ details{border-top:1px solid #d9dde2;margin-top:20px;padding-top:12px}summary{cu
 const model=JSON.parse(document.getElementById("propagation-data").textContent);
 const $=id=>document.getElementById(id);
 const esc=value=>String(value??"?").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+if(model.cross_node_path_count){
+  $("cross-node-paths").hidden=false;
+  $("cross-node-title").textContent=`跨机数据路径慢化候选（显示 ${model.cross_node_paths.length}/${model.cross_node_path_count}，完整列表见 JSON）`;
+  const us=value=>`${(Number(value)/1000).toFixed(3)} μs`;
+  $("cross-node-rows").innerHTML=model.cross_node_paths.map(c=>{
+    const links=c.endpoints_in_execution_view
+      ? `<br><a href="execution.html#${encodeURIComponent(c.payload_graph_id)}">发送任务</a> · <a href="execution.html#${encodeURIComponent(c.wait_graph_id)}">接收 Wait</a>`
+      : "";
+    return `<tr><td>${esc(c.sender_node_id.split("/").pop())} Rank ${esc(c.sender_rank)} → ${esc(c.receiver_node_id.split("/").pop())} Rank ${esc(c.receiver_rank)}</td><td>iter ${esc(c.iteration)} · ${esc(c.phase)} / step ${esc(c.step)}<br><small>${esc(c.call_site)}</small></td><td>${esc(us(c.duration_ns))} / ${esc(us(c.reference_ns))} / +${esc(us(c.delta_ns))}</td><td>task ${esc(c.wait_task_id)}<br><code>${esc(c.start_aligned_ns)} – ${esc(c.stop_aligned_ns)} ns</code>${links}</td></tr>`;
+  }).join("");
+}
 let selected=0;
 let activeBranch=0;
 const target=chain=>model.nodes[chain.target_wait_graph_id];
@@ -293,6 +309,6 @@ $("search").addEventListener("input",applySearch);
 $("rank-filter").addEventListener("change",renderBranches);
 $("branch-select").addEventListener("change",()=>{activeBranch=Number($("branch-select").value);renderChain();});
 $("wait-rows").addEventListener("click",event=>{const button=event.target.closest("[data-branch]");if(button){$("rank-filter").value="all";renderBranches();activeBranch=Number(button.dataset.branch);renderChain();$("chain-panel").scrollIntoView({block:"start",behavior:"smooth"});}});
-if(model.candidates.length){renderRoot();}else{$("layout").innerHTML='<div class="empty-result"><h2>未输出候选根因</h2><p>本报告没有可展开的源头传播链。这不等于 workload 没有异常；慢 Wait 是否尚未定位，需查看原诊断结果和覆盖率。</p></div>';}
+if(model.candidates.length){renderRoot();}else if(model.cross_node_path_count){$("layout").hidden=true;$("cross-node-paths").open=true;}else{$("layout").innerHTML='<div class="empty-result"><h2>未输出候选根因</h2><p>本报告没有可展开的源头传播链。这不等于 workload 没有异常；慢 Wait 是否尚未定位，需查看原诊断结果和覆盖率。</p></div>';}
 </script></body></html>
 """

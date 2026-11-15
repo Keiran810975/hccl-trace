@@ -615,12 +615,13 @@ def export_resource_dependency_tables(
     execution_nodes_csv: Path,
     execution_edges_csv: Path,
     prefix: Path,
+    *, graph_data=None, execution_stats=None, edge_counts=None,
 ):
-    execution_rows = execution.read_graph_artifact_nodes(execution_nodes_csv)
-    execution_edges = execution.read_graph_artifact_edges(execution_edges_csv)
-    execution_stats = execution.analyze_execution_graph(
-        execution_rows, execution_edges
-    )
+    execution_rows, execution_edges = graph_data if graph_data is not None else (
+        execution.read_graph_artifact_nodes(execution_nodes_csv),
+        execution.read_graph_artifact_edges(execution_edges_csv))
+    if execution_stats is None:
+        execution_stats = execution.analyze_execution_graph(execution_rows, execution_edges)
     execution._assert_execution_graph_integrity(execution_stats)
     if execution_stats["cycle_residual_nodes"]:
         raise ValueError(
@@ -638,6 +639,8 @@ def export_resource_dependency_tables(
     edges_path = prefix.with_name(prefix.name + "_resource_edges.csv")
     ambiguities_path = prefix.with_name(prefix.name + "_resource_ambiguities.csv")
     summary_path = prefix.with_name(prefix.name + "_resource_summary.csv")
+    if edge_counts is not None:
+        edge_counts.update(e["kind"] for e in resource_edges)
     node_rows = []
     for row in resource_rows:
         item = {

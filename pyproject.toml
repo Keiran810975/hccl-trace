@@ -11,6 +11,7 @@ dependencies = []
 
 [project.scripts]
 hccl-diag = "hccl.tools.diagnosis.cli:main"
+hccl-diag-endpoints = "hccl.tools.diagnosis.endpoint_replay:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

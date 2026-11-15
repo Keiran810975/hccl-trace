@@ -111,7 +111,7 @@ def _slow(value, center, mad, options, *, propagation=False):
             and value - center >= Decimal(options.mad_multiplier) * mad)
 
 
-def compare_tasks(rows, edges, coordinates, options, *, overlapping_copies=frozenset()):
+def compare_tasks(rows, edges, coordinates, options, *, overlapping_copies=frozenset(), compact_unbound=False):
     groups, by_slot = comparison.operation_groups(rows), {}
     unknown = set(coordinates) - set(groups)
     if unknown:
@@ -123,7 +123,10 @@ def compare_tasks(rows, edges, coordinates, options, *, overlapping_copies=froze
     origins = {}
     for row in rows:
         key = row.get("_operation_scope", ""), row["_node_id"]
-        origins[key] = min(origins.get(key, waits.ns(row, "start")), waits.ns(row, "start"))
+        if compact_unbound and key[0] not in coordinates:
+            continue
+        start = waits.ns(row, "start")
+        origins[key] = min(origins.get(key, start), start)
     signatures = {scope: defaultdict(list) for scope in groups}
     notify_keys = comparison_keys(rows, edges)
     def signature(row):
@@ -159,18 +162,28 @@ def compare_tasks(rows, edges, coordinates, options, *, overlapping_copies=froze
                              (row for scope in scopes for row in groups[scope]))
     tasks = []
     for row in ordered_rows:
-        scope, key = row.get("_operation_scope", ""), signature(row)
-        physical_notify = key[0] in {'same_capture_unique_notify_channel','same_capture_anchored_notify_channel','same_capture_anchored_task'}
+        scope = row.get("_operation_scope", "")
         coord = coordinates.get(scope)
+        if compact_unbound and not coord:
+            # Unbound tasks stay in the graph and coverage; backtrace stops at their missing iteration.
+            tasks.append(dict(graph_id=row["_graph_id"], task_kind=row.get("profiler_task_kind", ""),
+                node_id=row["_node_id"], device_id=row["_device_id"],
+                observed_start_ns=waits.ns(row, "start"), observed_stop_ns=waits.ns(row, "stop"),
+                stage="unbound", iteration=None, comparison_status="unbound_operation",
+                reference_count=0, duration_slow=False, gap_slow=False, is_slow=False))
+            continue
+        key = signature(row)
+        physical_notify = key[0] in {'same_capture_unique_notify_channel','same_capture_anchored_notify_channel','same_capture_anchored_task'}
+        start, stop = waits.ns(row, "start"), waits.ns(row, "stop")
         task = dict(graph_id=row["_graph_id"], node_id=row["_node_id"],
                     user_rank=row["_user_rank"], device_id=row["_device_id"],
                     stream_id=row["_stream_id"], task_id=row["_task_id"], operation_scope=scope,
                     algorithm=row.get("algorithm", ""), phase=row.get("phase", ""),
                     step=row.get("step", ""), event=row.get("event", ""),
                     task_kind=row.get("profiler_task_kind", ""),
-                    observed_start_ns=waits.ns(row, "start"), observed_stop_ns=waits.ns(row, "stop"),
-                    duration_ns=waits.duration(row), gap_before_ns=gaps.get(row["_graph_id"]),
-                    start_offset_ns=waits.ns(row, "start") - origins[(scope, row["_node_id"])],
+                    observed_start_ns=start, observed_stop_ns=stop,
+                    duration_ns=max(0, stop-start), gap_before_ns=gaps.get(row["_graph_id"]),
+                    start_offset_ns=start - origins[(scope, row["_node_id"])],
                     reference_start_offset_mean_ns=None, reference_start_offset_mad_ns=None,
                     start_delta_ns=None, start_late=None,
                     **(location_fields(coord) if coord else dict(stage="unbound", iteration=None, block=None, bucket=None)),
@@ -199,21 +212,23 @@ def compare_tasks(rows, edges, coordinates, options, *, overlapping_copies=froze
         ref_key = reference_key(scope, row, key)
         buffer = accepted[ref_key]
         solo_history = row["_graph_id"] not in overlapping_copies
+        offset = task.get("iteration_start_offset_ns")
+        sample = (coord["iteration"], row, task["duration_ns"], task["start_offset_ns"],
+                  task["gap_before_ns"], offset)
         if not buffer:
             task["comparison_status"] = "no_prior_comparable_sample"
             if solo_history:
-                buffer.append((coord["iteration"], row))
+                buffer.append(sample)
             continue
-        iterations, history = map(list, zip(*buffer))
+        iterations, history, durations, start_offsets, previous_gaps, previous_offsets = map(list, zip(*buffer))
         history_scopes = [r["_operation_scope"] for r in history]
         evidence = ("Public call coordinates; up to five earlier comparable formal samples not flagged for "
                     "duration or gap growth; {}; no ordinal, inferred phase or injection truth").format(
                         "unique same-capture physical channel or typed task between unique semantic anchors"
                         if physical_notify else "unique semantic location")
-        durations = [waits.duration(r) for r in history]
         center, mad = _statistics(durations)
-        start_center, start_mad = _statistics([waits.ns(r, "start") - origins[(r["_operation_scope"], r["_node_id"])] for r in history])
-        representative = min(history, key=lambda r: (abs(Decimal(waits.duration(r)) - center), r["_graph_id"]))
+        start_center, start_mad = _statistics(start_offsets)
+        representative, _ = min(zip(history, durations), key=lambda item: (abs(item[1] - center), item[0]["_graph_id"]))
         task.update(comparison_status=CLEAN_TASK_REFERENCE,
                     reference_count=len(history),
                     reference_iterations=iterations, reference_graph_ids=[r["_graph_id"] for r in history],
@@ -229,9 +244,7 @@ def compare_tasks(rows, edges, coordinates, options, *, overlapping_copies=froze
                     slowdown_factor=str(Decimal(task["duration_ns"]) / center) if center else None,
                     duration_slow=_slow(task["duration_ns"], center, mad, options,
                                         propagation=task["task_kind"] == "notify_wait"))
-        offset = task.get("iteration_start_offset_ns")
         if offset is not None:
-            previous_offsets = [_iteration_offset(r, coordinates[r["_operation_scope"]]) for r in history]
             if all(value is not None for value in previous_offsets):
                 offset_center, offset_mad = _statistics(previous_offsets)
                 task.update(reference_iteration_start_offset_ns=str(offset_center),
@@ -240,8 +253,8 @@ def compare_tasks(rows, edges, coordinates, options, *, overlapping_copies=froze
         missing = copy_overlap.MIN_SOLO_SAMPLES - len(history)
         warmup_candidates = warmup_solo.get((ref_key, row["_stream_id"]), ()) if not solo_history and missing > 0 else ()
         gap_stats = None
-        if (task["gap_before_ns"] is not None or warmup_candidates) and all(r["_graph_id"] in gaps for r in history):
-            gap_center, gap_mad = _statistics([gaps[r["_graph_id"]] for r in history])
+        if (task["gap_before_ns"] is not None or warmup_candidates) and all(g is not None for g in previous_gaps):
+            gap_center, gap_mad = _statistics(previous_gaps)
             gap_stats = gap_center, gap_mad
         if task["gap_before_ns"] is not None and gap_stats is not None:
             task.update(reference_gap_mean_ns=str(gap_center), reference_gap_mad_ns=str(gap_mad),
@@ -265,20 +278,23 @@ def compare_tasks(rows, edges, coordinates, options, *, overlapping_copies=froze
             task["copy_solo_warmup_references"] = warmup
             task["copy_solo_max_ns"] = max(chain(durations, (ref["duration_ns"] for ref in warmup)))
         if solo_history and not task["is_slow"]:
-            buffer.append((coord["iteration"], row))
+            buffer.append(sample)
     return tasks
 
 
-def analyze(rows, edges, coordinates, options=RollingOptions(), *, preparations=(), alignment=None):
+def analyze(rows, edges, coordinates, options=RollingOptions(), *, preparations=(), alignment=None,
+            compact_unbound=False, graph_validated=False):
     options.validate()
     coordinates = validate_coordinates(list(coordinates.values()))
-    comparison.evidence_adjacency(rows, edges)
+    if not graph_validated:
+        comparison.validate_comparison_graph(rows, edges)
     pairs, overlapping = copy_overlap.discover(
         rows, {scope for scope, c in coordinates.items() if c["stage"] == "measured"},
         warmup_scopes={scope for scope, c in coordinates.items() if copy_overlap.is_warmup_reference(c)})
-    tasks = compare_tasks(rows, edges, coordinates, options, overlapping_copies=overlapping)
+    tasks = compare_tasks(rows, edges, coordinates, options, overlapping_copies=overlapping,
+                          compact_unbound=compact_unbound)
     copy_observations = copy_overlap.explain(pairs, tasks)
-    roots, traces = wait_backtrace.trace_sources(rows, edges, tasks, options, alignment=alignment)
+    roots, traces = wait_backtrace.trace_sources(rows, edges, tasks, options, alignment=alignment, graph_validated=True)
     host_roots = source_events.preparation_sources(preparations, rows, edges, coordinates, tasks, options, alignment=alignment)
     roots.extend(host_roots)
     traces_by_wait = {t["wait_graph_id"]: t for t in traces}

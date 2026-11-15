@@ -7,6 +7,7 @@ from . import analyze_waits as waits
 from . import clock_alignment
 from . import compare_diagnosis as comparison
 from . import rolling_diagnosis as rolling
+from . import cross_node_path
 from . import visualize_dependency_graph as graph
 from .capture_discovery import read_json, write_json
 from .multi_node_trace import load_manifest, replay_manifest
@@ -55,7 +56,7 @@ def run_pipeline(manifest: Path, output: Path, *, baseline: Path | None = None,
                  min_match_rate: float = 95.0, operation_map: Path | None = None,
                  iteration_map: Path | None = None, preparation_map: Path | None = None,
                  rolling_options=rolling.RollingOptions(), keep_debug=False,
-                 require_clock_alignment=False, allow_uncalibrated_clock=False):
+                 require_clock_alignment=False, allow_uncalibrated_clock=False, live=None):
     if require_clock_alignment and allow_uncalibrated_clock:
         raise ValueError("required alignment and explicit local-clock fallback are mutually exclusive")
     if iteration_map is not None and (baseline is not None or operation_map is not None):
@@ -67,11 +68,13 @@ def run_pipeline(manifest: Path, output: Path, *, baseline: Path | None = None,
         raise FileExistsError("refusing to reuse diagnosis directory: {}".format(directory))
     result = dict(status="failed", replay_gate_passed=False, analysis_completed=False)
     try:
-        directory, ready = replay_manifest(manifest, output, min_match_rate)
+        directory, ready = (replay_manifest(manifest, output, min_match_rate) if live is None else
+                            replay_manifest(manifest, output, min_match_rate, live=live, keep_debug=keep_debug))
         result["replay_gate_passed"] = ready
         if not ready:
             return directory, False
-        rows, edges = _graph(directory)
+        rows, edges = _graph(directory) if live is None else live["graph"]
+        result["resource_graph_validated"] = live is None or live["resource_graph_validated"]
         alignment, clock_error = _alignment(directory, rows, allow_uncalibrated_clock=allow_uncalibrated_clock)
         result.update(clock_alignment_available=alignment is not None,
                       clock_alignment_status=alignment["status"] if alignment else "uncalibrated",
@@ -84,28 +87,47 @@ def run_pipeline(manifest: Path, output: Path, *, baseline: Path | None = None,
         reference, reference_edges = _graph(baseline) if baseline is not None else ([], [])
         issues = waits.read_csv(directory / "dep_graph_notify_ambiguities.csv")
         spans = [row for path in sorted(directory.glob("*/build_spans.csv")) for row in waits.read_csv(path)]
-        diagnosis = waits.analyze(rows, edges, issues, spans, reference, trace_wait_chains=iteration_map is None)
-        if not diagnosis["waits"]:
+        if live is not None and not keep_debug:
+            waits.validate_build_span_anchors(rows, spans)
+            wait_ids = {r["_graph_id"] for r in rows if r.get("profiler_task_kind") == "notify_wait"}
+            wait_count = len(wait_ids)
+            paired_wait_count = len({e["dst"] for e in edges
+                                     if e["dst"] in wait_ids and "notify_sync" in e["kind"]})
+        else:
+            diagnosis = waits.analyze(rows, edges, issues, spans, reference, trace_wait_chains=iteration_map is None)
+            wait_count = len(diagnosis["waits"])
+            paired_wait_count = sum(w["status"] == "paired" for w in diagnosis["waits"])
+            waits.export_analysis(diagnosis, directory)
+        if not wait_count:
             raise ValueError("no Notify Wait evidence in the selected capture")
-        waits.export_analysis(diagnosis, directory)
         if iteration_map is not None:
-            report = rolling.analyze(rows, edges, rolling.load_coordinates(iteration_map), rolling_options,
-                                     preparations=rolling.source_events.load_preparations(preparation_map), alignment=alignment)
-            _save_comparison(directory, "rolling", report, keep_debug)
+            coordinates = rolling.load_coordinates(iteration_map)
+            report = rolling.analyze(rows, edges, coordinates, rolling_options,
+                                     preparations=rolling.source_events.load_preparations(preparation_map),
+                                     alignment=alignment, compact_unbound=live is not None and not keep_debug,
+                                     graph_validated=live is not None)
+            path_coverage = {}
+            report["cross_node_path_candidates"] = cross_node_path.analyze(
+                rows, edges, coordinates, alignment, rolling_options, coverage=path_coverage)
+            report["cross_node_path_coverage"] = path_coverage
+            if live is None or keep_debug:
+                _save_comparison(directory, "rolling", report, keep_debug)
+            if live is not None:
+                live["report"] = report
             result.update(reference_mode=report["reference_mode"], source_policy_version=report["source_policy_version"],
                           rolling_status=report["status"], comparison_coverage=report["coverage"],
                           slow_task_count=report["slow_task_count"], diagnosis_status=report["diagnosis_status"])
         elif baseline is not None:
             if read_json(baseline / "pipeline_result.json")["status"] != "passed":
                 raise ValueError("baseline diagnosis has not passed its gates")
-            comparison.evidence_adjacency(reference, reference_edges)
+            comparison.validate_comparison_graph(reference, reference_edges)
             report = comparison.analyze(rows, edges, reference,
                 operation_pairs=comparison.load_operation_map(operation_map), baseline_edges=reference_edges)
             _save_comparison(directory, "comparison", report, keep_debug)
             result.update(comparison_completed=True, source_policy_version=report["source_policy_version"],
                           slow_task_count=report["slow_task_count"])
         result.update(status="passed", analysis_completed=True, node_count=len({r["_node_id"] for r in rows}),
-                      wait_count=len(diagnosis["waits"]), paired_wait_count=sum(w["status"] == "paired" for w in diagnosis["waits"]))
+                      wait_count=wait_count, paired_wait_count=paired_wait_count)
         return directory, True
     except (OSError, ValueError, KeyError, ArithmeticError) as error:
         result["error"] = str(error)

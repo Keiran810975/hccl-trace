@@ -275,16 +275,17 @@ def read_operation_timings(path: Path) -> List[dict]:
 def build_wait_inventory(rows: List[dict], edges: List[dict], issues: List[dict] = ()) -> List[dict]:
     """Rank local waits from execution artifacts, including unresolved endpoints."""
     nodes = {row["_graph_id"]: row for row in rows}
+    wait_rows = [r for r in rows if r.get("profiler_task_kind") == "notify_wait"]
+    wait_ids = {r["_graph_id"] for r in wait_rows}
     incoming, issues_by_node = defaultdict(list), defaultdict(list)
     for edge in edges:
-        incoming[edge["dst"]].append(edge)
+        if edge["dst"] in wait_ids:
+            incoming[edge["dst"]].append(edge)
     for issue in issues:
         for node in issue.get("endpoint_graph_ids", "").split(";"):
             issues_by_node[node].append(issue.get("reason", "") or issue.get("status", ""))
     waits = []
-    for row in rows:
-        if row.get("profiler_task_kind") != "notify_wait":
-            continue
+    for row in wait_rows:
         identifier = row["_graph_id"]
         sync = [e for e in incoming[identifier] if "notify_sync" in e["kind"]]
         duration = max(Decimal(0), dep.execution_time_order_value(row, "stop")

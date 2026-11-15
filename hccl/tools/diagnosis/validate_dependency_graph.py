@@ -58,6 +58,12 @@ def validate_dependency_artifacts(
     resource = read_summary(resource_summary_path)
     execution_kinds = _edge_kind_counts(execution_edges_path)
     resource_kinds = _edge_kind_counts(resource_edges_path)
+    golden = read_summary(golden_summary_path) if golden_summary_path is not None else None
+    return validate_graph_metrics(execution, resource, execution_kinds, resource_kinds, max_boundary_nodes, golden)
+
+
+def validate_graph_metrics(execution, resource, execution_kinds, resource_kinds,
+                           max_boundary_nodes=None, golden=None):
     stats: Dict[str, int] = {}
     failures = []
     for graph_name, summary in (
@@ -154,8 +160,7 @@ def validate_dependency_artifacts(
             "default_time_inferred_edges={}".format(time_inferred_count)
         )
 
-    if golden_summary_path is not None:
-        golden = read_summary(golden_summary_path)
+    if golden is not None:
         mismatches = []
         for metric, expected in golden.items():
             actual = stats.get(metric)

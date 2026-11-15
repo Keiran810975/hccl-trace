@@ -19,6 +19,9 @@ def read_csv(path):
 
 
 def ns(row, side):
+    key = "_start_ns" if side == "start" else "_stop_ns" if side == "stop" else None
+    if key is not None and key in row:
+        return row[key]
     return int(graph.execution_time_order_value(row, side) * 1000)
 
 
@@ -40,6 +43,32 @@ def union_ns(intervals):
     return result
 
 
+def _span_key(node, device, stream, task):
+    return node.rsplit("/", 1)[-1], int(device), int(stream), int(task)
+
+
+def validate_build_span_anchors(rows, spans):
+    keys = [(s["node_id"], int(s["device_id"]), int(s["kernel_stream_id"]), int(s["kernel_task_id"])) for s in spans]
+    if not keys:
+        return []
+    wanted = set(keys)
+    matches = defaultdict(list)
+    for row in rows:
+        key = _span_key(row["_node_id"], row["_device_id"], row["_stream_id"], row["_task_id"])
+        if key in wanted:
+            matches[key].append(row)
+    anchors = []
+    for key, span in zip(keys, spans):
+        group = matches.get(key, ())
+        if len(group) != 1 or group[0].get("profiler_task_kind") != "kernel_aicpu":
+            raise ValueError("build span kernel cannot be resolved in execution artifact")
+        row = group[0]
+        if int(span["user_rank"]) != row["_user_rank"]:
+            raise ValueError("build span rank conflicts with explicit device mapping")
+        anchors.append(row)
+    return anchors
+
+
 def analyze(rows, edges, issues=(), spans=(), baseline_rows=(), min_wait_ns=1000000,
             min_slow_ns=5000000, slowdown_factor=3, *, trace_wait_chains=True):
     if min_wait_ns <= 0 or min_slow_ns <= 0 or slowdown_factor <= 1:
@@ -51,12 +80,13 @@ def analyze(rows, edges, issues=(), spans=(), baseline_rows=(), min_wait_ns=1000
     for edge in edges:
         if edge["src"] not in nodes or edge["dst"] not in nodes:
             raise ValueError("diagnosis edge has missing endpoint")
-        incoming[edge["dst"]].append(edge)
+        if trace_wait_chains:
+            incoming[edge["dst"]].append(edge)
     reference = defaultdict(list)
     for row in baseline_rows:
         reference[signature(row)].append(duration(row))
     candidates = []
-    for row in rows:
+    for row in rows if reference else ():
         kind = row.get("profiler_task_kind", "")
         # RDMA duration is doorbell submission, never transfer completion.
         if kind not in ("sdma", "reduce_inline", "kernel_aicpu") or not row.get("_operation_scope"):
@@ -72,18 +102,8 @@ def analyze(rows, edges, issues=(), spans=(), baseline_rows=(), min_wait_ns=1000
             step=row.get("step", ""), duration_ns=measured, baseline_median_ns=str(median(values)),
             category="slow_aicpu_kernel" if kind == "kernel_aicpu" else "slow_device_execution",
             evidence="DB local duration vs structurally matching baseline; candidate, not proved root cause"))
-    kernel_keys = defaultdict(list)
-    for row in rows:
-        kernel_keys[(row["_node_id"].rsplit("/", 1)[-1], row["_device_id"],
-                     row["_stream_id"], row["_task_id"])].append(row)
-    for index, span in enumerate(spans):
-        key = (span["node_id"], int(span["device_id"]), int(span["kernel_stream_id"]), int(span["kernel_task_id"]))
-        matches = kernel_keys.get(key, [])
-        if len(matches) != 1 or matches[0].get("profiler_task_kind") != "kernel_aicpu":
-            raise ValueError("build span kernel cannot be resolved in execution artifact")
-        row = matches[0]
-        if int(span["user_rank"]) != row["_user_rank"]:
-            raise ValueError("build span rank conflicts with explicit device mapping")
+    spans = list(spans)
+    for index, (span, row) in enumerate(zip(spans, validate_build_span_anchors(rows, spans))):
         if int(span["duration_ns"]) < min_slow_ns:
             continue
         candidates.append(dict(id="build:{}:{}".format(row["_graph_id"], index), graph_id=row["_graph_id"],

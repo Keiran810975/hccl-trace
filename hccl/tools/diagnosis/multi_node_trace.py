@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 from . import merge_timeline as merge
@@ -13,7 +13,7 @@ from .dependency_model import DependencyEdgeIdentity, OperationScopeIdentity, st
 from .resource_dependency_graph import export_resource_dependency_tables
 from .schema import MERGED_FIELDS, write_csv
 from .validate_trace import validate_rows
-from .validate_dependency_graph import validate_dependency_artifacts
+from .validate_dependency_graph import validate_dependency_artifacts, validate_graph_metrics
 from .parse_msprof_db import parse_operations
 from .control_trace import parse_build_spans, BUILD_FIELDS
 
@@ -259,7 +259,7 @@ def build_rdma_notify_edges(rows: list[dict], ranks: dict, operation_evidence: d
     return edges, ambiguities, frozenset(remote_ids)
 
 
-def replay_manifest(manifest_path: Path, output_dir: Path, min_match_rate: float = 95.0):
+def replay_manifest(manifest_path: Path, output_dir: Path, min_match_rate: float = 95.0, *, live=None, keep_debug=False):
     manifest = load_manifest(manifest_path)
     run_id = manifest["run_id"]
     # A fresh run directory keeps failed/rerun outputs from inheriting old edges.
@@ -269,6 +269,7 @@ def replay_manifest(manifest_path: Path, output_dir: Path, min_match_rate: float
     ranks = {rank["user_rank"]: (run_id + "/" + rank["node_id"], rank["device_id"])
              for rank in manifest["ranks"]}
     device_ranks = {endpoint: rank for rank, endpoint in ranks.items()}
+    scope_cache = {}
     all_rows, summaries, inventory, operation_times = [], [], [], []
     node_gates = []
     for node in manifest["nodes"]:
@@ -298,20 +299,23 @@ def replay_manifest(manifest_path: Path, output_dir: Path, min_match_rate: float
         build_spans = parse_build_spans(merge._semantic_log_paths(node["plog_dir"]), node_id, profilers)
         write_csv(str(node_dir / "build_spans.csv"), BUILD_FIELDS, build_spans)
         stats["build_spans_observed"] = len(build_spans)
-        write_csv(str(node_dir / "merged.csv"), MERGED_FIELDS, rows)
-        ok, _ = validate_rows([{key: str(value) for key, value in row.items()} for row in rows], min_match_rate)
+        if live is None or keep_debug:
+            write_csv(str(node_dir / "merged.csv"), MERGED_FIELDS, rows)
+        ok, _ = validate_rows(rows, min_match_rate)
         if stats["duplicate_graph_correlation_keys"] or stats["ambiguous_semantic"]:
             ok = False
         node_gates.append(ok)
         for metric, value in sorted(stats.items()):
             summaries.append({"node_id": node_id, "metric": metric, "value": value})
         summaries.append({"node_id": node_id, "metric": "merge_gate_passed", "value": int(ok)})
-        for task in profilers:
-            inventory.append({"node_id": node_id, "device_id": task.device_id,
-                              "group_name": task.group_name, "op_name": task.op_name,
-                              "profiler_op_id": task.profiler_op_id})
+        if live is None or keep_debug:
+            for task in profilers:
+                inventory.append({"node_id": node_id, "device_id": task.device_id,
+                                  "group_name": task.group_name, "op_name": task.op_name,
+                                  "profiler_op_id": task.profiler_op_id})
         for row in rows:
-            item = dict(row, node_id=run_id + "/" + node_id)
+            item = dict(row, node_id=run_id + "/" + node_id) if live is None or keep_debug else row
+            item["node_id"] = run_id + "/" + node_id
             declared_rank = device_ranks.get((item["node_id"], row["device_id"]))
             if declared_rank is not None and int(row["user_rank"]) >= 0 and int(row["user_rank"]) != declared_rank:
                 raise ValueError("semantic/DB rank conflicts with explicit node/device topology")
@@ -319,24 +323,43 @@ def replay_manifest(manifest_path: Path, output_dir: Path, min_match_rate: float
                 item["user_rank"] = device_ranks.get((item["node_id"], row["device_id"]), -1)
             local_scope = row["profiler_op_scope"]
             if local_scope:
-                item["profiler_op_scope"] = bindings.get((node_id, item["device_id"], local_scope),
-                    bindings.get((node_id, local_scope), stable_id("op", (run_id, node_id, local_scope))))
+                key = node_id, item["device_id"], local_scope
+                scope = scope_cache.get(key)
+                if scope is None:
+                    scope = scope_cache[key] = (bindings.get(key) or bindings.get((node_id, local_scope))
+                                                 or stable_id("op", (run_id, node_id, local_scope)))
+                item["profiler_op_scope"] = scope
             all_rows.append(item)
     write_csv(str(destination / "merge_summary.csv"), ["node_id", "metric", "value"], summaries)
     inventory_fields = ["node_id", "device_id", "group_name", "op_name", "profiler_op_id"]
     unique_inventory = {tuple(row[field] for field in inventory_fields) for row in inventory}
-    write_csv(str(destination / "operations.csv"), inventory_fields,
-              (dict(zip(inventory_fields, row)) for row in sorted(unique_inventory)))
+    if live is None or keep_debug:
+        write_csv(str(destination / "operations.csv"), inventory_fields,
+                  (dict(zip(inventory_fields, row)) for row in sorted(unique_inventory)))
     write_csv(str(destination / "operation_timings.csv"),
               ["node_id", "device_id", "user_rank", "operation_scope", "op_name", "group_name",
                "start_ns", "end_ns", "duration_ns"], operation_times)
     (destination / "inputs.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     merged_path = destination / "merged.csv"
-    write_csv(str(merged_path), MERGED_FIELDS, all_rows)
+    write_artifacts = live is None or keep_debug
+    if write_artifacts:
+        write_csv(str(merged_path), MERGED_FIELDS, all_rows)
     if not all(node_gates):
         return destination, False  # Keep local merge evidence; do not graph invalid matches.
-    graph_rows = execution.read_execution_rows(merged_path)
+    del rows, profilers, inventory
+    if write_artifacts:
+        del all_rows
+        graph_rows = execution.read_execution_rows(merged_path)
+    else:
+        def records():
+            for row in all_rows:
+                for key, value in row.items():
+                    if not isinstance(value, str):
+                        row[key] = "" if value is None else str(value)
+                yield row
+        graph_rows = execution.read_execution_rows(None, records=records())
+        del all_rows
     remote_edges, ambiguities, remote_ids = build_rdma_notify_edges(graph_rows, ranks, evidence)
     def same_node_issue(issue):
         producer, consumer = ranks.get(issue["producer_rank"]), ranks.get(issue["consumer_rank"])
@@ -346,13 +369,32 @@ def replay_manifest(manifest_path: Path, output_dir: Path, min_match_rate: float
     cross_count = sum(edge["kind"] == "cross_node_notify_sync_observed" for edge in remote_edges)
     edges = execution.build_execution_edges(graph_rows, ambiguities, remote_ids) + remote_edges
     prefix = destination / "dep_graph"
-    execution.export_execution_tables(graph_rows, edges, ambiguities, prefix)
-    export_resource_dependency_tables(
-        destination / "dep_graph_nodes.csv", destination / "dep_graph_edges.csv", prefix)
-    graph_ok, _, _ = validate_dependency_artifacts(
-        destination / "dep_graph_summary.csv", destination / "dep_graph_edges.csv",
-        destination / "dep_graph_resource_summary.csv", destination / "dep_graph_resource_edges.csv")
+    exported = execution.export_execution_tables(graph_rows, edges, ambiguities, prefix, write_artifacts=write_artifacts)
     topology_ok = operation_sync_connected(graph_rows, edges, ranks, manifest)
+    if live is None:
+        export_resource_dependency_tables(exported[0], exported[1], prefix)
+        graph_ok, _, _ = validate_dependency_artifacts(
+            exported[3], exported[1], destination / "dep_graph_resource_summary.csv",
+            destination / "dep_graph_resource_edges.csv")
+    else:
+        execution_stats = dict(exported[6], **{"notify_relation_" + k: v for k, v in exported[5].items()})
+        resource_kinds = Counter()
+        if keep_debug:
+            del graph_rows, edges
+            graph_data = (execution.read_graph_artifact_nodes(exported[0]), execution.read_graph_artifact_edges(exported[1]))
+            resource_stats = export_resource_dependency_tables(
+                exported[0], exported[1], prefix, graph_data=graph_data, execution_stats=exported[6],
+                edge_counts=resource_kinds)[-1]
+        else:
+            # The rolling report uses the execution graph, not its derived resource contraction.
+            graph_rows.sort(key=lambda r: r["_graph_id"])
+            for i, row in enumerate(graph_rows):
+                row["_source_row"] = i
+            edges.sort(key=lambda e: e["edge_id"])
+            graph_data = (graph_rows, edges)
+            resource_stats = {}
+        graph_ok, _, _ = validate_graph_metrics(execution_stats, resource_stats, exported[4], resource_kinds)
+        live.update(graph=graph_data, issues=ambiguities, resource_graph_validated=keep_debug)
     ready = graph_ok and topology_ok and remote_unresolved == 0 and local_unresolved == 0
     write_csv(str(destination / "run_summary.csv"), ["metric", "value"], [
         {"metric": "graph_gate_passed", "value": int(graph_ok)},

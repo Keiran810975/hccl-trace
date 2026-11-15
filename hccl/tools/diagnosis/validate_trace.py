@@ -67,7 +67,7 @@ def validate_rows(rows, min_match_rate):
         status = row.get("match_status", "")
         if status == "profiler_only":
             stats["profiler_only"] += 1
-            if row.get("duplicate_profiler") == "1":
+            if str(row.get("duplicate_profiler")) == "1":
                 stats["duplicate_profiler_rows"] += 1
             continue
         stats["total"] += 1
@@ -79,9 +79,9 @@ def validate_rows(rows, min_match_rate):
             "notify_metadata_mismatch",
         ):
             stats["invalid_matches"] += 1
-        if row.get("duplicate_semantic") == "1":
+        if str(row.get("duplicate_semantic")) == "1":
             stats["duplicate_semantic_rows"] += 1
-        if row.get("duplicate_profiler") == "1":
+        if str(row.get("duplicate_profiler")) == "1":
             stats["duplicate_profiler_rows"] += 1
         if str(row.get("phase", "")).strip() in RING_STEP_PHASES:
             stats["step_contract_rows"] += 1

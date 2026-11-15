@@ -8,7 +8,7 @@ from .report_contract import rolling_reference
 from .task_classifier import classify_task, source_category, INTERNAL, EXTERNAL, UNRESOLVED
 
 
-def normalize(report, *, mode, run_id, rows, edges, pipeline, binding_evidence, merge_metrics=()):
+def normalize(report, *, mode, run_id, rows, edges, pipeline, binding_evidence, merge_metrics=(), formal_only=False):
     lookup = {r["_graph_id"]: r for r in rows}
     links = {e["edge_id"]: e for e in edges}
     participants = defaultdict(set)
@@ -120,6 +120,7 @@ def normalize(report, *, mode, run_id, rows, edges, pipeline, binding_evidence, 
         compatibility=dict(candidates="alias of communication_source_candidates only; schema 1 mixed candidates are not retained"),
         unresolved_observations=unresolved,
         quality=dict(pipeline_passed=pipeline["status"] == "passed", node_count=pipeline.get("node_count"),
+                     resource_graph_validated=pipeline.get("resource_graph_validated"),
                      rank_count=len({r["_user_rank"] for r in rows if r["_user_rank"] >= 0}),
                      execution_node_count=len(rows), execution_edge_count=len(edges),
                      edge_kind_counts=dict(Counter(e["kind"] for e in edges)),
@@ -141,6 +142,13 @@ def normalize(report, *, mode, run_id, rows, edges, pipeline, binding_evidence, 
                           input_copy_overlap_observations=report["input_copy_overlap_observations"])
     if "iteration_start_observations" in report:
         normalized["iteration_start_observations"] = report["iteration_start_observations"]
+    if mode == "rolling":
+        paths = report.get("cross_node_path_candidates", [])
+        normalized["cross_node_path_candidates"] = paths
+        normalized["cross_node_path_coverage"] = report.get("cross_node_path_coverage", {})
+        normalized["category_counts"]["cross_node_path_candidate"] = len(paths)
+        if paths and not (candidates or external):
+            normalized["diagnosis_status"] = "cross_node_path_candidate"
     tasks = [dict(t, **classify_task(lookup[t["graph_id"]]), reference_value_ns=t.get("reference_mean_ns" if mode == "rolling" else "baseline_median_ns"),
-                  reference_metric=metric) for t in report["tasks"]]
+                  reference_metric=metric) for t in report["tasks"] if not formal_only or t.get("stage") == "measured"]
     return normalized, roots, tasks

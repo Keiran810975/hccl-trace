@@ -5,7 +5,9 @@ from __future__ import annotations
 import csv
 import math
 from collections import Counter, defaultdict
+from contextlib import nullcontext
 from decimal import Decimal, InvalidOperation
+from itertools import groupby
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -103,6 +105,8 @@ NOTIFY_AMBIGUITY_FIELDS = [
 
 
 def to_int(value: object, default: int = -1) -> int:
+    if type(value) is int:
+        return value
     try:
         text = str(value).strip()
         if not text:
@@ -132,19 +136,18 @@ def to_decimal(value: object):
 
 
 def execution_time_order_value(row: dict, name: str) -> Decimal:
-    internal = "_{}_order".format(name)
-    if internal in row:
-        return row[internal]
-    return Decimal(str(row["_{}".format(name)]))
+    internal = "_start_order" if name == "start" else "_stop_order" if name == "stop" else "_" + name + "_order"
+    value = row.get(internal)
+    return value if value is not None else Decimal(str(row["_" + name]))
 
 
-def read_execution_rows(path: Path) -> List[dict]:
+def read_execution_rows(path: Path | None, *, records=None) -> List[dict]:
     """Read every timed profiler execution exactly once, including profiler-only rows."""
     rows: List[dict] = []
     seen_identities = {}
     seen_graph_ids = {}
-    with path.open("r", encoding="utf-8-sig", newline="") as source:
-        for index, row in enumerate(csv.DictReader(source)):
+    with (path.open("r", encoding="utf-8-sig", newline="") if records is None else nullcontext()) as source:
+        for index, row in enumerate(csv.DictReader(source) if records is None else records):
             if row.get("match_status") not in ("matched", "profiler_only"):
                 continue
             start = to_float(row.get("task_start"))
@@ -172,6 +175,7 @@ def read_execution_rows(path: Path) -> List[dict]:
                 connection_id=to_int(row.get("connection_id")),
                 profiler_task_index=row.get("profiler_task_index", ""),
             )
+            graph_id = identity.stable_id
             if identity in seen_identities:
                 raise ValueError(
                     "duplicate physical execution identity at CSV rows {} and {}: {}".format(
@@ -181,18 +185,17 @@ def read_execution_rows(path: Path) -> List[dict]:
                     )
                 )
             if (
-                identity.stable_id in seen_graph_ids
-                and seen_graph_ids[identity.stable_id] != identity
+                graph_id in seen_graph_ids and seen_graph_ids[graph_id] != identity
             ):
                 raise ValueError(
-                    "stable graph ID collision for {}".format(identity.stable_id)
+                    "stable graph ID collision for {}".format(graph_id)
                 )
             seen_identities[identity] = index
-            seen_graph_ids[identity.stable_id] = identity
-            item = dict(row)
+            seen_graph_ids[graph_id] = identity
+            item = row
             item.update({
                 "_source_row": index,
-                "_graph_id": identity.stable_id,
+                "_graph_id": graph_id,
                 "_execution_identity": identity,
                 "_node_id": row.get("node_id", ""),
                 "_device_id": to_int(row.get("device_id")),
@@ -224,6 +227,8 @@ def read_execution_rows(path: Path) -> List[dict]:
                 "_stop": max(start, stop),
                 "_start_order": min(start_order, stop_order),
                 "_stop_order": max(start_order, stop_order),
+                "_start_ns": int(min(start_order, stop_order) * 1000),
+                "_stop_ns": int(max(start_order, stop_order) * 1000),
                 "_duration": abs(duration),
             })
             rows.append(item)
@@ -289,6 +294,8 @@ def read_graph_artifact_nodes(path: Path) -> List[dict]:
                 "_stop": float(stop_order),
                 "_start_order": start_order,
                 "_stop_order": stop_order,
+                "_start_ns": int(start_order * 1000),
+                "_stop_ns": int(stop_order * 1000),
                 "_duration": float(abs(duration)),
                 "_node_kind": row.get("node_kind", "execution"),
                 "_boundary_side": row.get("boundary_side", ""),
@@ -377,18 +384,19 @@ def build_execution_edges(
                     "{} {} -> {}".format(kind, src_graph_id, dst_graph_id)
                 )
             return
-        stable_collision = identities_by_stable_id.get(identity.stable_id)
+        edge_id = identity.stable_id
+        stable_collision = identities_by_stable_id.get(edge_id)
         if stable_collision is not None and stable_collision != identity:
             raise ValueError(
                 "dependency edge stable ID collision for {}".format(
-                    identity.stable_id
+                    edge_id
                 )
             )
         edge_by_endpoints[endpoint_key] = identity
-        identities_by_stable_id[identity.stable_id] = identity
+        identities_by_stable_id[edge_id] = identity
         edges.append({
             "graph_schema_version": GRAPH_SCHEMA_VERSION,
-            "edge_id": identity.stable_id,
+            "edge_id": edge_id,
             "kind": kind,
             "src": src_graph_id,
             "dst": dst_graph_id,
@@ -413,7 +421,10 @@ def build_execution_edges(
 
     _add_direct_stream_order_edges(rows, add)
     _add_ffts_logical_stream_order_edges(rows, add)
-    notify_rows = [row for row in rows if row["_graph_id"] not in excluded_notify_graph_ids]
+    notify_rows = [row for row in rows if row["_graph_id"] not in excluded_notify_graph_ids
+                   and (row["_subtask_id"] >= 0 or
+                        (row.get("profiler_task_kind") or row.get("task_kind") or "").strip().lower()
+                        in ("notify_record", "notify_wait"))]
     ambiguities = _add_ffts_notify_sync_edges(notify_rows, add)
     ambiguities.extend(_add_direct_notify_sync_edges(notify_rows, add))
     ambiguities.extend(_add_local_notify_sync_edges(notify_rows, add))
@@ -431,21 +442,14 @@ def _add_direct_stream_order_edges(rows: List[dict], add) -> None:
         by_stream[(row["_node_id"], row["_device_id"], row["_stream_id"])].append(row)
 
     for stream_rows in by_stream.values():
-        start_buckets: Dict[Decimal, List[dict]] = defaultdict(list)
-        for row in stream_rows:
-            start_buckets[execution_time_order_value(row, "start")].append(row)
-        ordered_buckets = [
-            sorted(start_buckets[start], key=execution_sort_key)
-            for start in sorted(start_buckets)
-        ]
-        for previous, current in zip(ordered_buckets, ordered_buckets[1:]):
+        stream_rows.sort(key=execution_sort_key)
+        previous = ()
+        for start, same_start in groupby(stream_rows, key=lambda r: execution_time_order_value(r, "start")):
+            current = tuple(same_start)
             for src in previous:
+                if execution_time_order_value(src, "stop") > start:
+                    continue
                 for dst in current:
-                    if (
-                        execution_time_order_value(src, "stop")
-                        > execution_time_order_value(dst, "start")
-                    ):
-                        continue
                     add(
                         "direct_stream_order_observed",
                         src,
@@ -454,6 +458,7 @@ def _add_direct_stream_order_edges(rows: List[dict], add) -> None:
                         "msprof_direct_physical_stream_order",
                         "observed",
                     )
+            previous = current
 
 
 def _ffts_value(row: dict, internal: str, public: str) -> int:
@@ -1292,40 +1297,27 @@ def analyze_execution_graph(rows: List[dict], edges: List[dict]) -> Counter:
     stats["missing_edge_destinations"] = len(missing_destinations)
     stats["self_loop_edges"] = len(self_loops)
 
-    adjacency = {node_id: set() for node_id in node_id_set}
-    reverse = {node_id: set() for node_id in node_id_set}
-    incident = set()
+    adjacency = defaultdict(list)
+    indegree = Counter()
     for edge in edges:
         src = edge.get("src")
         dst = edge.get("dst")
         if src not in node_id_set or dst not in node_id_set or src == dst:
             continue
-        adjacency[src].add(dst)
-        reverse[dst].add(src)
-        incident.add(src)
-        incident.add(dst)
+        adjacency[src].append(dst)
+        indegree[dst] += 1
 
-    stats["isolated_nodes"] = len(node_id_set - incident)
-    stats["root_nodes"] = sum(
-        1 for node_id in node_id_set if not reverse[node_id]
-    )
-    stats["leaf_nodes"] = sum(
-        1 for node_id in node_id_set if not adjacency[node_id]
-    )
-
-    indegree = {
-        node_id: len(reverse[node_id]) for node_id in node_id_set
-    }
-    ready = sorted(
-        node_id for node_id, degree in indegree.items() if degree == 0
-    )
+    stats["isolated_nodes"] = sum(n not in adjacency and n not in indegree for n in node_id_set)
+    stats["root_nodes"] = len(node_id_set) - len(indegree)
+    stats["leaf_nodes"] = len(node_id_set) - len(adjacency)
+    ready = [n for n in node_id_set if n not in indegree]
     cursor = 0
     processed = 0
     while cursor < len(ready):
         node_id = ready[cursor]
         cursor += 1
         processed += 1
-        for successor in sorted(adjacency[node_id]):
+        for successor in adjacency.get(node_id, ()):
             indegree[successor] -= 1
             if indegree[successor] == 0:
                 ready.append(successor)
@@ -1362,6 +1354,7 @@ def export_execution_tables(
     edges: List[dict],
     notify_ambiguities: List[dict],
     prefix: Path,
+    *, write_artifacts=True,
 ):
     """Export an already constructed graph through the shared artifact format."""
     graph_stats = analyze_execution_graph(rows, edges)
@@ -1373,16 +1366,6 @@ def export_execution_tables(
     )
     summary_path = prefix.with_name(prefix.name + "_summary.csv")
     node_fields = ["graph_schema_version", "graph_id"] + list(MERGED_FIELDS)
-    node_rows = [
-        dict(
-            {
-                "graph_schema_version": GRAPH_SCHEMA_VERSION,
-                "graph_id": row["_graph_id"],
-            },
-            **{key: row.get(key, "") for key in node_fields[2:]},
-        )
-        for row in sorted(rows, key=lambda item: item["_graph_id"])
-    ]
     edge_counts = Counter(edge["kind"] for edge in edges)
     ambiguity_counts = Counter(
         row["status"] for row in notify_ambiguities
@@ -1392,8 +1375,13 @@ def export_execution_tables(
         summary["edge_kind_{}".format(kind)] = count
     for status, count in ambiguity_counts.items():
         summary["notify_relation_{}".format(status)] = count
-    write_csv(str(nodes_path), node_fields, node_rows)
-    write_csv(str(edges_path), EDGE_FIELDS, sorted(edges, key=lambda edge: edge["edge_id"]))
+    if write_artifacts:
+        node_rows = (dict(
+            {"graph_schema_version": GRAPH_SCHEMA_VERSION, "graph_id": row["_graph_id"]},
+            **{key: row.get(key, "") for key in node_fields[2:]})
+            for row in sorted(rows, key=lambda item: item["_graph_id"]))
+        write_csv(str(nodes_path), node_fields, node_rows)
+        write_csv(str(edges_path), EDGE_FIELDS, sorted(edges, key=lambda edge: edge["edge_id"]))
     write_csv(
         str(ambiguities_path),
         NOTIFY_AMBIGUITY_FIELDS,

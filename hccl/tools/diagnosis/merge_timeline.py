@@ -258,16 +258,18 @@ def build_operation_scope_assignments(
     profiler_list = list(profilers)
     ref_to_scopes = defaultdict(set)
     scope_to_refs = defaultdict(set)
+    scope_names = {}
     task_candidates = []
 
     for task in profiler_list:
         op_name = str(task.op_name or "").strip()
         group_name = str(task.group_name or "").strip()
-        scope = (
-            OperationScopeIdentity(group_name, op_name)
-            if op_name and group_name
-            else None
-        )
+        scope = None
+        if op_name and group_name:
+            key = group_name, op_name
+            scope = scope_names.get(key)
+            if scope is None:
+                scope = scope_names[key] = OperationScopeIdentity(*key)
         task_candidates.append((task, scope))
         if scope is None or task.profiler_op_id < 0:
             continue
@@ -288,8 +290,8 @@ def build_operation_scope_assignments(
             local_ref = (task.node_id, task.device_id, task.profiler_op_id)
             local_scope = (task.node_id, task.device_id, group_name, op_name)
             if (
-                ref_to_scopes[local_ref] != {scope}
-                or scope_to_refs[local_scope] != {task.profiler_op_id}
+                len(ref_to_scopes[local_ref]) != 1
+                or len(scope_to_refs[local_scope]) != 1
             ):
                 candidate = ("", OPERATION_SCOPE_AMBIGUOUS)
             else:

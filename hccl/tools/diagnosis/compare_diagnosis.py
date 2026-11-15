@@ -150,12 +150,16 @@ def compare_tasks(rows, baseline_rows, options, operation_pairs=(), current_gaps
     return comparisons
 
 
-def evidence_adjacency(rows, edges, *, cross_operations=False):
-    nodes = {row["_graph_id"]: row for row in rows}
+def validate_comparison_graph(rows, edges):
     stats = graph.analyze_execution_graph(rows, edges)
     graph._assert_execution_graph_integrity(stats)
     if stats["has_cycle"]:
         raise ValueError("comparison requires an acyclic execution graph")
+
+
+def evidence_adjacency(rows, edges, *, cross_operations=False):
+    nodes = {row["_graph_id"]: row for row in rows}
+    validate_comparison_graph(rows, edges)
     incoming, outgoing = defaultdict(list), defaultdict(list)
     for edge in sorted(edges, key=lambda e: e["edge_id"]):
         if (edge.get("confidence") not in ("observed", "exact")

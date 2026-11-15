@@ -124,6 +124,10 @@ def _read_calls(path):
     return header, calls
 
 
+def _api_name(value):
+    return "".join(c for c in value.lower() if c.isalnum())
+
+
 def _inventory(node):
     devices = {}
     for path in discover_db_files(node["msprof_db_dir"]):
@@ -141,20 +145,32 @@ def _inventory(node):
                 "SELECT o.*,g.value AS group_name,n.value AS op_name,t.value AS operation_type "
                 "FROM COMMUNICATION_OP o JOIN STRING_IDS g ON g.id=o.groupName "
                 "JOIN STRING_IDS n ON n.id=o.opName JOIN STRING_IDS t ON t.id=o.opType")]
-            apis, named = defaultdict(list), defaultdict(list)
-            for row in db.execute("SELECT a.*,s.value AS api_name FROM CANN_API a JOIN STRING_IDS s ON s.id=a.name"):
-                record = dict(row)
-                apis[row["connectionId"]].append(record)
-                name = "".join(c for c in record["api_name"].lower() if c.isalnum())
-                named[(record.get("globalTid"), record["startNs"], record["endNs"], name)].append(record)
-            linked = []
+            typed_ops = []
             for op in ops:
                 try:
-                    kind = operation_type(op["operation_type"])
+                    typed_ops.append((op, operation_type(op["operation_type"])))
                 except ValueError:
                     continue
+            collective_apis = {"hcom" + kind for _, kind in typed_ops}
+            names = {r["id"]: (r["value"], _api_name(r["value"])) for r in
+                     db.execute("SELECT id,value FROM STRING_IDS WHERE value IS NOT NULL")}
+            ids = [key for key, (name, normalized) in names.items()
+                   if name == "launch" or normalized in collective_apis]
+            apis, named = defaultdict(list), defaultdict(list)
+            # Only named collective APIs and their possible launch anchors can match.
+            for offset in range(0, len(ids), 900):
+                batch = ids[offset:offset + 900]
+                query = "SELECT * FROM CANN_API WHERE name IN (" + ",".join("?" for _ in batch) + ")"
+                for row in db.execute(query, batch):
+                    name, normalized = names[row["name"]]
+                    record = dict(row, api_name=name)
+                    apis[row["connectionId"]].append(record)
+                    if normalized in collective_apis:
+                        named[(record.get("globalTid"), record["startNs"], record["endNs"], normalized)].append(record)
+            linked = []
+            for op, kind in typed_ops:
                 matching = [a for a in apis[op["connectionId"]]
-                            if "".join(c for c in a["api_name"].lower() if c.isalnum()) == "hcom" + kind]
+                            if names[a["name"]][1] == "hcom" + kind]
                 method = "named_api_connection_id"
                 if not matching:
                     # HOST records the runtime launch connection, while AI_CPU

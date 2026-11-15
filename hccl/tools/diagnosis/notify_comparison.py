@@ -22,7 +22,8 @@ def semantic_regions(rows, edges):
     stream_key=lambda r: (r.get('_operation_scope'),r['_node_id'],r['_device_id'],r['_stream_id'])
     members=defaultdict(set)
     for row in rows:
-        members[stream_key(row)].add(row['_graph_id'])
+        if row.get('_operation_scope'):
+            members[stream_key(row)].add(row['_graph_id'])
     complete=set()
     for key,ids in members.items():
         before={i:[j for j in links['before'][i] if j in ids] for i in ids}
@@ -73,11 +74,12 @@ def semantic_regions(rows, edges):
     return result
 
 
-def unique_channel_keys(rows, edges):
+def unique_channel_keys(rows, edges, *, regions=None):
     nodes = {r['_graph_id']: r for r in rows}
     channels = defaultdict(list)
     endpoints = defaultdict(list)
-    regions = semantic_regions(rows, edges)
+    if regions is None:
+        regions = semantic_regions(rows, edges)
     for edge in edges:
         if 'notify_sync' in edge.get('kind', ''):
             endpoints[edge['src']].append(edge['edge_id'])
@@ -120,8 +122,8 @@ def unique_channel_keys(rows, edges):
 
 
 def comparison_keys(rows, edges):
-    result=unique_channel_keys(rows,edges)
     regions=semantic_regions(rows,edges)
+    result=unique_channel_keys(rows,edges,regions=regions)
     buckets=defaultdict(list)
     for row in rows:
         if row.get('profiler_task_kind') not in {'sdma','reduce_inline','rdma'} or row['_graph_id'] not in regions:

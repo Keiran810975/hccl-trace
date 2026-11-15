@@ -19,7 +19,8 @@ from .report_contract import CLEAN_TASK_REFERENCE, without_critical_path
 FINAL_FILES = {"execution.html", "root_causes.json", "propagation.html"}
 
 
-def publish_selected_iteration_report(directory, output, normalized, roots, tasks, *, full_graph_retained=False):
+def publish_selected_iteration_report(directory, output, normalized, roots, tasks, *,
+                                      full_graph_retained=False, graph_data=None):
     import csv
     epochs = sorted({c['iteration'] for c in normalized.get('source_candidates', normalized['candidates'])
                      + normalized.get('peer_read_observations', [])})
@@ -27,23 +28,36 @@ def publish_selected_iteration_report(directory, output, normalized, roots, task
     if not formal:
         raise ValueError('selected-iteration view requires explicit formal coordinates')
     late = normalized.get("iteration_start_observations", {}).get("examples", [])
+    cross_node = normalized.get("cross_node_path_candidates", [])
+    if cross_node and not any(c["iteration"] in epochs for c in cross_node):
+        epochs = sorted(epochs + [cross_node[0]["iteration"]])
     epochs = epochs or [late[0]["iteration"] if late else max(t['iteration'] for t in formal)]
     wanted = {t['graph_id'] for t in formal if t['iteration'] in epochs}
     if not {r['graph_id'] for r in roots} <= wanted:
         raise ValueError('selected iteration does not contain every actual source anchor')
     rendered = directory / 'selected-iteration-view'
     rendered.mkdir()
-    for filename, predicate in (
+    slices = (
         ('dep_graph_nodes.csv', lambda r: r['graph_id'] in wanted),
-        ('dep_graph_edges.csv', lambda r: r['src'] in wanted and r['dst'] in wanted)):
-        with (directory / filename).open(encoding='utf-8-sig', newline='') as source, (rendered / filename).open('x', encoding='utf-8', newline='') as target:
-            reader = csv.DictReader(source)
-            writer = csv.DictWriter(target, reader.fieldnames)
-            writer.writeheader()
-            writer.writerows(r for r in reader if predicate(r))
-    rows = graph.read_graph_artifact_nodes(rendered / 'dep_graph_nodes.csv')
-    edges = graph.read_graph_artifact_edges(rendered / 'dep_graph_edges.csv')
-    write_json(rendered / 'diagnosis.json', waits.analyze(rows, edges, trace_wait_chains=False))
+        ('dep_graph_edges.csv', lambda r: r['src'] in wanted and r['dst'] in wanted))
+    if graph_data is None or full_graph_retained:
+        for filename, predicate in slices:
+            with (directory / filename).open(encoding='utf-8-sig', newline='') as source, (rendered / filename).open('x', encoding='utf-8', newline='') as target:
+                reader = csv.DictReader(source)
+                writer = csv.DictWriter(target, reader.fieldnames)
+                writer.writeheader()
+                writer.writerows(r for r in reader if predicate(r))
+    if graph_data is None:
+        rows = graph.read_graph_artifact_nodes(rendered / 'dep_graph_nodes.csv')
+        edges = graph.read_graph_artifact_edges(rendered / 'dep_graph_edges.csv')
+    else:
+        rows = [r for r in graph_data[0] if r['_graph_id'] in wanted]
+        edges = [e for e in graph_data[1] if slices[1][1](e)]
+        # Preserve the sliced CSV reader's tie-break order for the rendered view.
+        rows = [dict(r, _source_row=i) for i, r in enumerate(rows)]
+    diagnosis = waits.analyze(rows, edges, trace_wait_chains=False)
+    if full_graph_retained:
+        write_json(rendered / 'diagnosis.json', diagnosis)
     scopes = {r.get('_operation_scope') for r in rows}
     with (directory/'operation_timings.csv').open(encoding='utf-8-sig', newline='') as source, \
             (rendered/'operation_timings.csv').open('x', encoding='utf-8', newline='') as target:
@@ -58,7 +72,8 @@ def publish_selected_iteration_report(directory, output, normalized, roots, task
     normalized = dict(normalized, analysis_scope=dict(kind='selected_iteration_slice_from_original_artifacts',
         iterations=epochs, diagnosis_used_full_capture=True, original_full_graph_retained=full_graph_retained,
         full_graph_replayable_from_capture=True))
-    return publish_final_report(rendered, output, normalized, roots, [t for t in tasks if t['graph_id'] in wanted])
+    return publish_final_report(rendered, output, normalized, roots, [t for t in tasks if t['graph_id'] in wanted],
+                                graph_data=(rows, edges), diagnosis_data=diagnosis)
 
 
 def host_source_displays(roots, rows, model, alignment=None):
@@ -129,7 +144,7 @@ def _attach_chain_ids(normalized, by_id):
         candidate["chain_ids"] = [c["chain_id"] for c in by_id[candidate["id"]]["chains"]]
 
 
-def publish_final_report(directory, output, normalized, roots, comparisons):
+def publish_final_report(directory, output, normalized, roots, comparisons, *, graph_data=None, diagnosis_data=None):
     directory, output = Path(directory), Path(output)
     if output.exists() or output.is_symlink():
         raise FileExistsError("refusing to overwrite existing report: " + str(output))
@@ -139,18 +154,25 @@ def publish_final_report(directory, output, normalized, roots, comparisons):
     if "source_selection" in normalized:
         normalized["source_selection"] = {k: v for k, v in normalized["source_selection"].items()
                                           if k != "primary_proposal"}
-    rows = graph.read_graph_artifact_nodes(directory / "dep_graph_nodes.csv")
-    edges = graph.read_graph_artifact_edges(directory / "dep_graph_edges.csv")
+    rows, edges = graph_data if graph_data is not None else (
+        graph.read_graph_artifact_nodes(directory / "dep_graph_nodes.csv"),
+        graph.read_graph_artifact_edges(directory / "dep_graph_edges.csv"))
     report = propagation.build_report(rows, edges, roots, comparisons, reference=normalized["reference"],
                                       unresolved_observations=normalized["unresolved_observations"])
     report["input_copy_overlap_observations"] = normalized.get("input_copy_overlap_observations", [])
+    report["cross_node_path_candidates"] = normalized.get("cross_node_path_candidates", [])
     if normalized.get("analysis_scope"):
         report["analysis_scope"] = normalized["analysis_scope"]
+    if report["cross_node_path_candidates"]:
+        shown = {r["_graph_id"] for r in rows}
+        report["cross_node_path_candidates"] = [
+            dict(c, endpoints_in_execution_view={c["payload_graph_id"], c["wait_graph_id"]} <= shown)
+            for c in report["cross_node_path_candidates"]]
     by_id = {c["candidate_id"]: c for c in report["candidates"]}
     _attach_chain_ids(normalized, by_id)
     normalized["propagation"] = dict(report["summary"], exhaustive_downstream_search=False,
                                      physical_causation_proven=False)
-    diagnosis = without_critical_path(read_json(directory / "diagnosis.json"))
+    diagnosis = without_critical_path(diagnosis_data if diagnosis_data is not None else read_json(directory / "diagnosis.json"))
     # The execution model already carries exact task and Host anchor times.
     display_candidates = [
         dict({k: v for k, v in root.items() if k not in {"observed_start_ns", "observed_stop_ns"}},

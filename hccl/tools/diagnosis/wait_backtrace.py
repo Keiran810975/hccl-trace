@@ -43,17 +43,25 @@ def local_release_check(src, dst, clocks, quantization):
                 metadata_uncertainty_ns=uncertainty, exact_release_time_available=False)
 
 
-def trace_sources(rows, edges, tasks, options, *, alignment=None):
-    nodes, incoming, _ = comparison.evidence_adjacency(rows, edges, cross_operations=True)
+def trace_sources(rows, edges, tasks, options, *, alignment=None, graph_validated=False):
+    if not graph_validated:
+        comparison.validate_comparison_graph(rows, edges)
+    nodes = {row["_graph_id"]: row for row in rows}
     changes = {t["graph_id"]: t for t in tasks}
+    measured = {t["graph_id"] for t in tasks if t["stage"] == "measured"}
     syncs, orders = defaultdict(list), defaultdict(list)
-    edge_by_id = {e["edge_id"]: e for e in edges}
-    for key, group in incoming.items():
-        for src, edge_id in group:
-            if "notify_sync" in edge_by_id[edge_id]["kind"]:
-                syncs[key].append((src, edge_id))
-            else:
-                orders[key].append((src, edge_id))
+    edge_by_id = {}
+    # Keep every predecessor of measured work, including unbound endpoints that stop the backtrace.
+    for edge in edges:
+        dst, kind = edge["dst"], edge["kind"]
+        if dst not in measured or edge.get("confidence") not in {"observed", "exact"}:
+            continue
+        sync = "notify_sync" in kind
+        if not sync and kind != "direct_stream_order_observed":
+            continue
+        edge_id = edge["edge_id"]
+        edge_by_id[edge_id] = edge
+        (syncs if sync else orders)[dst].append((edge["src"], edge_id))
     seeds = [t for t in tasks if t["task_kind"] == "notify_wait" and t["duration_slow"]]
     roots, traces = {}, []
     clocks = models_from_report(alignment) if options.calibrated_release_intervals else {}
@@ -67,7 +75,7 @@ def trace_sources(rows, edges, tasks, options, *, alignment=None):
                     value = item.get("metadata_quantization_ns")
                     if type(value) is int and value >= 0:
                         quantization[key] = value
-    origins = wait_arrival.local_origins(rows, clocks)
+    origins = wait_arrival.local_origins(rows, clocks) if clocks else {}
     for seed in sorted(seeds, key=lambda t: t["graph_id"]):
         target = seed["graph_id"]
         trace = dict(wait_graph_id=target, operation_scope=seed["operation_scope"], node_id=seed["node_id"],
