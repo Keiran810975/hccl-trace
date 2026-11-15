@@ -56,30 +56,40 @@ class OnlineProbe:
         self.groups, self.counters = {}, {}
         self.sequence = self.dropped = 0
         self.closed = False
+        self.finish_stats, self.finish_error = {}, "collector did not acknowledge run_end"
         self.lock, self.done = threading.Lock(), threading.Event()
         self.queue = queue.Queue(maxsize=queue_capacity)
         self.thread = threading.Thread(target=self._send, name="hccl-online-telemetry", daemon=True)
         self.thread.start()
 
     @classmethod
-    def from_environment(cls, *, job_id, rank_id, node_id):
+    def from_environment(cls, *, job_id, rank_id, node_id, timing_adapter=None):
         value = os.environ.get("HCCL_TRACE_ONLINE_ADDR")
+        mode = os.environ.get("HCCL_TRACE_ONLINE_TIMING", "host")
+        if mode not in {"host", "npu_event"} or (mode == "npu_event") != (timing_adapter is not None):
+            raise ValueError("HCCL_TRACE_ONLINE_TIMING=npu_event requires an initialized NPU Event adapter")
         if not value:
+            if timing_adapter is not None:
+                raise ValueError("npu_event timing requires HCCL_TRACE_ONLINE_ADDR")
             return None
         host, sep, port = value.rpartition(":")
         if not sep or not host or not port.isdecimal() or not 1<=int(port)<=65535:
             raise ValueError("HCCL_TRACE_ONLINE_ADDR must be HOST:PORT")
         return cls((host,int(port)),job_id=job_id,rank_id=rank_id,
-                   host_clock_domain="host_raw:"+node_id,auth_token=os.environ.get("HCCL_TRACE_ONLINE_TOKEN"))
+                   host_clock_domain="host_raw:"+node_id,auth_token=os.environ.get("HCCL_TRACE_ONLINE_TOKEN"),
+                   device_timing_expected=timing_adapter is not None)
 
     def _emit_locked(self, kind, **fields):
         self.sequence += 1
-        row = dict(version=1,event=kind,job_id=self.job_id,rank_id=self.rank_id,
-                   session_id=self.session_id,seq=self.sequence,dropped=self.dropped,**fields)
+        row = self._frame(kind, **fields)
         try:
             self.queue.put_nowait(row)
         except queue.Full:
             self.dropped += 1
+
+    def _frame(self, kind, **fields):
+        return dict(version=1,event=kind,job_id=self.job_id,rank_id=self.rank_id,
+                    session_id=self.session_id,seq=self.sequence,dropped=self.dropped,**fields)
 
     def _heartbeat(self):
         with self.lock:
@@ -107,7 +117,8 @@ class OnlineProbe:
 
     def enter(self, communicator_id, generation, *, op_type, tensor_bytes, host_entry_ts,
               stage=None, iteration=None, bucket_id=None, occurrence=0, dtype=None,
-              reduction=None, host_entry_source="explicit_host_boundary"):
+              reduction=None, host_entry_source="explicit_host_boundary", preparation_ns=None,
+              preparation_definition=None):
         if (not op_type or not _natural(tensor_bytes) or not _natural(host_entry_ts)
                 or not _natural(occurrence) or (iteration is not None and not _natural(iteration))):
             raise ValueError("invalid Host collective entry")
@@ -121,7 +132,8 @@ class OnlineProbe:
                 op_counter=counter,op_type=op_type,tensor_bytes=tensor_bytes,host_entry_ts=host_entry_ts,
                 host_clock_domain=self.host_clock_domain,stage=stage,iteration=iteration,
                 bucket_id=bucket_id,occurrence=occurrence,dtype=dtype,reduction=reduction,
-                host_entry_source=host_entry_source)
+                host_entry_source=host_entry_source, preparation_ns=preparation_ns,
+                preparation_definition=preparation_definition)
         return OperationToken(self.job_id,communicator_id,generation,counter,self.rank_id)
 
     def _token_event(self, kind, token, **fields):
@@ -147,8 +159,22 @@ class OnlineProbe:
                           timing_source=source,evidence_ref=evidence_ref,rank_role=rank_role,
                           algorithm=algorithm,uncertainty_ns=uncertainty_ns)
 
+    def device_duration(self, token, *, duration_ns, timing_definition, timing_source, evidence_ref,
+                        algorithm=None, rank_role=None, uncertainty_ns=None, timing_profile_id=None,
+                        boundary_evidence=None):
+        """Send actual elapsed device time; absolute device timestamps are not required."""
+        self._token_event("device_duration", token, device_duration_ns=duration_ns,
+                          timing_definition=timing_definition, timing_source=timing_source,
+                          evidence_ref=evidence_ref, algorithm=algorithm, rank_role=rank_role,
+                          uncertainty_ns=uncertainty_ns, timing_profile_id=timing_profile_id,
+                          boundary_evidence=boundary_evidence)
+
+    def timing_failed(self, token, reason):
+        self._token_event("timing_failed", token, reason=reason)
+
     def _send(self):
         connection = None
+        connection_index = 0
         heartbeat_at = 0.0
         try:
             while not self.done.is_set() or not self.queue.empty():
@@ -169,10 +195,11 @@ class OnlineProbe:
                     if connection is None:
                         connection = socket.create_connection(self.address,timeout=1)
                         connection.settimeout(1)
+                        connection_index += 1
                     for row in batch:
                         if row["event"] == "heartbeat":
                             row["sender_queue_ns"] = time.monotonic_ns() - row.pop("_queued_ns")
-                    payload = b"".join((json.dumps(dict(x,auth=self.auth_token),separators=(",",":"))+"\n").encode()
+                    payload = b"".join(self._encode(x, connection_index)
                                        for x in batch)
                     connection.sendall(payload)
                 except (OSError, TypeError, ValueError):
@@ -183,12 +210,36 @@ class OnlineProbe:
                         self.dropped += len(batch)
                     if not self.done.is_set():
                         self.done.wait(.25)
+            if connection is None:
+                connection = socket.create_connection(self.address, timeout=1)
+                connection.settimeout(1)
+                connection_index += 1
+            self.sequence += 1
+            final = self._frame("run_end", counters=[[k,g,n] for (k,g),n in self.counters.items()],
+                                host_log=self.finish_stats, pending_calls=self.pending_calls)
+            connection.sendall(self._encode(final, connection_index))
+            with connection.makefile("rb") as reply:
+                ack = json.loads(reply.readline(4097))
+            if (ack.get("event"), ack.get("session_id"), ack.get("seq")) == (
+                    "run_end_ack", self.session_id, self.sequence):
+                self.finish_error = None if ack.get("accepted") is True else "collector rejected Rank telemetry completeness"
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
         finally:
             if connection is not None:
                 connection.close()
 
-    def close(self, timeout=2.0):
+    def _encode(self, row, connection_index):
+        return (json.dumps(dict(row, auth=self.auth_token, connection_index=connection_index),
+                           separators=(",", ":")) + "\n").encode()
+
+    def close(self, timeout=10.0, *, host_log=None, pending_calls=0):
         with self.lock:
-            self.closed = True
+            if not self.closed:
+                self.closed = True
+                self.finish_stats = host_log or {}
+                self.pending_calls = pending_calls
         self.done.set()
         self.thread.join(timeout=timeout)
+        if self.thread.is_alive() or self.finish_error:
+            raise RuntimeError(self.finish_error or "timed out draining online telemetry")

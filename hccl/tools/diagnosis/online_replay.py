@@ -32,7 +32,7 @@ def collect_bound(source, scratch):
                        for span in parse_operations(node["msprof_db_dir"], node["node_id"])])
 
 
-def replay_bound(bundle):
+def replay_bound(bundle, *, warmup_iterations=10):
     manifest, coordinates = bundle["manifest"], bundle["coordinates"]
     job = manifest["run_id"]
     locations = {tuple(c[k] for k in _LOCATION): c["operation_scope"] for c in coordinates}
@@ -81,7 +81,7 @@ def replay_bound(bundle):
     if {scope for records in entries.values() for scope, _, _ in records.values()} != set(locations.values()):
         raise ValueError("public SDK calls do not cover all bound replay collectives")
     measurements, events = [], []
-    tracker = OnlineTracker(job, observe_measurement=measurements.append)
+    tracker = OnlineTracker(job, warmup_iterations=warmup_iterations, observe_measurement=measurements.append)
     sequences = Counter()
     frame_index = 0
 
@@ -104,13 +104,15 @@ def replay_bound(bundle):
         for rank, (_, _, span) in sorted(records.items()):
             span["evidence_ref"] = json.dumps(span["evidence_ref"], sort_keys=True, separators=(",", ":"))
             feed("device_span", rank, group, op_counter=counter, **span)
-        for event in tracker.drain():
-            event.pop("collector")  # Archive playback has no real collector arrival times.
-            event["event_id"] = stable_id("online-replay", (job, group, counter, event["event_type"]))
-            event["operation_scope"] = records[first_rank][0]
-            events.append(event)
-        if measurements and measurements[-1]["communicator_id"] == group and measurements[-1]["op_counter"] == counter:
-            measurements[-1]["operation_scope"] = records[first_rank][0]
+    tracker.finish(frame_index)
+    for event in tracker.drain():
+        event.pop("collector")  # Archive playback has no real collector arrival times.
+        group, counter = event["communicator_id"], event["op_counter"]
+        event["event_id"] = stable_id("online-replay", (job, group, counter, event["event_type"]))
+        events.append(event)
+    for row in measurements + events:
+        records = entries[row["communicator_id"], row["op_counter"]]
+        row["operation_scope"] = records[min(records)][0]
     if tracker.operations or tracker.counts.get("COMPLETED", 0) != len(entries):
         raise ValueError("archived collectives did not all complete in replay")
     return dict(mode="offline_equivalent_slow_only", job_id=job, bound_collectives=len(entries),
@@ -122,9 +124,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("capture", type=Path)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--warmup-iterations", type=int, default=10)
     args = parser.parse_args(argv)
     with TemporaryDirectory(prefix="hccl-online-replay-") as temporary:
-        result = replay_bound(collect_bound(args.capture, Path(temporary)))
+        result = replay_bound(collect_bound(args.capture, Path(temporary)), warmup_iterations=args.warmup_iterations)
     payload = json.dumps(result, sort_keys=True, separators=(",", ":")).encode() + b"\n"
     with args.output.open("xb") as out:
         out.write(payload)

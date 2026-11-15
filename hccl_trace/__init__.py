@@ -1,7 +1,7 @@
 """Opt-in public training observations; never submits device tasks or barriers."""
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 import json
 import os
 from pathlib import Path
@@ -23,7 +23,8 @@ class Trace:
     completion boundary. A Python collective return is not device completion.
     """
 
-    def __init__(self, directory, *, node_id, user_rank, device_id, run_id="capture", online_probe=None):
+    def __init__(self, directory, *, node_id, user_rank, device_id, run_id="capture", online_probe=None,
+                 timing_adapter=None):
         if any(type(v) is not int or v < 0 for v in (user_rank, device_id)):
             raise ValueError("explicit nonnegative global rank and profiler device ID required")
         if not node_id or not run_id:
@@ -36,13 +37,15 @@ class Trace:
         self._owner_thread = threading.get_ident()
         self._file = (self.directory / ("rank-{}.jsonl".format(user_rank))).open("x", encoding="utf-8")
         self.online_probe = online_probe
+        self.timing_adapter = timing_adapter
         self.online_token = None
+        self._host_log_ns = self._host_log_writes = 0
         self._online_generations, self._online_pending = {}, []
         self._write(dict(event="runtime", schema_version=1, run_id=run_id, node_id=node_id,
                          user_rank=user_rank, device_id=device_id, pid=os.getpid()))
 
     @classmethod
-    def from_environment(cls, *, device_id=None, node_id=None):
+    def from_environment(cls, *, device_id=None, node_id=None, timing_adapter=None):
         env = os.environ
         directory = env.get("HCCL_TRACE_CALLS_DIR")
         if not directory or "RANK" not in env:
@@ -55,23 +58,29 @@ class Trace:
         user_rank = int(env["RANK"])
         run_id = env.get("HCCL_TRACE_RUN_ID", "capture")
         probe = None
-        if env.get("HCCL_TRACE_ONLINE_ADDR"):
+        if env.get("HCCL_TRACE_ONLINE_ADDR") or env.get("HCCL_TRACE_ONLINE_TIMING", "host") != "host" or timing_adapter:
             from .online_probe import OnlineProbe
 
             if not env.get("HCCL_TRACE_RUN_ID"):
                 raise ValueError("online telemetry requires an explicit shared HCCL_TRACE_RUN_ID")
-            probe = OnlineProbe.from_environment(job_id=run_id, rank_id=user_rank, node_id=node_id)
+            probe = OnlineProbe.from_environment(job_id=run_id, rank_id=user_rank, node_id=node_id,
+                                                 timing_adapter=timing_adapter)
         try:
             return cls(directory, node_id=node_id, user_rank=user_rank, device_id=device_id,
-                       run_id=run_id, online_probe=probe)
+                       run_id=run_id, online_probe=probe, timing_adapter=timing_adapter)
         except BaseException:
             if probe is not None:
-                probe.close()
+                with suppress(RuntimeError):
+                    probe.close()
             raise
 
     def _write(self, value):
+        start = time.perf_counter_ns() if self.online_probe is not None else None
         self._file.write(json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n")
         self._file.flush()
+        if start is not None:
+            self._host_log_ns += time.perf_counter_ns() - start
+            self._host_log_writes += 1
 
     def group(self, name, participants, *, db_group_name=None, communicator_generation=0):
         members = list(participants)
@@ -83,6 +92,8 @@ class Trace:
         if name in self.groups and self.groups[name] != value:
             raise ValueError("communication group identity changed")
         if self.online_probe is not None:
+            if self.timing_adapter is not None:
+                self.timing_adapter.validate_group(name, value["participants"])
             self.online_probe.register(name, communicator_generation, members)
             self._online_generations[name] = communicator_generation
         self.groups[name] = value
@@ -111,6 +122,68 @@ class Trace:
     @contextmanager
     def collective(self, *, group, call_site, operation_type, element_count, dtype, reduction=None,
                    preparation_start_raw_ns=None):
+        if self.online_probe is not None:
+            raise ValueError("online telemetry requires Trace.call_collective; a with block is not a call boundary")
+        with self._observe_collective(group=group, call_site=call_site, operation_type=operation_type,
+                element_count=element_count, dtype=dtype, reduction=reduction,
+                preparation_start_raw_ns=preparation_start_raw_ns):
+            yield self
+
+    @staticmethod
+    def mark_preparation():
+        """Take a local raw-clock observation at the actual start of preparation."""
+        return time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
+
+    def call_collective(self, submit, /, *, wait_for_work=False, preparation_definition=None, **signature):
+        """Wrap only the submitting API; run an existing Work.wait outside its Host interval."""
+        if self.online_token is not None:
+            raise ValueError("nested online collectives do not have a single explicit API boundary")
+        probe, adapter = self.online_probe, self.timing_adapter
+        timing = token = None
+        if probe is not None:
+            from .online_probe import tensor_description
+
+            dtype, size = tensor_description(signature["dtype"], signature["element_count"])
+            kind = "".join(c for c in signature["operation_type"].lower() if c.isalnum()).removeprefix("hcom")
+            reduction = signature.get("reduction")
+            reduction = str(reduction).lower() if reduction is not None else None
+            if adapter is not None:
+                if not wait_for_work:
+                    raise ValueError("NPU Event timing must use the existing Work.wait dependency")
+                timing = adapter.begin(op_type=kind, bucket=signature["call_site"], tensor_bytes=size,
+                    dtype=dtype, reduction=reduction, rank=self.rank,
+                    participants=self.groups[signature["group"]]["participants"])
+        try:
+            with self._observe_collective(**signature) as item:
+                if probe is not None:
+                    group = item["group_id"]
+                    start = item.get("preparation_start_raw_ns")
+                    if (start is None) != (preparation_definition is None):
+                        raise ValueError("preparation timing requires an explicit start and definition")
+                    token = probe.enter(group, self._online_generations[group], op_type=kind, tensor_bytes=size,
+                        host_entry_ts=item["before"]["raw_ns"], stage=item["stage"], iteration=item["iteration"],
+                        bucket_id=item["call_site"], occurrence=item["occurrence"], dtype=dtype, reduction=reduction,
+                        preparation_ns=None if start is None else item["before"]["raw_ns"]-start,
+                        preparation_definition=preparation_definition, host_entry_source="sdk_collective_submit")
+                    self.online_token = token
+                    item.update(online_op_counter=token.op_counter,
+                                online_communicator_generation=token.communicator_generation)
+                work = submit()
+            if wait_for_work and work.wait() is False:
+                raise RuntimeError("collective Work.wait reported failure")
+            if timing is not None:
+                adapter.end(token, timing)
+            return work
+        except BaseException:
+            if token is not None:
+                probe.error(token)
+            raise
+        finally:
+            self.online_token = None
+
+    @contextmanager
+    def _observe_collective(self, *, group, call_site, operation_type, element_count, dtype, reduction=None,
+                            preparation_start_raw_ns=None):
         if threading.get_ident() != self._owner_thread:
             raise ValueError("concurrent submitting threads require an explicit framework adapter; call order is not guessed")
         if self.active_iteration is None or group not in self.groups or not call_site:
@@ -131,25 +204,9 @@ class Trace:
             if type(preparation_start_raw_ns) is not int or not 0 <= preparation_start_raw_ns <= item["before"]["raw_ns"]:
                 raise ValueError("preparation start must be an actual earlier raw-clock observation")
             item["preparation_start_raw_ns"] = preparation_start_raw_ns
-        token = previous = None
-        if self.online_probe is not None:
-            from .online_probe import tensor_description
-
-            canonical_dtype, tensor_bytes = tensor_description(dtype, element_count)
-            token = self.online_probe.enter(group, self._online_generations[group],
-                op_type="".join(c for c in operation_type.lower() if c.isalnum()).removeprefix("hcom"),
-                tensor_bytes=tensor_bytes, host_entry_ts=item["before"]["raw_ns"], stage=stage,
-                iteration=iteration, bucket_id=call_site, occurrence=occurrence, dtype=canonical_dtype,
-                reduction=str(reduction).lower() if reduction is not None else None,
-                host_entry_source="sdk_before_collective_call")
-            previous, self.online_token = self.online_token, token
-            item.update(online_op_counter=token.op_counter,
-                        online_communicator_generation=token.communicator_generation)
         try:
-            yield self
+            yield item
         except BaseException:
-            if token is not None:
-                self.online_probe.error(token)
             item.update(after=_clocks(), status="failed")
             self._write(item)
             raise
@@ -157,10 +214,8 @@ class Trace:
             item.update(after=_clocks(), status="submitted")
             self._write(item)
             self.pending.append(item["sequence"])
-            if token is not None:
-                self._online_pending.append(token)
-        finally:
-            self.online_token = previous
+            if self.online_token is not None:
+                self._online_pending.append(self.online_token)
 
     def completion_boundary(self):
         """Call only after the user's existing synchronize()/Work completion.
@@ -175,6 +230,8 @@ class Trace:
             for token in self._online_pending:
                 self.online_probe.host_boundary(token, clocks["raw_ns"])
             self._online_pending.clear()
+            if self.timing_adapter is not None:
+                self.timing_adapter.flush(self.online_probe)
 
     def close(self):
         try:
@@ -183,13 +240,18 @@ class Trace:
                 self._file.close()
         finally:
             if self.online_probe is not None:
-                self.online_probe.close()
+                self.online_probe.close(pending_calls=len(self.pending),
+                    host_log=dict(writes=self._host_log_writes, elapsed_ns=self._host_log_ns))
 
     def __enter__(self):
         return self
 
     def __exit__(self, *exc):
-        self.close()
+        if exc[0] is None:
+            self.close()
+        else:
+            with suppress(RuntimeError):
+                self.close()
 
 
 __all__ = ["Trace"]

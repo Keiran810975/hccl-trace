@@ -3,10 +3,14 @@ from __future__ import annotations
 
 import argparse
 from contextlib import nullcontext
+import json
 import math
 import os
+from pathlib import Path
+import time
 
 from hccl_trace import Trace
+from hccl_trace.npu_event import NpuEventTiming
 
 
 def device_list(value):
@@ -36,6 +40,17 @@ def gradient_buckets(parameters, capacity):
         yield bucket
 
 
+def host_delay(value):
+    try:
+        rank, iteration, bucket, seconds = value.split(",")
+        result = int(rank), int(iteration), int(bucket), float(seconds)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected rank,measured_iteration,bucket,seconds") from exc
+    if min(result[:3]) < 0 or not 0 < result[3] <= 60:
+        raise argparse.ArgumentTypeError("require nonnegative indexes and a delay in (0,60] seconds")
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--devices", type=device_list, required=True, help="runtime device IDs in local-rank order")
@@ -47,6 +62,9 @@ def main():
     parser.add_argument("--bucket-mib", type=int, default=25)
     parser.add_argument("--precision", choices=("bf16", "fp32"), default="bf16")
     parser.add_argument("--seed", type=int, default=20261028)
+    parser.add_argument("--acceptance-host-delay", type=host_delay,
+                        help="test only: zero-based rank,measured_iteration,bucket,seconds (delay before ENTER)")
+    parser.add_argument("--acceptance-evidence", type=Path, help="new JSON file written by the delayed rank only")
     args = parser.parse_args()
     if args.warmup < 0 or args.iterations < 2 or args.batch_size < 1 or not 2 <= args.seq_length <= 1024 or args.bucket_mib < 1:
         parser.error("require >=2 formal iterations, positive batch/bucket, and sequence length 2..1024")
@@ -59,6 +77,9 @@ def main():
     profiler = args.profiler_devices or args.devices
     if len(args.devices) != local_size or len(profiler) != local_size or not 0 <= local < local_size or world_size < 2:
         parser.error("supply one runtime/profiler device per local rank and at least two total ranks")
+    if args.acceptance_host_delay and (not args.acceptance_evidence or args.acceptance_host_delay[0] >= world_size
+                                      or args.acceptance_host_delay[1] >= args.iterations):
+        parser.error("test delay requires a valid rank, measured iteration and new --acceptance-evidence file")
 
     import torch
     import torch.distributed as dist
@@ -79,7 +100,10 @@ def main():
         optimizer = torch.optim.AdamW(parameters, lr=1e-4, foreach=False)
         tokens = torch.Generator().manual_seed(args.seed + rank + 1)
         capacity = args.bucket_mib * 1024**2
-        with Trace.from_environment(device_id=profiler[local]) as trace:
+        delay = args.acceptance_host_delay
+        delay_applied = False
+        timing = NpuEventTiming.from_environment(torch_npu.npu, torch_npu_version=getattr(torch_npu, "__version__", None))
+        with Trace.from_environment(device_id=profiler[local], timing_adapter=timing) as trace:
             trace.group("gpt2-data-parallel", range(world))
             for stage, count in (("warmup", args.warmup), ("measured", args.iterations)):
                 for iteration in range(count):
@@ -93,14 +117,24 @@ def main():
                         loss.backward()
                         # Explicit synchronization keeps the SDK on the submitting thread.
                         for index, grads in enumerate(gradient_buckets(parameters, capacity)):
+                            preparation = trace.mark_preparation() if trace.online_probe is not None else None
                             flat = torch.cat([grad.reshape(-1) for grad in grads])
                             if flat.dtype != torch.float32:
                                 raise RuntimeError("sample expects FP32 gradients")
-                            with trace.collective(group="gpt2-data-parallel", call_site=f"gradient.bucket.{index}",
-                                    operation_type="AllReduce", element_count=flat.numel(), dtype="float32",
-                                    reduction="sum"):
-                                work = dist.all_reduce(flat, op=dist.ReduceOp.SUM, async_op=True)
-                            work.wait()
+                            if delay and stage == "measured" and (rank, iteration, index) == delay[:3]:
+                                with args.acceptance_evidence.open("x", encoding="utf-8") as evidence:
+                                    started = trace.mark_preparation()
+                                    time.sleep(delay[3])
+                                    ended = trace.mark_preparation()
+                                    json.dump(dict(run_id=trace.run_id, node_id=trace.node_id, rank=rank, iteration=iteration,
+                                        bucket=index, requested_seconds=delay[3], host_raw_ns=[started, ended]), evidence)
+                                    evidence.write("\n")
+                                delay_applied = True
+                            trace.call_collective(lambda: dist.all_reduce(flat, op=dist.ReduceOp.SUM, async_op=True),
+                                wait_for_work=True, group="gpt2-data-parallel", call_site=f"gradient.bucket.{index}",
+                                operation_type="AllReduce", element_count=flat.numel(), dtype="float32", reduction="sum",
+                                preparation_start_raw_ns=preparation,
+                                preparation_definition="gradient_bucket_pack_to_submit_v1" if preparation is not None else None)
                             flat.div_(world)
                             offset = 0
                             for grad in grads:
@@ -115,6 +149,8 @@ def main():
                         raise RuntimeError(f"non-finite loss on rank {rank}")
                     if rank == 0:
                         print(f"{stage} {iteration}: loss={value:.4f}", flush=True)
+            if delay and rank == delay[0] and not delay_applied:
+                raise RuntimeError("specified acceptance bucket was not present")
     finally:
         dist.destroy_process_group()
 

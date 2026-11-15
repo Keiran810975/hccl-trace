@@ -1,61 +1,90 @@
-# 在线集合通信诊断 V1
+# 在线集合通信诊断
 
-这是可选模式，不替换 `hccl-diag analyze` 或默认离线 Backtrace。现有训练 `Trace` 能提供
-Host 调用前观测、通信器成员和计数，但不能直接取得设备真实完成时间。因此当前可以在线判
-**缺席型 Hang（H1）**；已实现 Slow 的计算与报告接口，未接入实时 NPU 计时生产端。
+可选功能，默认关闭，不替换 `hccl-diag analyze`。这一版的验收范围是样例的显式 FP32 SUM
+AllReduce：H1 报缺席 Rank；S1 需要独立的本地准备延迟证据；S2 只报告通信实例。它不做
+物理故障定位，也不为异步 DDP hook 或所有 HCCL 算法自动插入探针。
 
-## 启动
-
-安装项目后，在能被各 Rank 到达的主机起一个收集器。先在本机回环测试：
+## 启动和报告
 
 ```bash
-hccl-diag-online --job-id train-001 --output ./online-train-001
+hccl-diag-online --job-id train-001 --output ./online-train-001 \
+  --expected-ranks "$WORLD_SIZE" --expected-collectives "$TOTAL_COLLOPS" --warmup-iterations 10
 ```
 
-在所有训练 Rank 的环境设置 `HCCL_TRACE_ONLINE_ADDR=127.0.0.1:7341`，
-`HCCL_TRACE_RUN_ID=train-001`，保留原来的 `Trace`、设备 ID 和 `HCCL_TRACE_CALLS_DIR` 配置。
-多机时用 `--listen <collector-private-ip>` 启动，让 Rank 设置该私有地址；服务端和所有 Rank
-使用同一个通过秘密管理配置的 `HCCL_TRACE_ONLINE_TOKEN`。TCP 本身不加密，只在受信私网或
-加密网络内使用，不对公网监听。未设置 `HCCL_TRACE_ONLINE_ADDR` 时不会启动探针。
+`TOTAL_COLLOPS` 是各 Rank 共同执行的操作数（含预热），不是乘 Rank 数之后的记录数。
+样例按实际梯度桶数乘总训练轮数；输入不会自动从已经收到的数据推断，以免缺失消息被当作正常。
+本机使用 `HCCL_TRACE_ONLINE_ADDR=127.0.0.1:7341`；多机时收集器 `--listen` 绑定受信私网地址，
+各 Rank 指向该地址，并用同一 `HCCL_TRACE_ONLINE_TOKEN`。TCP 本身不加密。各 Rank 的
+`HCCL_TRACE_RUN_ID` / `hccl-diag capture` 的 run ID 必须与 `--job-id` 一致。
 
-`Trace.group()` 在各 Rank 使用相同名称和真实成员集。重建通信器时注册新的代次，不能在同一
-代次重置计数。每个通信器需要完整且顺序一致的 `Trace.collective()` 覆盖，不能只标其中
-几次。该观测点是调用包裹层，不宣称是 HCCL 内部函数入口；未打点的通信也不会被诊断。
-训练调用不会等待网络或新加设备同步。队列过载会丢弃上报并显式记录缺口；该 Rank 的连续性
-证据降级，需要启动新 job 才能恢复。并行提交的框架适配器可以直接使用
-`OnlineProbe`，按真实提交次序登记并为异步完成保留返回的 `OperationToken`。
+- 默认 `HCCL_TRACE_ONLINE_TIMING=host`，能判 H1；缺少设备计时只计为覆盖问题。
+- 样例设置 `HCCL_TRACE_ONLINE_TIMING=npu_event`，启用 `torch_npu.npu.Event(enable_timing=True)`。
+  两枚 Event 记录在同一消费流：第一枚在 `Trace.call_collective()` 进入提交前，第二枚在原有
+  `Work.wait()` 之后；读取发生在训练原有 `npu.synchronize()` 之后，且必须通过两个 `query()`。
+  `wait()` 不计入 SDK 的 Host 提交区间。设置此模式但适配器不可用、Event 未就绪或结果非法时，
+  启动或首次读回会失败，不静默退回 Host 时间。Event 模式会新增两枚设备 Event，但不新增同步。
+- 所有准备和延迟必须发生在 `Trace.call_collective(submit, ...)` 之前；`submit` 只做实际
+  `dist.all_reduce`。在线模式拒绝用任意 `with trace.collective()` 块作为 ENTER。这个边界是
+  Python 显式调用的入口，不是 HCOMM 的原生函数入口。
 
-## 如何解读报告
+`telemetry.jsonl` 保存原始帧；`events.jsonl` 保存诊断和证据不足事件；`measurements.jsonl` 包括
+正常轮、预热、异常和缺失覆盖，保留 `R`、可定义时的 `P`、历史及 Rank 本地数据。
+`run_health.jsonl` 在预期 Rank 结束时（或收集器退出时）给出一次 `RUN_HEALTH`：确认 Rank、
+丢失序列、声明的丢弃数、计时覆盖、完整预热及预期通信数，同时记录 Host 写盘耗时与收集器
+锁等待。`acceptance_ready` 只是数据门禁，不代表异常检测已通过。正常退出要求收集器对最终
+序号和计数回 ACK；缺 ACK、重连、丢帧或应用异常使结果不能通过完整性验收。不重传，也不支持
+收集器热恢复；重启需使用新的 job 和输出目录。序列缺口和发送端丢弃数是两种观测，不能相加。
 
-- `NOT_ENTERED_HANG`：已有部分 Rank 进入，默认等待 30 秒另加 2 秒传输容忍；缺席 Rank
-  有新鲜、连续的心跳，且计数确实停在上一次通信。用收集器单调时钟，无需跨机 Host 相减。
-- `STALLED_UNKNOWN`：都已进入，健康遥测下仍未看到完成，不能区分设备停滞与计时未送达。
-  断连、丢帧和通信签名不一致则报告 `INCOMPLETE_DATA`，不猜成 H1。没有通信开始时不报警。
-- Slow 只对真实设备区间使用 `T_max > 3 × T_base`。正式第 0 轮用全部可比预热；之后用
-  最近 20 个正常历史样本的中位数（可配）。异常不写回基线；无法匹配标记
-  `INSUFFICIENT_BASELINE`。必要历史若因异步到达尚未完成，不能用未来样本填补。
-- `COMPUTATION_SLOW` 和 `COMMUNICATION_SLOW` 是 `P` 启发式分类，不是物理根因。
-  前者只把耗时最短的 Rank 列为疑似晚进入；后者在没有通信进度证据时不猜根因 Rank。
-  证据不足、角色不明或 `P` 在中间区间时报告 `SLOW_UNCLASSIFIED`。
+## 在真机上核验边界
 
-`telemetry.jsonl` 保存接收的帧，`events.jsonl` 保存按通信去重的报告。每条报告含 job、组、
-代次、计数和语义位置，可与启用在线模式后 SDK 的 `online_op_counter`、
-`online_communicator_generation` 对照；附 Rank 本地时间戳、时钟域、边界定义、误差和原始帧
-引用。没有可靠公共时间轴时，全局时间为空。当前只提供离线回溯接口字段，不自动抓取依赖图。
-
-## 设备计时适配和等价回放
-
-适配器必须能证明某个 `OperationToken` 对应同一次设备通信的起点和终点（边界定义保持一致，
-并包含定义范围内的协议等待）。它可在 `Trace.collective()` 内拿到 `Trace.online_token`，并用
-`OnlineProbe.device_span()` 异步上报。还应提供节点内时钟域、角色、算法和误差估计。API 返回、
-DDP Future 回调的 Host 时间和 `completion_boundary()` 的 Host 上界都不是设备结束时间。
-
-有原始 SDK 调用观测和 consolidated DB 的归档，可在数据所在环境用同一套 Slow 判定做等价回放：
+Event 模式首次运行**不设置验证配置**。`elapsed_time()` 给出持续时间，收集器保留
+`start_ns/end_ns=null`，不会编造绝对时间。它测的是 `consumer_stream_collective_v1`；
+能包括排队、跨流依赖与提交间隙，不能未经实测宣称等价于 HCCL 的 `COMMUNICATION_OP`。
+保留同一运行的 msprof 和在线记录，再做精确绑定对照：
 
 ```bash
-python3 -m hccl.tools.diagnosis.online_replay /path/to/capture --output ./online-replay.json
+python3 -m hccl.tools.diagnosis.online_timing_audit /path/to/capture ./online-train-001 \
+  --output ./timing-comparison.json
 ```
 
-回放调用现有精确绑定器，使用 `COMMUNICATION_OP.startNs/endNs`，验证各 Rank 调用顺序；
-它不读取注入标签，不从事后数据推断 H1，不把离线 profiler 区间声称为训练时实时可读。
-输出包含基线、每次可比较通信的 `R`、告警，以及完整结果 SHA-256。评分应在封存之后单独完成。
+对照输出逐 Rank 的两种计时、差值、比例和 profiler 观测到的 `algType`，不会自动认证边界或
+猜算法。需在固定的软硬件栈、拓扑与 AllReduce 配置上独立核验 `Work.wait()` 的依赖、从流
+完成边界和正常/S1/S2 下两种计时的行为，确认未严重扰动训练，才能启用分类配置。
+完成后往所有 Rank 提供同一 `HCCL_TRACE_ONLINE_TIMING_PROFILE` JSON 文件，并用
+`HCCL_TRACE_ONLINE_STACK_ID` 锁定这次人工核验的环境标识。配置字段：
+
+- `schema_version: 1`、`timing_definition: "consumer_stream_collective_v1"`、`stack_id`、
+  `torch_npu_version`、`boundary_evidence`（独立验收报告标识）。`stack_id` 应覆盖明确核对过的
+  CANN/HCCL/设备/拓扑配置，它不是运行时自动硬件认证。
+- `communicator_id`、`participants`（有序全局 Rank 列表）；`buckets` 以 `call_site` 为键，
+  每项含 `tensor_bytes`、`dtype`、`reduction`、核验后的 `algorithm`，以及以 Rank 字符串为键的
+  `rank_roles`。没有经核验的角色不得写成同类。各 Rank 的配置 SHA 必须一致。
+
+公式仍为 `R=(Tmax-base)/base`（严格 `R>2` 才慢），`P=(Tmax-Tmin)/(Tmax-base)`。
+每个可比位置必须收齐全量预热，乱序到达先缓存。如果预热中的最大值超过其中位数三倍，
+整条基线不可用，不删某条来凑结果。正式第 0 轮用全部预热，之后只用较早的正常历史，
+最多最近 20 个。S1 要求 `P>0.6` 且唯一耗时最短 Rank 的本地准备增量独立超过历史阈值
+（1 ms、历史中位数的 50%、3 MAD 取最大）；准备区间可能包含前序等待，不证明计算核变慢。
+S2 要求角色可比且 `P<0.4`，不报告故障 Rank。计时未验、无充分证据时为 `SLOW_UNCLASSIFIED`。
+
+## 验收矩阵
+
+| 项 | 固定测试及通过条件 |
+| --- | --- |
+| T0/T1 | 两机全 Rank，10 预热 + 50 正式。拿到完整计时与算法对照，无无故 H1/S1/S2。 |
+| T2 | 目标 Rank 在指定正式轮/桶调用前延迟 40 s，心跳继续；报告正确通信和缺席 Rank。 |
+| T3 | 同样位置用 0.1 s 调用前延迟。独立记录确实晚进入，再核查 `R/P` 与 S1 Rank；不达阈值算未检出。 |
+| T4 | 在专用实验环境独立施加并核验 RoCE 异常；先核查目标 CollOp 是否真正超过 3 倍，再看 S2，不按注入结果改阈值。 |
+| T5/T6 | 人为丢失或重连：完整性失败，不当成确定异常。正式耗时早于最后预热到达：先不分类，补齐后重判。 |
+| T7 | 同栈、同桶、同轮数对照关闭/Host-only/Event 三档；先固定开销预算，比较正式 step 时间和 AllReduce 时长，另核对写盘与锁等待。 |
+
+T2/T3 可给样例传 `--acceptance-host-delay 4,12,0,40 --acceptance-evidence /path/to/new-evidence.json`，
+T3 将 `40` 换成 `0.1`。索引从 0 开始，文件由目标 Rank 在调用前记录实际 Host 延迟，
+不发送到检测端。T4 的注入在检测链之外，不自动修改网卡。先封存诊断与健康报告，再读取真值。
+
+给旧采集做仅 Slow 的离线等价回放可用
+`python3 -m hccl.tools.diagnosis.online_replay /path/to/capture --output ./online-replay.json`。
+回放不读注入标签，也不把离线计时当成实时可用。新 Event 路径需通过上面的真机验收后才能宣称支持。
+
+参考：[昇腾 WorkHCCL 等待实现](https://gitee.com/ascend/pytorch/blob/4c0820c212ba419ce4926ca85560a7233e9c2f85/torch_npu/csrc/distributed/ProcessGroupHCCL.cpp)、
+[MindStudio 的 Profiler DB 字段说明](https://www.hiascend.com/document/detail/en/mindstudio/830/TITools/Profiling/atlasprofiling_16_1144.html)。

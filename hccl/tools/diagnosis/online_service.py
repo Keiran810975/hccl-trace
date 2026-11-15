@@ -37,14 +37,23 @@ class Handler(socketserver.StreamRequestHandler):
                 next_identity = row.get("rank_id"), row.get("session_id")
                 if identity is not None and next_identity != identity:
                     break
+                received = time.monotonic_ns()
                 with self.server.lock:
-                    if self.server.write_error is not None:
+                    if self.server.write_error is not None or self.server.finished:
                         return
                     now = time.monotonic_ns()
-                    self.server.tracker.ingest(row, now)
-                    identity = next_identity
-                    if not self.server.write_frame(dict(row, collector_seen_ns=now)):
+                    self.server.lock_wait_ns += now-received
+                    self.server.max_lock_wait_ns = max(self.server.max_lock_wait_ns, now-received)
+                    if not self.server.write_frame(row, now):
                         return
+                    identity = next_identity
+                    if row.get("event") == "run_end":
+                        state = self.server.tracker.streams[row["rank_id"]]
+                        accepted = state.session == row["session_id"] and state.valid and state.ended and state.seq == row["seq"]
+                        ack = dict(event="run_end_ack", session_id=row["session_id"], seq=row["seq"], accepted=accepted)
+                if row.get("event") == "run_end":
+                    self.wfile.write((json.dumps(ack) + "\n").encode())
+                    return
         except (OSError, ValueError, RecursionError):
             # Invalid or disconnected streams cannot prove H1.
             pass
@@ -58,10 +67,17 @@ class Collector(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-    def __init__(self, address, *, tracker, telemetry, events, token=None):
+    def __init__(self, address, *, tracker, telemetry, events, measurements=None, health_file=None,
+                 expected_ranks=None, expected_collectives=None, token=None):
         if address[0] not in {"127.0.0.1", "localhost"} and not token:
             raise ValueError("non-loopback collectors require HCCL_TRACE_ONLINE_TOKEN")
         self.tracker, self.telemetry, self.events = tracker, telemetry, events
+        if measurements is not None:
+            self.tracker.observe_measurement = lambda row: _write(measurements, row)
+        self.health_file = health_file
+        self.expected_ranks, self.expected_collectives = expected_ranks, expected_collectives
+        self.finished = False
+        self.lock_wait_ns = self.max_lock_wait_ns = self.ingested = 0
         self.token = token.encode() if token else None
         self.lock = threading.Lock()
         self.write_error = None
@@ -76,14 +92,34 @@ class Collector(socketserver.ThreadingTCPServer):
         for row in self.tracker.drain():
             _write(self.events, row)
 
-    def write_frame(self, row):
+    def write_frame(self, row, now):
         try:
-            _write(self.telemetry, row)
-            self.flush_events()
+            _write(self.telemetry, dict(row, collector_seen_ns=now))
+            try:
+                self.tracker.ingest(row, now)
+                self.ingested += 1
+            finally:
+                self.flush_events()
+            if (row.get("event") == "run_end" and self.expected_ranks is not None
+                    and all(self.tracker.streams.get(r) and self.tracker.streams[r].ended
+                            for r in range(self.expected_ranks))):
+                self.finish_run(now)
         except OSError as exc:
             self.write_error = exc
             return False
         return True
+
+    def finish_run(self, now):
+        if self.finished:
+            return
+        self.tracker.finish(now)
+        self.flush_events()
+        if self.health_file is not None:
+            health = self.tracker.health(self.expected_ranks, self.expected_collectives)
+            health.update(ingested_frames=self.ingested, collector_lock_wait_ns=self.lock_wait_ns,
+                          collector_max_lock_wait_ns=self.max_lock_wait_ns)
+            _write(self.health_file, health)
+        self.finished = True
 
     def service_actions(self):
         with self.lock:
@@ -103,11 +139,16 @@ def main(argv=None):
     parser.add_argument("--heartbeat-ttl", type=float, default=5.)
     parser.add_argument("--transport-grace", type=float, default=2.)
     parser.add_argument("--baseline-window", type=int, default=20)
+    parser.add_argument("--warmup-iterations", type=int, default=10)
+    parser.add_argument("--expected-ranks", type=int, help="global ranks 0..N-1 for final completeness audit")
+    parser.add_argument("--expected-collectives", type=int, help="total target CollOps including warmup")
     args = parser.parse_args(argv)
     try:
+        if any(v is not None and v < 1 for v in (args.expected_ranks, args.expected_collectives)):
+            raise ValueError("expected counts must be positive")
         tracker = OnlineTracker(args.job_id, hang_timeout=args.hang_timeout,
             heartbeat_ttl=args.heartbeat_ttl, transport_grace=args.transport_grace,
-            baseline_window=args.baseline_window)
+            baseline_window=args.baseline_window, warmup_iterations=args.warmup_iterations)
         token = os.environ.get("HCCL_TRACE_ONLINE_TOKEN")
         if args.listen not in {"127.0.0.1", "localhost"} and not token:
             raise ValueError("non-loopback collectors require HCCL_TRACE_ONLINE_TOKEN")
@@ -115,13 +156,20 @@ def main(argv=None):
             args.output.mkdir(parents=True, exist_ok=False)
             telemetry = stack.enter_context((args.output / "telemetry.jsonl").open("x", encoding="utf-8", buffering=1))
             events = stack.enter_context((args.output / "events.jsonl").open("x", encoding="utf-8", buffering=1))
+            measurements = stack.enter_context((args.output / "measurements.jsonl").open("x", encoding="utf-8", buffering=1))
+            health = stack.enter_context((args.output / "run_health.jsonl").open("x", encoding="utf-8", buffering=1))
             server = stack.enter_context(Collector((args.listen, args.port), tracker=tracker,
-                                                    telemetry=telemetry, events=events, token=token))
+                telemetry=telemetry, events=events, measurements=measurements, health_file=health,
+                expected_ranks=args.expected_ranks, expected_collectives=args.expected_collectives, token=token))
             print(f"Online collector listening on {server.server_address[0]}:{server.server_address[1]}", flush=True)
             try:
                 server.serve_forever(poll_interval=.2)
             except KeyboardInterrupt:
                 pass
+            finally:
+                if server.write_error is None:
+                    with server.lock:
+                        server.finish_run(time.monotonic_ns())
     except (OSError, ValueError, OverflowError) as exc:
         parser.exit(1, f"collector: {exc}\n")
     return 0
