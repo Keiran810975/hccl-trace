@@ -23,7 +23,7 @@ class Trace:
     completion boundary. A Python collective return is not device completion.
     """
 
-    def __init__(self, directory, *, node_id, user_rank, device_id, run_id="capture"):
+    def __init__(self, directory, *, node_id, user_rank, device_id, run_id="capture", online_probe=None):
         if any(type(v) is not int or v < 0 for v in (user_rank, device_id)):
             raise ValueError("explicit nonnegative global rank and profiler device ID required")
         if not node_id or not run_id:
@@ -35,6 +35,9 @@ class Trace:
         self.active_iteration, self.sequence = None, 0
         self._owner_thread = threading.get_ident()
         self._file = (self.directory / ("rank-{}.jsonl".format(user_rank))).open("x", encoding="utf-8")
+        self.online_probe = online_probe
+        self.online_token = None
+        self._online_generations, self._online_pending = {}, []
         self._write(dict(event="runtime", schema_version=1, run_id=run_id, node_id=node_id,
                          user_rank=user_rank, device_id=device_id, pid=os.getpid()))
 
@@ -48,15 +51,29 @@ class Trace:
             if "HCCL_TRACE_DEVICE_ID" not in env:
                 raise ValueError("provide actual profiler device_id; it is not inferred from LOCAL_RANK")
             device_id = int(env["HCCL_TRACE_DEVICE_ID"])
-        return cls(directory, node_id=node_id or env.get("HCCL_TRACE_NODE_ID", socket.gethostname()),
-                   user_rank=int(env["RANK"]), device_id=device_id,
-                   run_id=env.get("HCCL_TRACE_RUN_ID", "capture"))
+        node_id = node_id or env.get("HCCL_TRACE_NODE_ID", socket.gethostname())
+        user_rank = int(env["RANK"])
+        run_id = env.get("HCCL_TRACE_RUN_ID", "capture")
+        probe = None
+        if env.get("HCCL_TRACE_ONLINE_ADDR"):
+            from .online_probe import OnlineProbe
+
+            if not env.get("HCCL_TRACE_RUN_ID"):
+                raise ValueError("online telemetry requires an explicit shared HCCL_TRACE_RUN_ID")
+            probe = OnlineProbe.from_environment(job_id=run_id, rank_id=user_rank, node_id=node_id)
+        try:
+            return cls(directory, node_id=node_id, user_rank=user_rank, device_id=device_id,
+                       run_id=run_id, online_probe=probe)
+        except BaseException:
+            if probe is not None:
+                probe.close()
+            raise
 
     def _write(self, value):
         self._file.write(json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n")
         self._file.flush()
 
-    def group(self, name, participants, *, db_group_name=None):
+    def group(self, name, participants, *, db_group_name=None, communicator_generation=0):
         members = list(participants)
         if (not isinstance(name, str) or not name or not members
                 or any(type(rank) is not int or rank < 0 for rank in members)
@@ -65,6 +82,9 @@ class Trace:
         value = dict(group_id=name, participants=sorted(members), db_group_name=db_group_name)
         if name in self.groups and self.groups[name] != value:
             raise ValueError("communication group identity changed")
+        if self.online_probe is not None:
+            self.online_probe.register(name, communicator_generation, members)
+            self._online_generations[name] = communicator_generation
         self.groups[name] = value
 
     @contextmanager
@@ -111,9 +131,25 @@ class Trace:
             if type(preparation_start_raw_ns) is not int or not 0 <= preparation_start_raw_ns <= item["before"]["raw_ns"]:
                 raise ValueError("preparation start must be an actual earlier raw-clock observation")
             item["preparation_start_raw_ns"] = preparation_start_raw_ns
+        token = previous = None
+        if self.online_probe is not None:
+            from .online_probe import tensor_description
+
+            canonical_dtype, tensor_bytes = tensor_description(dtype, element_count)
+            token = self.online_probe.enter(group, self._online_generations[group],
+                op_type="".join(c for c in operation_type.lower() if c.isalnum()).removeprefix("hcom"),
+                tensor_bytes=tensor_bytes, host_entry_ts=item["before"]["raw_ns"], stage=stage,
+                iteration=iteration, bucket_id=call_site, occurrence=occurrence, dtype=canonical_dtype,
+                reduction=str(reduction).lower() if reduction is not None else None,
+                host_entry_source="sdk_before_collective_call")
+            previous, self.online_token = self.online_token, token
+            item.update(online_op_counter=token.op_counter,
+                        online_communicator_generation=token.communicator_generation)
         try:
             yield self
         except BaseException:
+            if token is not None:
+                self.online_probe.error(token)
             item.update(after=_clocks(), status="failed")
             self._write(item)
             raise
@@ -121,6 +157,10 @@ class Trace:
             item.update(after=_clocks(), status="submitted")
             self._write(item)
             self.pending.append(item["sequence"])
+            if token is not None:
+                self._online_pending.append(token)
+        finally:
+            self.online_token = previous
 
     def completion_boundary(self):
         """Call only after the user's existing synchronize()/Work completion.
@@ -128,13 +168,22 @@ class Trace:
         This function records the observation; it never performs synchronization.
         The binder also requires every selected DB operation to end by this bound.
         """
-        self._write(dict(event="completion", schema_version=1, sequences=list(self.pending), clocks=_clocks()))
+        clocks = _clocks()
+        self._write(dict(event="completion", schema_version=1, sequences=list(self.pending), clocks=clocks))
         self.pending.clear()
+        if self.online_probe is not None:
+            for token in self._online_pending:
+                self.online_probe.host_boundary(token, clocks["raw_ns"])
+            self._online_pending.clear()
 
     def close(self):
-        if not self._file.closed:
-            self._write(dict(event="capture_end", schema_version=1, pending_sequences=list(self.pending)))
-            self._file.close()
+        try:
+            if not self._file.closed:
+                self._write(dict(event="capture_end", schema_version=1, pending_sequences=list(self.pending)))
+                self._file.close()
+        finally:
+            if self.online_probe is not None:
+                self.online_probe.close()
 
     def __enter__(self):
         return self
