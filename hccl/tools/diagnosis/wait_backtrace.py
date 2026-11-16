@@ -2,16 +2,109 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict, deque
+from decimal import Decimal
+from heapq import heappop, heappush
 from . import analyze_waits as waits
 from . import compare_diagnosis as comparison
 from .dependency_model import stable_id
 from .task_classifier import classify_task
 from .clock_alignment import models_from_report
-from .dependency_timing import edge_observation
+from .dependency_timing import ORDER, WAIT, edge_observation
 from . import wait_arrival
 
 
 WORK_KINDS = frozenset({"sdma", "reduce_inline", "kernel_mix_aic", "kernel_mix_aiv", "kernel_aivec"})
+
+
+def trace_blocking_wait(gid, graph, progress, limit):
+    """Follow observed release and dispatch prerequisites for an online S1 alert."""
+    seed = progress.milestone(gid)
+    producer = graph.wait_proof(gid)
+    gaps, stages, found = set(), {}, {}
+    best, settled, queue = {gid: 0}, set(), [(0, gid)]
+    next_hop = {}
+
+    def path_from(k):
+        path = []
+        while k in next_hop:
+            proof = next_hop[k]
+            path.append(proof)
+            k = proof["dst"]
+        return path
+
+    while queue and len(settled) < limit:
+        cost, key = heappop(queue)
+        if key in settled or best[key] != cost:
+            continue
+        settled.add(key)
+        node = progress.milestone(key)
+        task = progress.tasks.get(key, {})
+        if (task.get("stage") == "warmup" or node["iteration"] is not None and seed["iteration"] is not None
+                and not seed["iteration"] - 1 <= node["iteration"] <= seed["iteration"]):
+            gaps.add((key, "outside_backtrace_iteration_window"))
+            continue
+        path = path_from(key)
+        if node["intrinsic_work_slow"] and path:
+            growth = Decimal(node["duration_delta_ns"])
+            found[key] = dict(task=node, path=path, path_slack_and_clock_ns=cost, status=(
+                "blocking_overrun_supported" if growth > cost else "upstream_overrun_not_shown_to_block"))
+        elif key != gid and node["task_kind"] not in WAIT and not node["duration_comparable"]:
+            gaps.add((key, "upstream_task_without_comparable_history"))
+        if node["task_kind"] in WAIT:
+            release = graph.wait_proof(key)
+            if key == gid and not seed["slow_wait"]:
+                # A late Wait start precedes the gated interval itself. Its
+                # arrival can be delayed by the stream, not by its future release.
+                links = [graph.proof(e) for e in graph.orders[key]]
+                if not links:
+                    gaps.add((key, "missing_stream_or_host_predecessor"))
+                if not release["verified"]:
+                    gaps.add((key, release["status"]))
+            elif release["verified"]:
+                links = [release]
+                if node["task_kind"] == "event_wait":
+                    stage = progress.milestone(release["src"])
+                    stages[key] = dict(task=stage, path=[release, *path],
+                        status=("readiness_release_late_vs_history" if stage["completion_late"]
+                                else "record_observed_during_wait"))
+            elif release["status"] == "producer_already_ready":
+                # This can explain late dispatch, but not growth of this Wait.
+                links = ([graph.proof(e) for e in graph.orders[key]]
+                         if node["starts_late"] and (key == gid or not node["slow_wait"]) else [])
+                gaps.add((key, release["status"]))
+            else:
+                links = []
+                gaps.add((key, release["status"]))
+        else:
+            links = [graph.proof(e) for e in graph.orders[key]]
+        if not links and node["task_kind"] not in WAIT:
+            gaps.add((key, "missing_stream_or_host_predecessor"))
+        for proof in links:
+            if not proof["verified"]:
+                gaps.add((key, proof["status"]))
+                continue
+            parent = proof["src"]
+            extra = proof["slack_ns"] + proof["estimated_error_ns"]
+            if parent not in settled and (parent not in best or cost + extra < best[parent]):
+                best[parent] = cost + extra
+                next_hop[parent] = proof
+                heappush(queue, (cost + extra, parent))
+
+    truncated = any(key not in settled for _, key in queue)
+    if truncated:
+        gaps.add((gid, "backtrace_budget_exhausted"))
+    # Prefer supported earlier work on the same path; independent branches survive.
+    earlier_on_path = {edge["dst"] for item in found.values()
+                       if item["status"] == "blocking_overrun_supported" for edge in item["path"]}
+    for key in earlier_on_path & found.keys():
+        found[key]["earlier_supported_overrun_on_path"] = True
+    ranked = sorted(found.values(), key=lambda item: (
+        item["status"] != "blocking_overrun_supported", item.get("earlier_supported_overrun_on_path", False),
+        -len(item["path"]), item["task"]["graph_id"]))
+    return dict(wait=seed, trigger="wait_duration_growth" if seed["slow_wait"] else "late_wait_start",
+                producer=producer, upstream_task_or_stage=[*ranked, *stages.values()],
+                evidence_gaps=[dict(graph_id=g, reason=r) for g, r in sorted(gaps)],
+                visited_count=len(settled), search_truncated=truncated)
 
 
 def local_release_check(src, dst, clocks, quantization):

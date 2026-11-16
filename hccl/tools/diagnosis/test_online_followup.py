@@ -51,12 +51,16 @@ class FollowupTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "job ID"):
                 followup.load_alerts(path, "different")
 
+    def test_archived_unclassified_alert_stays_undetermined(self):
+        self.alert["event_type"] = "SLOW_UNCLASSIFIED"
+        self.assertEqual(self.resolved()[0]["route"], "undetermined")
+
     def test_partial_binder_keeps_only_independent_exact_matches(self):
         self.assertEqual(_certain_pairs({0: {20}, 1: {30, 31}, 2: {30}, 3: set()}), {0: 20})
 
     def test_s1_keeps_host_to_wait_and_s2_keeps_outgoing_path(self):
         s1, = self.resolved()
-        s2 = dict(s1, route="communication", operation_scope="s2", op_counter=42, bucket="other")
+        s2 = dict(s1, route="S2", operation_scope="s2", op_counter=42, bucket="other")
 
         def task(g, scope, kind, *, late=False):
             return dict(graph_id=g, operation_scope=scope, task_kind=kind, node_id="node", user_rank=1,
@@ -95,8 +99,9 @@ class FollowupTests(unittest.TestCase):
         edges = [dict(src='seed', dst='next', edge_id='1'), dict(src='next', dst='wait', edge_id='2')]
         tasks = [dict(graph_id=row['_graph_id'], stage='measured', iteration=epoch)
                  for row, epoch in zip(rows, (6, 7, 7, 8))]
-        roots = [dict(graph_id='seed', evidence_paths={'wait': ['1', '2']})]
-        normalized = dict(candidates=[], online_followup=dict(alerts=[dict(operation_scope='seed', iteration=6)]))
+        roots = []
+        normalized = dict(candidates=[], online_followup=dict(alerts=[dict(operation_scope='seed', iteration=6,
+            downstream_propagation=[dict(downstream=[dict(path=edges)])])]))
         with TemporaryDirectory() as folder:
             work = Path(folder)
             (work/'operation_timings.csv').write_text('operation_scope\nseed\nnext\nwait\n')

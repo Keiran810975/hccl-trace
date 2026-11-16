@@ -13,6 +13,7 @@ from . import analyze_waits as waits
 from . import source_propagation as propagation
 from . import source_propagation_view as presentation
 from .capture_discovery import read_json, write_json
+from .online_followup import evidence_paths
 from .report_contract import CLEAN_TASK_REFERENCE, without_critical_path
 
 
@@ -40,6 +41,9 @@ def publish_selected_iteration_report(directory, output, normalized, roots, task
     wanted = {t['graph_id'] for t in formal if t['iteration'] in epochs}
     if followup is not None and graph_data is not None:
         path_ids = {edge for r in roots for path in r.get('evidence_paths', {}).values() for edge in path}
+        for alert in followup["alerts"]:
+            for path in evidence_paths(alert):
+                path_ids.update(hop["edge_id"] for hop in path)
         for edge in graph_data[1]:
             if edge['edge_id'] in path_ids:
                 wanted.update((edge['src'], edge['dst']))
@@ -229,6 +233,13 @@ def publish_final_report(directory, output, normalized, roots, comparisons, *, g
                 node_roles.setdefault(key, "chain")
             node_roles[chain["target_wait_graph_id"]] = "wait"
         node_roles[anchor] = "host_anchor" if root["source"]["component"] == "host_preparation" else "candidate"
+    for alert in report.get("online_followup", {}).get("alerts", ()):
+        for path in evidence_paths(alert):
+            if not path:
+                continue
+            ids = [edge["edge_id"] for edge in path]
+            for endpoint in (path[0]["src"], path[-1]["dst"]):
+                paths.setdefault(endpoint, []).extend(ids)
     for node in model["nodes"]:
         node["taskDomain"] = classifications.get(node["id"], "unknown")
         if node["id"] in node_roles:

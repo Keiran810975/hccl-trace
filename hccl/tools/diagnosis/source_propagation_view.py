@@ -166,43 +166,163 @@ def build_view_model(report):
                 timing_labels=TIMING_LABELS, boundary_labels=BOUNDARY_LABELS)
 
 
+def _stage_link(task):
+    stage = " / ".join(str(task[k]) for k in ("phase", "step", "event") if task.get(k) not in ("", None))
+    label = f'Rank {task["rank"]} · {task["task_kind"]}' + (f" · {stage}" if stage else "")
+    return f'<a href="execution.html#{quote(task["graph_id"], safe="")}">{escape(label)}</a>'
+
+
+def _evidence_path(path):
+    hops = []
+    for hop in path:
+        edge = (f'{hop["src"]} → {hop["dst"]} · {hop["kind"]} / {hop["confidence"]} · {hop["status"]}'
+                f' · 时钟误差 {duration(hop.get("estimated_error_ns"))}')
+        hops.append(f'<li>{escape(edge)}</li>')
+    return f'<details><summary>依赖路径（{len(hops)} 条边）</summary><ol>{"".join(hops)}</ol></details>'
+
+
+def _blocking_summary(row):
+    content = []
+    for prep in row.get("host_preparation_observation", ()):
+        relation = (f'关联 {len(prep["related_waits"])} 个 Wait（依赖与时间证据）'
+                    if prep["related_waits"] else "未证实影响其他 Rank 的 Wait")
+        label = (f'Rank {prep["user_rank"]} · Host 准备 {duration(prep["duration_ns"])} · '
+                 f'起止 {prep["start_ns"]}–{prep["stop_ns"]} ns · '
+                 f'增量 {duration(prep["delta_ns"], signed=True)} · {relation} · 具体 CPU 任务未知')
+        links = " ".join(f'<a href="execution.html#{quote(w["graph_id"], safe="")}">关联 Wait</a>'
+                         for w in prep["related_waits"])
+        content.append(f'<p>{escape(label)} {links}</p>')
+    for entry in row.get("entry_wait_observations", ()):
+        content.append(f'<p>CollOp 开始前的同流门控：{_stage_link(entry["wait"])} · '
+                       f'{escape(entry["wait"]["wait_producer"]["status"])}。'
+                       f'仅观察到入口依赖，不据此判定耗时异常。</p>')
+    for trace in row.get("blocking_waits", ()):
+        stage_labels = {"blocking_overrun_supported": "有阻塞证据的执行增长",
+                        "upstream_overrun_not_shown_to_block": "上游执行增长，未证明阻塞",
+                        "readiness_release_late_vs_history": "Event 释放晚于历史",
+                        "record_observed_during_wait": "Wait 内观察到 Event Record，未定位更早任务"}
+        parts = []
+        for stage in trace["upstream_task_or_stage"]:
+            task = stage["task"]
+            label = stage_labels[stage["status"]]
+            if stage.get("earlier_supported_overrun_on_path"):
+                label += "；同链更早已有异常"
+            interval = f'{task["start_ns"]}–{task["stop_ns"]} ns（本地 profiler）'
+            parts.append(f'<li>{_stage_link(task)} · {escape(label)} · {interval}'
+                         f'{_evidence_path(stage["path"])}</li>')
+        why = escape(trace["producer"]["status"])
+        trigger = "等待增长" if trace["trigger"] == "wait_duration_growth" else "晚开工，Wait 耗时未过线"
+        if trace["producer"].get("verified"):
+            parts.append(f'<li>{_evidence_path([trace["producer"]])}</li>')
+        gaps = ", ".join(sorted({g["reason"] for g in trace["evidence_gaps"]}))
+        content.append(f'<details><summary>{_stage_link(trace["wait"])} · {trigger} · {why}</summary>'
+                       f'<ul>{"".join(parts)}</ul><p>证据缺口：{escape(gaps or "无记录")}</p></details>')
+    return "".join(content)
+
+
+def _progress_summary(row):
+    progress = row.get("rank_progress", ())
+    if not progress:
+        return ""
+    priority = row.get("unique_first_priority")
+    first = f"优先检查 Rank {priority}" if priority is not None else "未确定唯一优先 Rank"
+    body, milestones = [], []
+    for rank in progress:
+        first_stages = "；".join(_stage_link(m) for m in rank["first_abnormal_frontier"]) or "—"
+        coverage = f'{rank["progress_comparable_count"]}/{rank["milestone_count"]}'
+        body.append(f'<tr><td>{rank["rank"]}</td><td>{rank["priority_rank"] or "—"}</td>'
+                    f'<td>{escape(rank["evidence_level"])}</td><td>{first_stages}</td>'
+                    f'<td>{escape(coverage)}</td><td>{rank["outgoing_verified_dependents"]}</td>'
+                    f'<td>{escape(rank["ranking_reason"])}</td></tr>')
+        changed = [m for m in rank["milestones"] if any(
+            m[k] for k in ("intrinsic_work_slow", "slow_wait", "starts_late", "completion_late"))]
+        items = []
+        for m in changed:
+            c = m["completion_progress"] or {}
+            label = (f'结束偏移 {duration(c.get("value_ns"))} · '
+                     f'相对自身历史 {duration(c.get("delta_ns"), signed=True)} · '
+                     f'历史中位 {duration(c.get("historical_median_ns"))} · '
+                     f'MAD {duration(c.get("historical_mad_ns"))} · 样本 {c.get("sample_count", 0)} · '
+                     f'自身耗时增量 {duration(m["duration_delta_ns"], signed=True)} · '
+                     f'{m["start_ns"]}–{m["stop_ns"]} ns（本地 profiler）')
+            items.append(f'<li>{_stage_link(m)} · {escape(label)}</li>')
+        milestones.append(f'<details><summary>Rank {rank["rank"]} 异常里程碑（{len(items)}）</summary>'
+                          f'<ul>{"".join(items)}</ul></details>')
+        for protocol in rank["observed_receive_protocol_intervals"]:
+            interval = (f'Rank {protocol["sender_rank"]} → Rank {rank["rank"]}：提交至接收通知的协议观测区间 '
+                        f'{duration(protocol["duration_ns"])} · 增量 {duration(protocol["delta_ns"], signed=True)} · '
+                        f'时钟误差 {duration(protocol["comparison_clock_error_ns"])}，不是 RDMA 硬件耗时。')
+            milestones.append(f'<p>{escape(interval)} '
+                              f'<a href="execution.html#{quote(protocol["wait_graph_id"], safe="")}">接收 Wait</a></p>')
+    paths = []
+    for search in row.get("downstream_propagation", ()):
+        outcomes = {"wait_growth": "等待增长", "start_displacement_with_normal_duration": "晚开工、耗时未过线",
+                    "independent_execution_overrun": "自身也慢，不归因于前一阶段"}
+        hits = "".join(f'<li>{_stage_link(hit["task"])} · {outcomes[hit["change"]]} · '
+                       f'{escape(hit["status"])}{_evidence_path(hit["path"])}</li>'
+                       for hit in search["downstream"])
+        gaps = ", ".join(sorted({g["reason"] for g in search["evidence_gaps"]}))
+        paths.append(f'<details><summary>{_stage_link(search["seed"])} · {escape(search["seed_type"])} · '
+                     f'{len(search["downstream"])} 个下游异常</summary><ul>{hits}</ul>'
+                     f'<p>证据缺口：{escape(gaps or "无记录")}。是否影响整个 CollOp 完成：未确定。</p></details>')
+    return (f'<h3>S2 Rank 排查优先级</h3><p>{first}。各 Rank 与自己的历史比较，不是故障设备定位。</p>'
+            '<table><thead><tr><th>Rank</th><th>优先级</th><th>证据</th><th>各流首次异常</th>'
+            '<th>进度覆盖</th><th>已验证下游 Wait</th><th>理由</th></tr></thead>'
+            f'<tbody>{"".join(body)}</tbody></table>{"".join(milestones)}'
+            f'<h3>主动下游追踪</h3>{"".join(paths) or "<p>未找到可追踪的异常阶段。</p>"}')
+
+
 def _followup_panel(followup):
     if followup is None:
         return ""
     labels = {"bound_exact": "已精确关联设备通信", "profiler_operation_not_uniquely_bound": "设备通信无法唯一绑定",
               "incomplete_sdk_token": "缺少完整的 Rank 调用记录"}
 
-    def task_list(tasks):
+    def task_list(tasks, *, late=False):
         items = []
         for task in tasks:
             graph_id = quote(task["graph_id"], safe="")
             label = TASK_LABELS.get(task["task_kind"], task["task_kind"])
             details = (f'{location(task)} · {label} · {duration(task["duration_ns"])} '
                        f'/ 参考 {duration(task["reference_mean_ns"])} · {duration(task["delta_ns"], signed=True)}')
+            if late:
+                details += f' · 相对轮起点晚 {duration(task["iteration_start_delta_ns"], signed=True)}'
             times = f'{task["observed_start_ns"]} – {task["observed_stop_ns"]} ns（本地 profiler）'
             items.append(f'<li><a href="execution.html#{graph_id}">{escape(details)}</a><br><small>{escape(times)}</small></li>')
         return '<ul>' + ''.join(items) + '</ul>' if items else '<p class="muted">当前证据未检出</p>'
 
     entries = []
     for row in followup["alerts"]:
+        route = {"S1": "S1 准备延迟", "S2": "S2 通信慢化", "undetermined": "慢化类型未确定"}
         title = escape(f'iter {row["iteration"]} · {row["bucket"]} · op {row["op_counter"]} · '
-                       + ('S1 准备延迟' if row["route"] == 'S1' else '通信慢化'))
+                       + route.get(row["route"], "通信慢化"))
         state = escape(labels[row["binding_status"]])
         metrics = row["online_metrics"]
         note = escape(f'R={metrics["R"]} · P={metrics["P"]} · 计时边界'
                       + ('已核验' if metrics["timing_boundary_verified"] else '未核验'))
         content = f'<p>{state} · {note}</p>'
         if row["operation_scope"]:
+            if "detailed_rank_count" in row:
+                content += f'<p>详细 Trace 覆盖：{row["detailed_rank_count"]}/{row["expected_rank_count"]} Rank。</p>'
+            if row["route"] == "S1":
+                suspect = row.get("suspected_rank")
+                content += f'<h3>S1 上游阻塞追查</h3><p>在线怀疑 Rank：{suspect if suspect is not None else "未定"}。</p>'
+            content += _blocking_summary(row) + _progress_summary(row)
             counts = (f'可比较 Task {row["comparable_task_count"]} · 无对照 Wait {row["uncomparable_wait_count"]} '
                       f'· 关联候选 {len(row["source_candidate_ids"])} · 已报告依赖路径 {len(row["dependency_paths"])}')
-            content += f'<p>{counts}</p><h3>慢 Task</h3>{task_list(row["slow_tasks"])}<h3>慢 Wait</h3>{task_list(row["slow_waits"])}'
-            if row["route"] == "S1":
+            content += (f'<details><summary>慢 Task / Wait 统计观测</summary><p>{counts}</p>'
+                        f'<h3>慢 Task</h3>{task_list(row["slow_tasks"])}<h3>慢 Wait</h3>{task_list(row["slow_waits"])}')
+            if row["route"] in {"S1", "undetermined"}:
                 prep = '; '.join(f'Rank {p["user_rank"]}: {duration(p["stop_ns"]-p["start_ns"])}'
                                  for p in row["host_preparation"])
-                content += f'<p>已绑定的 Host 准备区间：{escape(prep or "无")}</p>'
-                content += f'<h3>相对轮起点的晚开工</h3>{task_list(row["late_task_observations"])}'
+                content += f'<p>已绑定的 Host 准备区间（不代表异常）：{escape(prep or "无")}</p>'
+                content += f'<h3>相对轮起点的晚开工</h3>{task_list(row["late_task_observations"], late=True)}'
+            content += '</details>'
             if row["unresolved_event_wait_ids"]:
                 content += '<p class="warning">EVENT_WAIT 缺少可验证的生产者，未补造依赖。</p>'
+        if row.get("evidence_gaps"):
+            gaps = ", ".join(sorted({g["reason"] for g in row["evidence_gaps"]}))
+            content += f'<p class="warning">证据缺口：{escape(gaps)}</p>'
         entries.append(f'<details><summary>{title}</summary>{content}</details>')
     return (f'<section style="margin:16px 24px"><h2>在线告警离线追查</h2>'
             f'<p>{followup["bound_count"]}/{followup["alert_count"]} 条慢化告警已绑定</p>{"".join(entries)}</section>')

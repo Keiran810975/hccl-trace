@@ -95,10 +95,22 @@ hccl-diag analyze ./capture --online ./online-train-001 -o ./report
 也可将 `online/` 放在采集目录里，或和名为 `capture/` 的目录并排，原 `analyze` 命令会自动发现。
 离线仍用同次采集的历史作比较，通过 job、通信域代次、操作序号和完整 Rank 调用做精确关联；
 无法唯一绑定的告警保留为证据不足，不用桶顺序或邻近时间代替。`root_causes.json` 的 `online_followup`
-及 `propagation.html` 的「在线告警离线追查」列出每个 CollOp 的慢 Task、慢 Wait 和关联候选。
-S1 额外显示有证据的 Host 准备区间与晚开工；通信慢化保留从慢 Task 到下游慢 Wait 的已有路径，
-允许路径到达另一个 CollOp。缺少真实生产者或跨钟顺序不可判时只报边界，不断言物理根因。
-不提供在线产物时，默认离线 Backtrace 的行为不变。
+及 `propagation.html` 的「在线告警离线追查」按类别展示证据：
+
+- **S1 准备延迟**：分开报告 Host 准备区间和设备 Wait。从异常 Wait 沿已验证的 Notify 或
+  Event 生产者回溯；单纯晚开工的 Wait 则查同流前驱。没有 Event 对象身份和 Record 代次的
+  采集只标记 `unresolved_event_dependency`，不会把同流附近的 Record 补成配对。Host 区间
+  不能推出具体 CPU 函数或 Kernel。
+- **S2 通信慢化**：按 Rank、物理流和任务语义输出进度表。里程碑的时间以本 Rank 的
+  profiler CollOp 起点为零，与自身历史同位置比较；无可靠起点或历史不足时留空或注明。
+  此对照不是跨节点实时进度快照。排查优先级依据独立执行增长和已验证的下游 Wait，
+  允许并列或未定，不按 AllReduce 总耗时、慢任务数量或累计 Wait 排序。
+- **旧归档的未分类慢化**：保留准备和执行两类观测，不强制归入 S2 或做 Rank 排名。
+
+下游搜索可以跨 CollOp，分开记录等待增长、耗时未过线但开工推迟，以及自身也变慢的后继任务。
+仅有 RDMA 提交、缺少同步身份或跨钟顺序不可判时停止相应路径。搜索有界，不证明全组完成受阻，
+也不宣称找到故障设备。新路径的端点保留在 `execution.html`，标签未使用注入信息。
+不提供在线产物时，默认离线 Backtrace 不变。这版未增加 Event 身份采集，也没有改变在线 R/P。
 
 ## 验收矩阵
 

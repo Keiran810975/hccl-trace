@@ -147,14 +147,17 @@ def analyze_capture(capture, output, *, mode, baseline=None, topology=None, mani
                     report = live.pop("report")
                     rows, edges = live["graph"]
                 if selected is not None:
+                    clock_path = directory / "clock_alignment.json"
                     report, followed = online_followup.focus_report(report, selected,
-                        rolling.source_events.load_preparations(current.preparation_map))
+                        rolling.source_events.load_preparations(current.preparation_map), rows=rows, edges=edges,
+                        timings=waits.read_csv(directory / "operation_timings.csv"),
+                        alignment=read_json(clock_path) if clock_path.is_file() else None, options=rolling_options)
                 normalized, roots, tasks = normalize(report, mode=mode,
                     run_id=current_capture.manifest["run_id"], rows=rows, edges=edges, pipeline=pipeline,
                     binding_evidence=dict(current.evidence, identity_exports=list(current_capture.identity_exports)),
                     merge_metrics=waits.read_csv(directory / "merge_summary.csv"), formal_only=mode == "rolling")
                 if selected is not None:
-                    normalized["online_followup"] = dict(alert_count=len(followed),
+                    normalized["online_followup"] = dict(schema_version=2, alert_count=len(followed),
                         bound_count=sum(bool(a["operation_scope"]) for a in followed), alerts=followed)
                 del report
                 if mode == 'rolling':
