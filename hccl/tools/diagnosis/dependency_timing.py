@@ -27,9 +27,10 @@ def _event_identity(edge):
 class EvidenceGraph:
     """Strict local blocking checks over the already constructed execution graph."""
 
-    def __init__(self, rows, edges, alignment=None):
+    def __init__(self, rows, edges, alignment=None, local_clocks=None):
         self.nodes = {r["_graph_id"]: r for r in rows}
         self.clocks = models_from_report(alignment)
+        self.local_clocks = local_clocks or {}
         self.outgoing = defaultdict(list)
         self.signals, self.orders = defaultdict(list), defaultdict(list)
         self.event_records = defaultdict(set)
@@ -95,15 +96,17 @@ class EvidenceGraph:
         error = 0
         domain = "same_profiler_device"
         if p != q:
-            if p not in self.clocks or q not in self.clocks:
+            local = p[0] == q[0] and p in self.local_clocks and q in self.local_clocks
+            clocks = self.local_clocks if local else self.clocks
+            if p not in clocks or q not in clocks:
                 return result("missing_cross_device_clock")
-            left, right = self.clocks[p], self.clocks[q]
+            left, right = clocks[p], clocks[q]
             try:
                 b, c, d = left.map_ns(b), right.map_ns(c), right.map_ns(d)
             except ValueError:
                 return result("clock_coverage_boundary")
             error = left.estimated_error_ns + right.estimated_error_ns
-            domain = "calibrated_estimate"
+            domain = "same_node_monotonic_raw" if local else "calibrated_estimate"
         timing = dict(timing_domain=domain, estimated_error_ns=error,
                       source_done_ns=b, target_interval_ns=[c, d])
         if b + error <= c:

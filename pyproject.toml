@@ -5,14 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hccl-trace-diag"
 version = "0.1.0"
-description = "Evidence-bounded offline HCCL trace diagnosis"
+description = "Online and offline HCCL collective communication diagnosis"
 requires-python = ">=3.9"
 dependencies = []
 
 [project.scripts]
 hccl-diag = "hccl.tools.diagnosis.cli:main"
-hccl-diag-endpoints = "hccl.tools.diagnosis.endpoint_replay:main"
-hccl-diag-online = "hccl.tools.diagnosis.online_service:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

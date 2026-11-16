@@ -1,169 +1,210 @@
 # HCCL-Trace
 
-HCCL-Trace 用于排查 Ascend 训练中的集合通信慢化。它把 msprof 记录的设备任务、
-HCOMM 的算法语义和训练侧标注的轮次、通信位置关联起来，沿实测依赖区分源头候选和等待传播。
-单机、多机都用同一个命令分析；离线分析不占 NPU。
+HCCL-Trace 排查 Ascend 训练中集合通信的卡住和慢化。**在线**定位到某轮、某次通信和可疑 Rank；
+**离线**把 msprof 的设备任务、HCOMM 的通信语义和训练打点对齐，沿真实依赖查看谁在等谁、慢化传到了哪里。
+单机和多机共用 `hccl-diag analyze`；只分析已有采集不需要 NPU。
 
 ## 1. 克隆和准备环境
 
-可编辑安装需要支持 PEP 660 的 pip（21.3 或更新版本）。在已有的训练环境或单独的分析环境中执行：
-
 ```bash
-git clone --branch main --single-branch https://github.com/Keiran810975/hccl-trace.git
-# 也可把上面的地址换成 https://gitee.com/tjucyx/hccl-trace.git
+git clone --branch submit --single-branch https://github.com/Keiran810975/hccl-trace.git
 cd hccl-trace
-git rev-parse HEAD
 python3 -m pip install -e .
 hccl-diag --help
 ```
 
-- **采集端**：使用已经能正常训练的 Linux Ascend 环境和 Python 3.9+。加载实际 CANN 环境，
-  确认 `msprof` 可用、设备已经分配、原训练能跑完，并预留采集空间。GPT-2 样例另外需要兼容的
-  `torch`、`torch_npu` 和 `transformers`。
-- **通信库**：必须实际加载和本次提交配套的 HCOMM Host 库；AI_CPU 路径还需要配套 Device 包。
-  Python 安装不会部署这些库，也不会更改驱动或验签策略。新设备按[配套库部署指南](docs/deployment.md)准备。
-- **分析端**：可以是另一台 CPU 机器。安装同一提交即可，运行分析不需要 CANN、PyTorch 或 NPU。
-  当前读取 consolidated `msprof_*.db` schema `1.2.0`；工具有 CANN 8.5.1 设备验证记录，
-  新软硬件组合应先跑下面的短采集，不能把安装成功当作兼容性已验证。
+需要 Python 3.9+，可编辑安装需要 pip 21.3+。训练节点使用能正常运行原任务的 Linux + Ascend 环境，
+装好匹配的驱动、固件、CANN 和训练框架。样例使用兼容的 `torch`、`torch_npu` 和 `transformers`，
+随机初始化 GPT-2 Small，用合成 token 训练，不下载权重、不注入异常。CPU 分析机只需安装同一提交；
+离线读取 consolidated `msprof_*.db` schema `1.2.0`，保留 DB 旁的 PROF 会话元数据。
 
-## 2. 先跑通单机样例
-
-[GPT-2 Small 样例](examples/gpt2_normal.py)使用随机初始权重和合成 token，
-会做前向、反向、梯度桶 AllReduce 和参数更新，不下载模型、不注入异常。
-下面以单机 2 Rank 为例。将 `DEVICES` 换成已分配的实际 runtime 设备 ID，顺序与本地 Rank 对应。
-若 profiler 里的 ID 不同，额外给样例传 `--profiler-devices`，不要用 Rank 代替设备 ID。
+在训练节点加载现场实际 Toolkit，确认工具和已分配设备可用：
 
 ```bash
-RUN_ID="gpt2-$(date -u +%Y%m%dT%H%M%SZ)"
-DEVICES=1,3
-hccl-diag capture -o "runs/$RUN_ID" --node node-a --run-id "$RUN_ID" -- \
-  torchrun --standalone --nproc-per-node=2 --max-restarts=0 \
-  examples/gpt2_normal.py --devices "$DEVICES" --warmup 2 --iterations 8
-
-hccl-diag analyze "runs/$RUN_ID" -o "reports/$RUN_ID" --keep-debug
+export CANN_ROOT=/usr/local/Ascend/ascend-toolkit/latest
+source "$CANN_ROOT/set_env.sh"
+command -v msprof
+npu-smi info
+python3 -c 'import torch, torch_npu; print(torch.__version__, torch_npu.__version__)'
 ```
 
-`capture` 运行 `--` 后面的原启动命令，自动打开 HCOMM 语义和低日志 msprof 采集，
-不采集 AI Core 性能计数器，但仍采集任务时间线和通信关联所需的 Host API。不要再套一层 profiler。
-采集结束后保留整个 `runs/$RUN_ID/`，尤其是每个 `nodes/<node>/` 下的 `msprof/`、`plog/` 和 `calls/`。
-`collection.json` 和 `profiler.log` 用于排查采集失败。不要只拷走 DB 或删掉 PROF 目录里的会话元数据。
+**必须实际加载与本提交配套的语义采集库。** 优先使用管理员交付、已核验的 HCOMM Host 库组和
+当前芯片需要的 Device 包。仅安装 Python 不会部署这些库；用官方未打点的库运行不能替代这一环。
 
-`analyze` 只读原始采集，输出必须是采集目录之外的一个新目录。省略 `-o` 时输出到采集目录旁边的
-`<capture>-report/`。第一次建议加 `--keep-debug`，完整任务关联、依赖图和分析中间结果会留在并列的
-`<report>.debug/`。不加这个选项不会删除原始采集。
-默认滚动分析保留执行图和 Notify/拓扑校验，不生成诊断未使用的派生资源图；需要资源图和全量中间表时使用 `--keep-debug`。
+- Host：在有匹配 CANN 开发头、编译器、CMake、ccache 和构建依赖的 Linux 上可执行
+  `(cd hcomm && bash build.sh --pkg -p "$CANN_ROOT")`。把配套的
+  `libhcomm.so`、`libhccl_alg.so`、`libhccl_plf.so` 部署到私有运行目录，与现场 HCCL 前端保持 ABI 兼容。
+  `export LD_LIBRARY_PATH="$HOME/hccl-trace-runtime/lib64:${LD_LIBRARY_PATH:-}"` 后，
+  在自己的短跑进程中通过加载日志或 `/proc/<pid>/maps` 确认实际路径。
+- AI_CPU：Host 库不能替代设备内部语义。请由管理员按目标芯片和 SDK 构建、签名并部署同一提交的
+  `aicpu_hcomm.tar.gz`。用 `sha256sum` 核对包，不覆盖共享 CANN，不更改全局验签或驱动配置；
+  无权部署时停止。若现场批准临时变更，先做独立回滚，采集结束或中断后核对恢复。
+- 映射：样例 `--devices` 按本地 Rank 顺序填写 **runtime 设备 ID**。如果 msprof 记录的 ID 不同，
+  另传 `--profiler-devices` 指明对应的 **profiler device ID**。以实际 msprof 设备元数据核对，
+  不能用全局 Rank、逻辑序号或物理卡号猜。
 
-要额外检查跨机开工错位或完成尾段，可对同一份采集运行 [双终点回溯](hccl/tools/diagnosis/README.md#双终点回溯)。
+## 2. 配置报告目录
 
-## 3. 换成自己的训练
+根目录的 [config.yaml](config.yaml) 可直接编辑：
 
-单机、多机都用显式通信打点。保留原来的分布式启动方式、Rank 分配、通信域和同步语义：
+```yaml
+online_output_dir: reports/online
+offline_output_dir: reports/offline
+```
 
-1. 每个 Rank 创建一个 `Trace`，传实际 profiler 设备 ID，并注册实际通信域的全局 Rank 列表。
-2. 用 `trace.iteration(...)` 标记轮次，用 `trace.collective(...)` 包住实际通信 API。
-   同一位置每轮用相同的 `call_site`，通信类型、元素数、数据类型按真实 API 填写。
-3. 在原训练已有且能证实设备已完成的边界之后，调用 `trace.completion_boundary()`。
-   它只记录时间，不执行同步；一个完成边界可以覆盖多个通信调用。
+两个目录必须分开。相对路径以配置文件所在目录为准。默认读取当前目录的 `config.yaml`；
+也可给 `online` 或 `analyze` 加 `--config /path/to/config.yaml`，或设置 `HCCL_TRACE_CONFIG`。
+配置支持上面两个顶层路径键，可用普通路径或引号；不需要额外 YAML 依赖。
+默认在对应目录下创建 `RUN_ID/`。单次覆盖用 `-o <新目录>`，不会覆盖上一份报告。
+原始采集由 `capture -o` 指定，独立于两个报告目录。
 
-下面展示如何接入**已有的显式 FP32 AllReduce**；变量和完成点换成原训练中的对应内容。
+## 3. 启动：先跑通 GPT-2 样例
+
+以下以单机 2 Rank 为例。要在线观察时，**先**在终端 A 启动收集器，等它打印监听地址：
+
+```bash
+hccl-diag online gpt2-001
+```
+
+终端 B 在同一仓库目录启动训练，把 `DEVICES` 改成实配 ID：
+
+```bash
+RUN_ID=gpt2-001
+DEVICES=1,3
+export HCCL_TRACE_ONLINE_ADDR=127.0.0.1:7341
+export HCCL_TRACE_ONLINE_TIMING=npu_event
+
+hccl-diag capture --run-id "$RUN_ID" -o "runs/$RUN_ID" -- \
+  torchrun --standalone --nproc-per-node=2 --max-restarts=0 \
+  examples/gpt2_normal.py --devices "$DEVICES"
+```
+
+只做离线时，跳过收集器并清掉上述两个在线变量。只要 H1 而不做慢化，可将计时模式改为 `host`。
+启用 `npu_event` 后，样例默认做 3 个不进入基线的启动步、10 轮预热、20 轮正式训练；
+调整 `--warmup` 时须同步调整收集器的 `--warmup-iterations`。如果需要在运行结束时核查预期覆盖，
+在收集器上加 `--expected-ranks` 和 `--expected-collectives`；后者是全组逻辑通信次数（预热加正式，
+不乘 Rank 数，不含启动步）。收集器留到所有 Rank 正常退出后再用 Ctrl+C 停止。
+
+`capture` 自动打开语义打点和低日志 msprof 采集；不要再套一层 profiler。它会保留设备任务时间线
+和通信绑定需要的 Host API，不采集 AI Core 性能计数器。保存整个 `runs/$RUN_ID`，尤其是
+`nodes/<node>/` 下的 `plog/`、`msprof/` 和 `calls/`。不要只复制 DB。
+采集结束后用 CPU 执行：
+
+```bash
+hccl-diag analyze "runs/$RUN_ID"
+```
+
+工具按采集声明的运行 ID 查找在线告警；在线报告在别处时用 `--online /path/to/online/RUN_ID`。
+没有在线日志时走默认 Backtrace。若有在线日志但希望独立分析，不按在线慢告警选通信，加
+`--without-online`。有单独的匹配正常采集时，也可用 `--baseline /path/to/normal-capture`
+做离线对照（不能同用 `--online`）。中间文件只在临时目录使用，结束后清理，不删除原始输入。
+分析大型采集前确保临时盘有余量，必要时把 `TMPDIR` 指向有空间的目录。
+
+## 4. 换成自己的训练：只给真实的轮次、通信和完成点打点
+
+保留原 launcher、通信域和同步方案。每个 Rank 建一个 `Trace`，注册真实通信域的全局 Rank 列表；
+轮次从 0 开始，明确区分 `warmup` 和 `measured`。用同一个 `call_site` 表示不同轮次的同一位置，
+按真实 API 填 type、元素数、dtype、规约类型。
+下面是从样例抽出的显式 AllReduce 写法，`flat` 是你的实际 FP32 梯度桶，`prepare_bucket`
+代表原有的梯度打包；其他训练代码照旧：
 
 ```python
 import torch.distributed as dist
+import torch_npu
 from hccl_trace import Trace
+from hccl_trace.npu_event import NpuEventTiming
 
-with Trace.from_environment(device_id=profiler_device_id) as trace:
-    trace.group("dp", dp_global_ranks)
-    for stage, steps in (("warmup", warmup_steps), ("measured", measured_steps)):
+# 在原代码初始化分布式通信和设备之后建立 Trace。
+timing = NpuEventTiming.from_environment(
+    torch_npu.npu, torch_npu_version=getattr(torch_npu, "__version__", None)
+)
+with Trace.from_environment(device_id=profiler_device_id, timing_adapter=timing) as trace:
+    trace.group("dp", range(dist.get_world_size()))  # 对应这里使用的默认进程组。
+    for stage, steps in (("warmup", 10), ("measured", 20)):
         for step in range(steps):
             with trace.iteration(step, stage=stage):
-                # Keep the original forward/backward and obtain the actual gradient tensor.
-                with trace.collective(group="dp", call_site="gradient.bucket.0",
-                                      operation_type="AllReduce", element_count=grad.numel(),
-                                      dtype="float32", reduction="sum"):
-                    dist.all_reduce(grad, group=dp_group)
-                existing_verified_device_completion_boundary()  # Replace with the real boundary.
+                # 原有前向、反向得到梯度。
+                prep = trace.mark_preparation()  # 可选：实际准备开始，供 S1 比较。
+                flat = prepare_bucket()
+                trace.call_collective(
+                    lambda: dist.all_reduce(flat, op=dist.ReduceOp.SUM, async_op=True),
+                    wait_for_work=True, group="dp", call_site="gradient.bucket.0",
+                    operation_type="AllReduce", element_count=flat.numel(),
+                    dtype="float32", reduction="sum",
+                    preparation_start_raw_ns=prep, preparation_definition="pack_to_submit",
+                )
+                # 保留原有后续训练逻辑。在原有且已确认设备全部完成的边界之后打点：
+                torch_npu.npu.synchronize()  # 这里只示意原训练已有的同步，不要求新增。
                 trace.completion_boundary()
 ```
 
-示例里的完成边界函数是占位符，不由 SDK 提供。最后一行必须放到**实际完成点**，不要照搬到通信 API 返回之后：Python 返回或只建立流依赖的
-`Work.wait()` 不一定代表设备完成。DDP/FSDP 等框架需要在真实通信 Hook 或适配层打点，
-只包训练 step 或 `backward()` 不会自动识别内部梯度桶。也不要为了打点给每个桶强加一次同步。
-在 profiler 时钟证据完整时，`trace.iteration` 已自动记录轮起点；报告里的
-`iteration_start_observations` 比较任务相对轮起点的开始时间，不需要额外打点，也不将晚开工视为根因。
-若要诊断 Host 调用前准备变长，在准备实际开始时读取 `CLOCK_MONOTONIC_RAW`，将纳秒值通过
-`preparation_start_raw_ns` 传给该次 `trace.collective`；仅记录 API 的前后时刻不能补出准备起点。
+- 在线 ENTER 必须包住**实际通信提交函数**，不能把前向、打包或延迟放进 `lambda`。Host 准备标记是可选的；
+  缺这个起点时不能凭 API 进入时间独立证实准备延迟。已明确的本地轮起点不需要再给每个任务打点。
+- `wait_for_work=True` 只用于本来就在该位置调用 `Work.wait()` 的路径。Python API 返回或单独的
+  `Work.wait()` 不保证设备完成；不要把它们当成 `completion_boundary()`，也不要给每桶强加设备同步。
+  样例的在线 Event 是消费流区间，内部可能包含排队与依赖；未独立验证前不能当作原生 HCCL 执行区间。
+- PyTorch DDP/FSDP 只包 `backward()` 不能自动得到各桶身份。应在真实通信 Hook/框架适配层打点，
+  保留现有 future、规约和同步行为；不支持把异步 DDP Hook 直接替换成上面的同步示例来保证在线计时。
+  纯离线也可用 `with trace.collective(...):` 包住显式 API。推荐先照着
+  [GPT-2 样例](examples/gpt2_normal.py) 验证后再扩到自定义训练。
 
-接入后，在上节命令里把 `--` 之后换回自己的启动命令。先短跑，确认各 Rank 数值和采集都正常，再扩大规模。
-日常分析默认和本次运行的过去正式轮比较。需要独立正常对照时，另外采集同形状、通信域、软件和算法配置的运行：
+## 5. 多机采集
 
-```bash
-hccl-diag analyze runs/suspect --baseline runs/normal -o reports/against-normal
-```
-
-独立对照需要显式通信打点，主要比较设备执行，不替代默认的 Host 准备区间诊断。
-
-## 4. 多机：每机采集一次，汇集后分析
-
-每个训练节点使用相同提交、相同的 `RUN_ID`，分别指定不同的 `NODE_ID` 和本节点启动参数。
-下例假定原训练已能在两台机器上各跑 2 Rank。节点 A 用 `NODE_ID=node-a`、`NODE_RANK=0`，
-节点 B 用 `NODE_ID=node-b`、`NODE_RANK=1`。两边的 `MASTER_ADDR`、端口及 `RUN_ID` 相同，
-`DEVICES` 按本机实际映射设置。
+每台机器采集自己的 Rank；两边使用同一提交和 `RUN_ID`，节点名不同。两机各 2 Rank 时：
+A 用 `NODE_ID=node-a`、`NODE_RANK=0`，B 用 `NODE_ID=node-b`、`NODE_RANK=1`。
+`MASTER_ADDR` 填 A 的可达私网地址，`DEVICES` 填本机设备 ID。
 
 ```bash
-RUN_ID=gpt2-two-node-01
-NODE_ID=node-a
-NODE_RANK=0
-MASTER_ADDR=node-a.internal   # Replace with the reachable training address.
-DEVICES=1,3                  # Replace with local runtime IDs.
-
-hccl-diag capture -o "runs/$RUN_ID-$NODE_ID" --node "$NODE_ID" --run-id "$RUN_ID" -- \
+hccl-diag capture --node "$NODE_ID" --run-id "$RUN_ID" -o "runs/$RUN_ID-$NODE_ID" -- \
   torchrun --nnodes=2 --nproc-per-node=2 --node-rank="$NODE_RANK" \
   --master-addr="$MASTER_ADDR" --master-port=29500 --max-restarts=0 \
-  examples/gpt2_normal.py --devices "$DEVICES" --warmup 2 --iterations 8
+  examples/gpt2_normal.py --devices "$DEVICES"
 ```
 
-两边退出后，把两个完整采集目录传到分析机的 `runs/`。以下命令在分析机执行；
-`join` 复制并逐文件校验 SHA-256，不会删除输入。
+多机仍只启动**一个**在线收集器：在受信私网使用 `hccl-diag online "$RUN_ID" --listen "$COLLECTOR_IP"`，
+采集端统一设置 `HCCL_TRACE_ONLINE_ADDR=$COLLECTOR_IP:7341`。收集器和各训练节点均需事先设置
+同一个 `HCCL_TRACE_ONLINE_TOKEN`；不要把 Token 写进配置或日志。连接不加密，不暴露到公网。
+
+训练退出后，转移两份完整采集到分析机，按路径组装并校验；`join` 不修改输入：
 
 ```bash
-hccl-diag join runs/gpt2-two-node-01-node-a runs/gpt2-two-node-01-node-b \
-  -o runs/gpt2-two-node-01
-hccl-diag analyze runs/gpt2-two-node-01 -o reports/gpt2-two-node-01 --keep-debug
+hccl-diag join "runs/$RUN_ID-node-a" "runs/$RUN_ID-node-b" -o "runs/$RUN_ID"
+hccl-diag analyze "runs/$RUN_ID"
 ```
 
-没有校时证据时，只解读各节点本地时长和可验证的跨节点依赖，不直接比较两机绝对时间。
-如果需要跨机时序，**采集前**先按[多机校时指南](docs/multi-node-clocks.md)安排前后探针，
-分析时再加 `--require-clock-alignment`。
+无可信校时时不跨节点比较绝对时间。确需跨钟顺序时，采集前用
+`hccl-diag clock-probe serve` 启动私网参考端，其他节点分别在采集前后执行
+`hccl-diag clock-probe probe --phase before/after`（每次填写一个 phase），用各子命令
+`--help` 查看地址、节点名和采集 ID 参数。把探针文件放进各自采集目录，在其
+`capture.json` 的对应 `nodes` 条目中用 `clock_probe_files` 声明相对路径；`join` 会保留。
+分析时加 `--require-clock-alignment` 可要求校时通过，否则只使用有依据的时钟范围，不推算网卡真实传输时间。
 
-## 5. 怎么看结果
+## 6. 看报告
 
-| 文件 | 看什么 |
+**在线**：从 `online_output_dir/RUN_ID/events.jsonl` 看一行一条告警，例如
+`tail -f reports/online/gpt2-001/events.jsonl`。先看 `event_type`、`iteration`、`bucket_id`，
+再看 `suspected_ranks`、`metrics.R`、`metrics.P` 和 `reason`。
+
+| 含义 | 在线事件 |
 | --- | --- |
-| `execution.html` | 看设备任务和真实依赖。默认滚动报告展示相关正式轮的原图切片，不是全程。 |
-| `root_causes.json` | 先看 `quality` 和 `coverage`，再看 `communication_source_candidates`、`external_anomaly_clues`、`cross_node_path_candidates` 和 `unresolved_observations`。候选包含 Rank、轮次、通信位置、实际与参考耗时。 |
-| `propagation.html` | 看候选通过哪些依赖到达慢 Wait，以及哪里缺少继续回溯的证据。 |
+| H1：有 Rank 在时限内未进入，而且心跳/计数能证实 | `NOT_ENTERED_HANG` |
+| S1：慢化并且有该 Rank 的独立 Host 准备延迟证据 | `COMPUTATION_SLOW` |
+| S2：通信慢化，尚不能凭在线耗时判定物理原因 | `COMMUNICATION_SLOW` |
+| 参考不完整或不稳定，不能计算慢化 | `INSUFFICIENT_BASELINE` |
 
-两个 HTML 可离线用浏览器打开。默认诊断取最近最多五个未标慢的可比正式样本，沿已建立的依赖回查；
-候选并列，不选 Top1。对特定单机双流 Copy，才会在样本不足时用第 6–10 个预热轮补重叠预算，
-不改变普通任务的正式轮参考。详见[诊断规则](hccl/tools/diagnosis/README.md)。
+`R=(Tmax-Tbase)/Tbase`，严格 `R>2` 才报慢；`P=(Tmax-Tmin)/(Tmax-Tbase)`。
+T 是各 Rank 的观测耗时，不是跨机绝对时间。只有在训练同步点读回并收齐计时后才能判断 S1/S2。
+`measurements.jsonl` 包括正常、异常和证据不足的通信；`telemetry.jsonl` 保存原始帧；
+`run_health.jsonl` 用于看是否丢帧、预热是否齐全以及计时覆盖。健康门禁不代表诊断准确率。
 
-采集成功不等于训练数值正确，分析成功也不等于定位了物理故障。没有候选时先检查样本和关联覆盖率，
-不要直接判定没有异常。若分析失败，按报错分别检查输入/绑定（退出码 2）、语义关联（3）、
-构图/诊断（4）和报告发布（5）。优先修复设备映射、实际加载的库或训练打点，不降低门禁来绕过缺失证据。
+**离线**：`offline_output_dir/RUN_ID/` 只保留以下三个文件：
 
-## 6. 在线诊断（可选）
-
-在线收集器独立运行，默认不开启，不改变上面的离线 Backtrace。接入现有 `Trace` 后，
-可以在线识别哪次集合通信缺少哪些 Rank 的进入上报；设备耗时没有可靠来源时不会计算 Slow。
-启动、报告字段及离线等价回放见[在线诊断 V1](hccl/tools/diagnosis/online.md)。
-
-## 项目结构
-
-| 路径 | 用途 |
+| 文件 | 阅读方法 |
 | --- | --- |
-| [`hccl_trace/`](hccl_trace/) | 训练侧 SDK，记录轮次、实际通信调用和完成边界。 |
-| [`hccl/tools/diagnosis/`](hccl/tools/diagnosis/) | `hccl-diag` 的采集、解析、构图、诊断和报告模块。 |
-| [`examples/gpt2_normal.py`](examples/gpt2_normal.py) | 唯一随本工具发布的训练样例，无异常注入。 |
-| [`hcomm/`](hcomm/) 和 [`hccl/`](hccl/) | 配套通信库源代码、构建打包及其原生回归入口，不是诊断实验脚本。 |
+| `execution.html` | 在浏览器查看各节点、Rank、Stream 的任务和依赖；可从报告跳到标记任务。滚动模式展示相关轮及必要依赖端点，不是全程原始时间线。 |
+| `root_causes.json` | 机器可读的传播报告；先看 `quality`、`coverage`，再看候选、传播链和 `online_followup`。 |
+| `propagation.html` | 同一诊断的可读报告。S1 查准备区间和入口 Wait 的可信上游；S2 按 Rank 看慢化至少 +100% 的 Task/Wait 及后续传播。证据不足和未过线分别显示。 |
 
-历史异常注入、研究实验和旧文档不随 `main` 的用户版发布。
+在线后续离线分析只绑定可以唯一核验的通信实例；不凭桶顺序或时间接近补配。H1 的缺席判断留在
+在线告警里，不把一条未完成通信当成已采齐的 Task 图。单一候选不能证明物理故障，计时或依赖缺失也
+不代表没有异常。分析报错时优先核查实际库、设备映射、语义 plog 和每个 Rank 的调用日志。

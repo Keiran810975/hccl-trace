@@ -1,9 +1,0 @@
-{
-  "HcclLaunchP2PAicpuKernel": {
-    "opInfo": {
-      "opKernelLib": "AICPUKernel",
-      "kernelSo": "libp2p_aicpu_kernel.so",
-      "functionName": "HcclLaunchP2PAicpuKernel"
-    }
-  }
-}

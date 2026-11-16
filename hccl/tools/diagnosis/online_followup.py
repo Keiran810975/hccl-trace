@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from decimal import Decimal
 import json
 from pathlib import Path
 
 from hccl_trace.online_probe import tensor_description
-from . import downstream_propagation, rank_priority, rank_progress, wait_backtrace
-from .dependency_timing import EvidenceGraph, ORDER, WAIT
+from . import downstream_propagation, rank_progress, wait_backtrace
+from .dependency_timing import EvidenceGraph, WAIT
 from .workload_binder import _read_calls, operation_type
 
 
@@ -15,7 +16,7 @@ SLOW = {"COMPUTATION_SLOW", "COMMUNICATION_SLOW", "SLOW_UNCLASSIFIED"}  # Last e
 ROUTES = {"COMPUTATION_SLOW": "S1", "COMMUNICATION_SLOW": "S2", "SLOW_UNCLASSIFIED": "undetermined"}
 
 
-def alert_path(capture, requested=None):
+def alert_path(capture, requested=None, *, configured=None):
     if requested is not None:
         path = Path(requested).resolve()
         return path / "events.jsonl" if path.is_dir() else path
@@ -25,7 +26,9 @@ def alert_path(capture, requested=None):
     locations = [root / "online/events.jsonl"]
     if root.name == "capture":
         locations.append(root.parent / "online/events.jsonl")
-    found = [p for p in locations if p.is_file()]
+    if configured is not None:
+        locations.append(configured)
+    found = list(dict.fromkeys(p.resolve() for p in locations if p.is_file()))
     if len(found) > 1:
         raise ValueError("multiple online logs found; select one with --online")
     return found[0] if found else None
@@ -116,6 +119,16 @@ def _task(t):
         "delta_ns", "reference_count", "iteration_start_delta_ns", "role")}
 
 
+def _gate_entry(gate, progress):
+    proof = gate["wait"]["wait_producer"]
+    paired = proof["status"] in {"verified_producer_during_wait", "producer_already_ready", "clock_order_uncertain",
+                                 "producer_after_wait_release", "missing_cross_device_clock", "clock_coverage_boundary",
+                                 "rdma_submission_not_payload_completion"}
+    producer = progress.milestone(proof["src"]) if paired else None
+    return dict(gate, producer=producer, wait_timing=("zero_duration_no_observed_block"
+                if gate["wait"]["duration_ns"] == 0 else "wait_interval_observed"))
+
+
 def _explain(selection, progress, host_observations, protocol_observations):
     graph = progress.graph
     scope = selection["operation_scope"]
@@ -134,9 +147,11 @@ def _explain(selection, progress, host_observations, protocol_observations):
         gaps.append(dict(reason="incomplete_same_position_history"))
     if any(m["progress_status"] in {"missing_rank_collop_interval", "task_outside_rank_collop_interval"} for m in all_tasks):
         gaps.append(dict(reason="incomplete_rank_collop_device_interval_coverage"))
-    entry_waits = progress.entry_waits(scope) if selection["route"] in {"S1", "undetermined"} else []
-    unresolved_events = [m["graph_id"] for m in (*waits, *(e["wait"] for e in entry_waits)) if m["task_kind"] == "event_wait"
-                         and m["wait_producer"]["status"] in {"unresolved_event_dependency", "ambiguous_sync_producer"}]
+    entry_waits = ([_gate_entry(gate, progress) for gate in progress.entry_waits(scope)]
+                   if selection["route"] in {"S1", "undetermined"} else [])
+    unresolved_events = sorted({m["graph_id"] for m in (*waits, *(e["wait"] for e in entry_waits))
+                                if m["task_kind"] == "event_wait" and m["wait_producer"]["status"] in
+                                {"unresolved_event_dependency", "ambiguous_sync_producer"}})
     gaps.extend(dict(graph_id=g, reason="unresolved_event_dependency") for g in unresolved_events)
     result.update(evidence_gaps=gaps, unresolved_event_wait_ids=unresolved_events, entry_wait_observations=entry_waits)
     route = selection["route"]
@@ -144,6 +159,7 @@ def _explain(selection, progress, host_observations, protocol_observations):
         suspect = set(selection["suspected_ranks"] or ())
         observations = [r for r in host_observations if not suspect or r["user_rank"] in suspect]
         result["host_preparation_observation"] = [dict(user_rank=r["user_rank"], node_id=r["node_id"],
+            graph_id=r.get("graph_id"), device_id=r.get("device_id"),
             start_ns=r["observed_start_ns"], stop_ns=r["observed_stop_ns"],
             api_start_ns=r.get("api_start_ns"), api_stop_ns=r.get("api_stop_ns"), duration_ns=r["duration_ns"],
             reference_mean_ns=r["reference_mean_ns"], reference_mad_ns=r["reference_mad_ns"],
@@ -154,10 +170,18 @@ def _explain(selection, progress, host_observations, protocol_observations):
             gaps.append(dict(reason="no_comparable_abnormal_host_preparation_interval"))
         if route == "S1":
             result["suspected_rank"] = next(iter(suspect)) if len(suspect) == 1 else None
+            starts = progress.latest_entry(scope, ranks)
+            result["rank_start_evidence"] = starts
+            focus = set(starts["possible_latest_ranks"]) or suspect
+            result["entry_dependency_by_rank"] = [
+                dict(rank=rank, gates=[e for e in entry_waits if e["wait"]["rank"] == rank],
+                     status="observed_entry_wait" if any(e["wait"]["rank"] == rank for e in entry_waits)
+                            else "no_verified_wait_on_device_entry")
+                for rank in sorted(focus)]
             result["blocking_waits"] = traces = []
             remaining = progress.options.traversal_limit
-            for item in sorted([*waits, *(e["wait"] for e in entry_waits)],
-                               key=lambda m: (not m["slow_wait"], m["graph_id"])):
+            scoped_waits = {m["graph_id"]: m for m in [*waits, *(e["wait"] for e in entry_waits)]}
+            for item in sorted(scoped_waits.values(), key=lambda m: (m["rank"] not in focus, not m["slow_wait"], m["graph_id"])):
                 if not (item["slow_wait"] or item["starts_late"]):
                     continue
                 if remaining <= 0:
@@ -170,29 +194,38 @@ def _explain(selection, progress, host_observations, protocol_observations):
         searches = []
         result["downstream_propagation"] = searches
         result["downstream_search_policy"] = "bounded_active_search_on_verified_execution_dependencies"
+        result["slow_duration_min_increase_percent"] = 100
+        by_rank = result["slow_tasks_by_rank"] = []
+        candidates = []
+        for rank in ranks:
+            items = milestones[rank]
+            comparable = [m for m in items if m["duration_comparable"] and m["reference_mean_ns"] is not None
+                          and Decimal(m["reference_mean_ns"]) > 0]
+            slow = [s for m in comparable if (s := rank_progress.s2_growth(m)) is not None]
+            by_rank.append(dict(rank=rank, task_count=len(items), comparable_count=len(comparable),
+                slow_tasks=[m for m in slow if m["task_kind"] not in WAIT],
+                slow_waits=[m for m in slow if m["task_kind"] in WAIT]))
+            candidates.extend(m for m in slow if m["task_kind"] in rank_progress.WORK | WAIT)
+        result["observed_receive_protocol_intervals"] = protocol_observations
         remaining = progress.options.traversal_limit
-        protocol = (m for m in all_tasks if m["slow_wait"] or (m["task_kind"] in rank_progress.SIGNALS
-                    and m["completion_late"] and any(
-                        e["kind"] != ORDER and graph.proof(e)["verified"]
-                        for e in graph.outgoing.get(m["graph_id"], ()))))
-        for seeds in (rank_progress.first_by_stream(m for m in all_tasks if m["intrinsic_work_slow"]),
-                      rank_progress.first_by_stream(protocol)):
-            for item in seeds:
-                if remaining <= 0:
-                    break
-                trace = downstream_propagation.trace_downstream(item, graph, progress, min(256, remaining))
-                remaining -= trace["visited_count"]
-                searches.append(trace)
-        if remaining <= 0:
+        for item in sorted(candidates, key=lambda m: (m["task_kind"] in WAIT, -Decimal(m["duration_delta_ns"]), m["graph_id"])):
+            if remaining <= 0:
+                break
+            trace = downstream_propagation.trace_downstream(item, graph, progress, min(256, remaining), s2_threshold=True)
+            remaining -= trace["visited_count"]
+            searches.append(trace)
+        if len(searches) < len(candidates):
             gaps.append(dict(reason="alert_forward_budget_exhausted"))
-        result.update(rank_priority.summarize(ranks, milestones, searches, selection.get("rank_roles", {}),
-                                             protocol_observations))
+        result["unsearched_slow_seed_count"] = len(candidates)-len(searches)
     return result
 
 
 def evidence_paths(alert):
     for entry in alert.get("entry_wait_observations", ()):
         yield [entry["stream_edge"]]
+        producer = entry["wait"]["wait_producer"]
+        if producer.get("verified"):
+            yield [producer, entry["stream_edge"]]
     for trace in alert.get("blocking_waits", ()):
         if trace["producer"].get("verified"):
             yield [trace["producer"]]
@@ -203,10 +236,12 @@ def evidence_paths(alert):
             yield item["path"]
 
 
-def focus_report(report, selections, preparations=(), *, rows=(), edges=(), timings=(), alignment=None, options=None):
+def focus_report(report, selections, preparations=(), *, rows=(), edges=(), timings=(), alignment=None, options=None,
+                 local_clocks=None):
     """Keep exact operation binding and diagnose it using the original execution graph."""
     targets = {a["operation_scope"] for a in selections if a["operation_scope"]}
     communication = {a["operation_scope"] for a in selections if a["route"] == "S2" and a["operation_scope"]}
+    upstream_targets = {a["operation_scope"] for a in selections if a["route"] != "S2" and a["operation_scope"]}
     tasks, roots, dependency_paths, host_by_scope, protocol_by_scope = (defaultdict(list) for _ in range(5))
     for r in (*report["root_causes"], *report.get("unresolved_observations", ())):
         if r["component"] == "host_preparation" and r["operation_scope"] in targets:
@@ -224,7 +259,7 @@ def focus_report(report, selections, preparations=(), *, rows=(), edges=(), timi
         if options is None:
             from .rolling_diagnosis import RollingOptions
             options = RollingOptions()
-        progress = rank_progress.Progress(EvidenceGraph(rows, edges, alignment),
+        progress = rank_progress.Progress(EvidenceGraph(rows, edges, alignment, local_clocks),
             {t["graph_id"]: t for t in report["tasks"]}, timings, options)
     edge_by_id = {e["edge_id"]: e for e in edges} if progress is not None else {}
     picked, used_waits = [], set()
@@ -232,6 +267,8 @@ def focus_report(report, selections, preparations=(), *, rows=(), edges=(), timi
         scope = source["operation_scope"]
         paths = {w: p for w, p in source.get("evidence_paths", {}).items()
                  if p and (scope_by_id.get(w) in targets or (scope in communication and source["component"] == "execution"))}
+        if progress is not None:
+            paths = {w: p for w, p in paths.items() if scope_by_id.get(w) in upstream_targets}
         if progress is not None and source["component"] == "execution":
             paths = {w: p for w, p in paths.items() if all(
                 edge_id in edge_by_id and progress.graph.proof(edge_by_id[edge_id])["verified"] for edge_id in p)}
@@ -274,6 +311,9 @@ def focus_report(report, selections, preparations=(), *, rows=(), edges=(), timi
                        unresolved_cause="Preparation may be measured without evidence identifying the upstream Host work.")
         if scope and progress is not None:
             row.update(_explain(selection, progress, host_by_scope[scope], protocol_by_scope[scope]))
+            if selection["route"] == "S2":
+                for label in ("slow_tasks", "slow_waits"):
+                    row[label] = [item for rank in row["slow_tasks_by_rank"] for item in rank[label]]
         elif not scope:
             row["evidence_gaps"] = [dict(reason=selection["binding_status"])]
         results.append(row)

@@ -14,6 +14,19 @@ SIGNALS = {"event_record", "notify_record"}
 WORK = {"sdma", "reduce_inline", "reduce_tbe", "kernel_aicore", "kernel_aivec", "kernel_mix_aic", "kernel_mix_aiv"}
 
 
+def s2_growth(item):
+    """A duration inventory, not an attribution decision."""
+    reference = item.get("reference_mean_ns")
+    if not item["duration_comparable"] or reference is None or Decimal(reference) <= 0:
+        return None
+    mean = Decimal(reference)
+    current = Decimal(item["duration_ns"])
+    if current < 2 * mean:
+        return None
+    return dict(item, duration_delta_ns=str(current - mean),
+                duration_increase_percent=str((current-mean)*100/mean))
+
+
 def task_evidence(row, task):
     return dict(graph_id=row["_graph_id"], node_id=row["_node_id"], device_id=row["_device_id"],
         rank=row["_user_rank"], stream_id=row["_stream_id"], task_id=row["_task_id"],
@@ -121,18 +134,51 @@ class Progress:
         for gid in self.by_scope.get(scope, ()):
             row = self.graph.nodes[gid]
             offsets, _ = self.offsets(gid)
-            if offsets is None or offsets[0] != 0 or row["profiler_task_kind"] != "notify_record":
+            if offsets is None or offsets[0] != 0:
                 continue
             links = self.graph.orders.get(gid, ())
             if len(links) != 1:
                 continue
             edge = self.graph.proof(links[0])
             pred = self.graph.nodes[edge["src"]]
-            if (edge["verified"] and pred["profiler_task_kind"] == "event_wait"
-                    and not pred.get("_operation_scope") and edge["src"] not in seen):
+            if (edge["verified"] and pred["profiler_task_kind"] in WAIT and edge["src"] not in seen):
                 seen.add(edge["src"])
                 result.append(dict(wait=self.milestone(edge["src"]), entry_task=self.milestone(gid), stream_edge=edge))
         return result
+
+    def latest_entry(self, scope, ranks):
+        entries = defaultdict(list)
+        for (op, node, device, rank), (start, _) in self.intervals.items():
+            if op == scope and rank in ranks:
+                entries[rank].append((node, device, start))
+        starts = {r: entries[r][0] for r in ranks if len(entries[r]) == 1}
+
+        def possible(items, local):
+            mapped = {}
+            for rank, (node, device, start) in items.items():
+                clocks = self.graph.local_clocks if local else self.graph.clocks
+                clock = clocks.get((node, device))
+                if clock is None:
+                    return []
+                try:
+                    mapped[rank] = clock.map_ns(start), clock.estimated_error_ns
+                except ValueError:
+                    return []
+            lower = max((start-error for start, error in mapped.values()), default=0)
+            return sorted(r for r, (start, error) in mapped.items() if start+error >= lower)
+
+        all_present = len(starts) == len(ranks)
+        nodes = sorted({item[0] for item in starts.values()})
+        per_node = {node: possible({r: v for r, v in starts.items() if v[0] == node}, True) for node in nodes}
+        group = possible(starts, False) if all_present else []
+        if not group and all_present and len(nodes) == 1:
+            group = per_node[nodes[0]]
+        return dict(latest_rank=group[0] if len(group) == 1 else None, possible_latest_ranks=group,
+            latest_by_node=per_node, missing_start_ranks=sorted(set(ranks)-starts.keys()),
+            profiler_starts=[dict(rank=r, node_id=node, device_id=device, start_ns=ts)
+                             for r, (node, device, ts) in starts.items()],
+            status="verified_latest_rank" if len(group) == 1 else "latest_rank_not_unique" if group else
+            "missing_shared_clock_or_rank_start")
 
 
 def abnormal(milestone):

@@ -13,7 +13,6 @@ CURRENT_DIR=$(dirname $(readlink -f ${BASH_SOURCE[0]}))
 BUILD_DIR=${CURRENT_DIR}/build
 BUILD_DEVICE_DIR="${CURRENT_DIR}/build_device"
 BUILD_OUTPUT_DIR=${CURRENT_DIR}/build_out
-OUTPUT_PATH="${CURRENT_DIR}/output"
 USER_ID=$(id -u)
 CPU_NUM=$(cat /proc/cpuinfo | grep "^processor" | wc -l)
 JOB_NUM="-j${CPU_NUM}"
@@ -29,16 +28,6 @@ BUILD_AARCH="false"
 CUSTOM_SIGN_SCRIPT="${CURRENT_DIR}/scripts/sign/community_sign_build.py"
 ENABLE_SIGN="false"
 VERSION_INFO="8.5.0"
-
-BUILD_FWK_HLT="false"
-MOCK_FWK_HLT="0"
-
-BUILD_CB_TEST="false"
-
-ENABLE_UT="off"
-ENABLE_ST="off"
-CMAKE_BUILD_TYPE="Debug"
-ASCEND_3RD_LIB_PATH="${CURRENT_DIR}/output/third_party"
 
 if [ "${USER_ID}" != "0" ]; then
     DEFAULT_TOOLKIT_INSTALL_DIR="${HOME}/Ascend/ascend-toolkit/latest"
@@ -116,148 +105,10 @@ function build_hccd(){
     build ${TARGET_LIST} ${PKG_TARGET_LIST} ${SIGN_TARGET_LIST}
 }
 
-function build_cb_test_verify(){
-    cd ${CURRENT_DIR}/examples/
-    bash build.sh
-}
-
-function build_test() {
-    ${CURRENT_DIR}/build_third_party.sh
-    ENABLE_ST="on"
-    cmake_config -DENABLE_ST=${ENABLE_ST}
-
-    LIBRARY_DIR="${BUILD_DIR}/test:${ASCEND_HOME_PATH}/lib64:"
-    # 每日构建sdk包安装路径
-    if [ -d "${ASCEND_HOME_PATH}/opensdk" ];then
-        LIBRARY_DIR="${LIBRARY_DIR}${ASCEND_HOME_PATH}/opensdk/opensdk/gtest_shared/lib64:"
-    fi
-
-    # 社区sdk包安装路径
-    if [ -d "${ASCEND_HOME_PATH}/../../latest/opensdk" ];then
-        LIBRARY_DIR="${LIBRARY_DIR}${ASCEND_HOME_PATH}/../../latest/opensdk/opensdk/gtest_shared/lib64:"
-    fi
-
-    GCC_MAJOR=`gcc -dumpversion | cut -d. -f1`
-    if [ "${ASAN}" == "true" ];then
-        ARCH=$(uname -m)
-        if [[ $ARCH == "x86_64" || $ARCH == "i386" || $ARCH == "i686" ]]; then
-            PRELOAD="/usr/lib/gcc/x86_64-linux-gnu/${GCC_MAJOR}/libasan.so:/usr/lib/gcc/x86_64-linux-gnu/${GCC_MAJOR}/libstdc++.so"
-        elif [[ $ARCH == "aarch64" || $ARCH == "armv8l" || $ARCH == "armv7l" ]]; then
-            PRELOAD="/usr/lib/gcc/aarch64-linux-gnu/${GCC_MAJOR}/libasan.so:/usr/lib/gcc/aarch64-linux-gnu/${GCC_MAJOR}/libstdc++.so"
-        else
-            echo "未知架构: $ARCH"
-        fi
-        echo "PRELOAD is ${PRELOAD}"
-        ASAN_OPT="detect_leaks=0"
-    fi
-
-    if [ "${TEST_TASK_NAME}" == "open_hccl_test" ] || [ "$TEST" = "all" ];then
-        build open_hccl_test
-        export LD_LIBRARY_PATH=${LIBRARY_DIR}${LD_LIBRARY_PATH} && export LD_PRELOAD=${PRELOAD} && export ASAN_OPTIONS=${ASAN_OPT} \
-        && ${BUILD_DIR}/test/st/algorithm/testcase/testcase/open_hccl_test
-    fi
-
-    if [ "${TEST_TASK_NAME}" == "executor_hccl_test" ] || [ "$TEST" = "all" ];then
-        build executor_hccl_test
-        export LD_LIBRARY_PATH=${LIBRARY_DIR}${LD_LIBRARY_PATH} && export LD_PRELOAD=${PRELOAD} && export ASAN_OPTIONS=${ASAN_OPT} \
-        && ${BUILD_DIR}/test/st/algorithm/testcase/executor_testcase_generalization/executor_hccl_test
-    fi
-
-    if [ "${TEST_TASK_NAME}" == "executor_reduce_hccl_test" ] || [ "$TEST" = "all" ];then
-        build executor_reduce_hccl_test
-        export LD_LIBRARY_PATH=${LIBRARY_DIR}${LD_LIBRARY_PATH} && export LD_PRELOAD=${PRELOAD} && export ASAN_OPTIONS=${ASAN_OPT} \
-        && ${BUILD_DIR}/test/st/algorithm/testcase/executor_reduce_testcase_generalization/executor_reduce_hccl_test
-    fi
-
-    if [ "${TEST_TASK_NAME}" == "executor_pipeline_hccl_test" ] || [ "$TEST" = "all" ];then
-        build executor_pipeline_hccl_test
-        export LD_LIBRARY_PATH=${LIBRARY_DIR}${LD_LIBRARY_PATH} && export LD_PRELOAD=${PRELOAD} && export ASAN_OPTIONS=${ASAN_OPT} \
-        && ${BUILD_DIR}/test/st/algorithm/testcase/executor_alltoall_A3_pipeline_testcase/executor_pipeline_hccl_test
-    fi
-}
-
 function build_kernel() {
     cmake_config
     log "Info: build_kernel"
     build ccl_kernel_plf ccl_kernel_plf_a ccl_kernel aicpu_custom_json
-}
-
-function mk_dir() {
-  local create_dir="$1"  # the target to make
-  mkdir -pv "${create_dir}"
-  echo "created ${create_dir}"
-}
-
-# create build path
-function build_ut() {
-  echo "create build directory and build";
-  mk_dir ${OUTPUT_PATH}
-  mk_dir "${BUILD_DIR}"
-  local report_dir="${OUTPUT_PATH}/report/ut" && mk_dir "${report_dir}"
-  cd "${BUILD_DIR}"
-
-  local LLT_KILL_TIME=1200
-  CMAKE_ARGS="-DPRODUCT_SIDE=host \
-              -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} \
-              -DCMAKE_INSTALL_PREFIX=${BUILD_OUTPUT_DIR} \
-              -DASCEND_INSTALL_PATH=${ASCEND_INSTALL_PATH} \
-              -DASCEND_3RD_LIB_PATH=${ASCEND_3RD_LIB_PATH} \
-              -DENABLE_COV=${ENABLE_COV} \
-              -DENABLE_TEST=${ENABLE_TEST} \
-              -DENABLE_UT=${ENABLE_UT} \
-              -DOUTPUT_PATH=${OUTPUT_PATH} \
-              -DLLT_KILL_TIME=${LLT_KILL_TIME}"
-
-  echo "CMAKE_ARGS=${CMAKE_ARGS}"
-  cmake ${CMAKE_ARGS} ..
-  if [ $? -ne 0 ]; then
-    echo "execute command: cmake ${CMAKE_ARGS} .. failed."
-    return 1
-  fi
-
-  # make all
-  cmake --build . -j${CPU_NUM}
-  run_ret=${PIPESTATUS[0]}
-  echo "exit code: ${run_ret}"
-  if [ "${run_ret}" -eq 137 ]
-  then
-      echo "timeout: execute more than ${LLT_KILL_TIME}s killed"
-      exit 1
-  fi
-  if [ $? -ne 0 ]; then
-    echo "execute command: make -j${THREAD_NUM} failed."
-    return 1
-  fi
-  echo "build success!"
-}
-
-function make_ut_gov() {
-  if [[ "X$ENABLE_UT" = "Xon" || "X$ENABLE_COV" = "Xon" ]]; then
-    echo "Generated coverage statistics, please wait..."
-    cd ${CURRENT_DIR}
-    rm -rf ${CURRENT_DIR}/cov
-    mkdir -p ${CURRENT_DIR}/cov
-    lcov -c -d ${BUILD_DIR}/test/ut/ -o cov/tmp.info
-    LCOV_COMMAND="lcov -r cov/tmp.info ${CURRENT_DIR}src/* -o cov/coverage.info" && ${LCOV_COMMAND}
-    # lcov -r cov/tmp.info "/usr/*" "${OUTPUT_PATH}/*" "${BASEPATH}/test/*" "${ASCEND_INSTALL_PATH}/*" "${ASCEND_3RD_LIB_PATH}/*" -o cov/coverage.info
-
-    cd ${CURRENT_DIR}/cov
-    genhtml coverage.info
-  fi
-}
-
-function run_ut() {
-  if [[ "X$ENABLE_UT" = "Xon" ]]; then
-    local ut_dir="${BUILD_DIR}/test"
-    echo "ut_dir = ${ut_dir}"
-    find "$ut_dir" -type f -executable | while read -r ut_exec; do
-        filename=$(basename "$ut_exec")
-        echo "Executing: $filename"
-        ${ut_exec}
-    done
-  else
-    echo "Unit tests is not enabled, sh build.sh with parameter -u or --ut to enable it"
-  fi
 }
 
 # print usage message
@@ -323,35 +174,6 @@ while [[ $# -gt 0 ]]; do
         CANN_3RD_LIB_PATH="$(realpath ${OPTARG#*=})"
         shift
         ;;
-    -u|--ut)
-        ENABLE_TEST="on"
-        ENABLE_UT="on"
-        shift
-        ;;
-    -s|--st)
-        TEST="all"
-        shift
-        ;;
-    --open_hccl_test)
-        TEST="partial"
-        TEST_TASK_NAME="open_hccl_test"
-        shift
-        ;;
-    --executor_hccl_test)
-        TEST="partial"
-        TEST_TASK_NAME="executor_hccl_test"
-        shift
-        ;;
-    --executor_reduce_hccl_test)
-        TEST="partial"
-        TEST_TASK_NAME="executor_reduce_hccl_test"
-        shift
-        ;;
-    --executor_pipeline_hccl_test)
-        TEST="partial"
-        TEST_TASK_NAME="executor_pipeline_hccl_test"
-        shift
-        ;;
     --aicpu)  # 新增选项，用于只编译 ccl_kernel.so
         KERNEL="true"
         shift
@@ -376,20 +198,6 @@ while [[ $# -gt 0 ]]; do
         DO_NOT_CLEAN="true"
         shift
         ;;
-    --fwk_test_hlt)
-        BUILD_FWK_HLT="true"
-        MOCK_FWK_HLT="0"
-        shift
-        ;;
-    --fwk_test_hlt_mock)
-        BUILD_FWK_HLT="true"
-        MOCK_FWK_HLT="1"
-        shift
-        ;;
-    --cb_test_verify)
-        BUILD_CB_TEST="true"
-        shift
-        ;;
     --enable-sign)
         ENABLE_SIGN="true"
         shift
@@ -409,10 +217,6 @@ while [[ $# -gt 0 ]]; do
         ;;
     esac
 done
-
-if [ -n "${TEST}" ];then
-    CUSTOM_OPTION="${CUSTOM_OPTION} -DENABLE_TEST=ON"
-fi
 
 if [ "${KERNEL}" == "true" ];then
     CUSTOM_OPTION="${CUSTOM_OPTION} -DKERNEL_MODE=ON -DDEVICE_MODE=ON -DPRODUCT=ascend -DPRODUCT_SIDE=device"
@@ -469,29 +273,8 @@ fi
 
 cd ${BUILD_DIR}
 
-if [ "${ENABLE_UT}" == "on" ]; then
-    bash ${CURRENT_DIR}/build_third_party.sh
-    build_ut
-    make_ut_gov
-elif [ -n "${TEST}" ];then
-    build_test
-elif [ "${KERNEL}" == "true" ]; then
+if [ "${KERNEL}" == "true" ]; then
     build_kernel
-elif [ "${BUILD_FWK_HLT}" == "true" ]; then
-    log "Info: Building fwk_test with MOCK_HCCL=${MOCK_FWK_HLT}"
-    cmake ${CUSTOM_OPTION} -DMOCK_HCCL=${MOCK_FWK_HLT} ../test/hlt
-    build hcomm_test
-    log "Info: fwk_test execution example: ${BUILD_DIR}/hcomm_test --cluster_info test/hlt/ranktable.json --rank 0 --list"
-    log "Info: fwk_test execution example: ${BUILD_DIR}/hcomm_test --cluster_info test/hlt/ranktable.json --rank 0 --test allocthread"
-elif [ "${BUILD_CB_TEST}" == "true" ]; then
-    log "Info: Building cb_test_verify"
-    build_cb_test_verify
-    if grep -q "Make Failure" ${BUILD_DIR}/build.log || grep -q "Make test Failure" ${BUILD_DIR}/build.log; then
-        log "Info: Building cb_test_verify failed"
-        exit 1
-    else
-        log "Info: Building cb_test_verify success"
-    fi
 elif [ "${FULL_MODE}" == "true" ]; then
     cd ..
     mkdir -p ${BUILD_DEVICE_DIR}

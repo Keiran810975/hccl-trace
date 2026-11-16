@@ -20,8 +20,7 @@ from .report_contract import CLEAN_TASK_REFERENCE, without_critical_path
 FINAL_FILES = {"execution.html", "root_causes.json", "propagation.html"}
 
 
-def publish_selected_iteration_report(directory, output, normalized, roots, tasks, *,
-                                      full_graph_retained=False, graph_data=None):
+def publish_selected_iteration_report(directory, output, normalized, roots, tasks, *, graph_data):
     import csv
     followup = normalized.get('online_followup')
     selected = [a['iteration'] for a in followup['alerts'] if a['operation_scope']] if followup is not None else []
@@ -29,7 +28,7 @@ def publish_selected_iteration_report(directory, output, normalized, roots, task
                                      + normalized.get('peer_read_observations', [])})
     formal = [t for t in tasks if t.get('stage') == 'measured' and type(t.get('iteration')) is int]
     if not formal:
-        if followup is not None and graph_data is not None:
+        if followup is not None:
             return publish_final_report(directory, output, normalized, roots, tasks, graph_data=graph_data,
                 diagnosis_data=waits.analyze(*graph_data, trace_wait_chains=False))
         raise ValueError('selected-iteration view requires explicit formal coordinates')
@@ -39,7 +38,7 @@ def publish_selected_iteration_report(directory, output, normalized, roots, task
         epochs = sorted(epochs + [cross_node[0]["iteration"]])
     epochs = epochs or [late[0]["iteration"] if late else max(t['iteration'] for t in formal)]
     wanted = {t['graph_id'] for t in formal if t['iteration'] in epochs}
-    if followup is not None and graph_data is not None:
+    if followup is not None:
         path_ids = {edge for r in roots for path in r.get('evidence_paths', {}).values() for edge in path}
         for alert in followup["alerts"]:
             for path in evidence_paths(alert):
@@ -51,27 +50,10 @@ def publish_selected_iteration_report(directory, output, normalized, roots, task
         raise ValueError('selected iteration does not contain every actual source anchor')
     rendered = directory / 'selected-iteration-view'
     rendered.mkdir()
-    slices = (
-        ('dep_graph_nodes.csv', lambda r: r['graph_id'] in wanted),
-        ('dep_graph_edges.csv', lambda r: r['src'] in wanted and r['dst'] in wanted))
-    if graph_data is None or full_graph_retained:
-        for filename, predicate in slices:
-            with (directory / filename).open(encoding='utf-8-sig', newline='') as source, (rendered / filename).open('x', encoding='utf-8', newline='') as target:
-                reader = csv.DictReader(source)
-                writer = csv.DictWriter(target, reader.fieldnames)
-                writer.writeheader()
-                writer.writerows(r for r in reader if predicate(r))
-    if graph_data is None:
-        rows = graph.read_graph_artifact_nodes(rendered / 'dep_graph_nodes.csv')
-        edges = graph.read_graph_artifact_edges(rendered / 'dep_graph_edges.csv')
-    else:
-        rows = [r for r in graph_data[0] if r['_graph_id'] in wanted]
-        edges = [e for e in graph_data[1] if slices[1][1](e)]
-        # Preserve the sliced CSV reader's tie-break order for the rendered view.
-        rows = [dict(r, _source_row=i) for i, r in enumerate(rows)]
+    rows = [dict(r, _source_row=i) for i, r in enumerate(
+        r for r in graph_data[0] if r['_graph_id'] in wanted)]
+    edges = [e for e in graph_data[1] if e['src'] in wanted and e['dst'] in wanted]
     diagnosis = waits.analyze(rows, edges, trace_wait_chains=False)
-    if full_graph_retained:
-        write_json(rendered / 'diagnosis.json', diagnosis)
     scopes = {r.get('_operation_scope') for r in rows}
     with (directory/'operation_timings.csv').open(encoding='utf-8-sig', newline='') as source, \
             (rendered/'operation_timings.csv').open('x', encoding='utf-8', newline='') as target:
@@ -84,7 +66,7 @@ def publish_selected_iteration_report(directory, output, normalized, roots, task
     if (directory / 'clock_alignment.json').is_file():
         shutil.copy2(directory / 'clock_alignment.json', rendered / 'clock_alignment.json')
     normalized = dict(normalized, analysis_scope=dict(kind='selected_iteration_slice_from_original_artifacts',
-        iterations=epochs, diagnosis_used_full_capture=True, original_full_graph_retained=full_graph_retained,
+        iterations=epochs, diagnosis_used_full_capture=True, original_full_graph_retained=False,
         full_graph_replayable_from_capture=True))
     return publish_final_report(rendered, output, normalized, roots, [t for t in tasks if t['graph_id'] in wanted],
                                 graph_data=(rows, edges), diagnosis_data=diagnosis)
@@ -105,9 +87,14 @@ def host_source_displays(roots, rows, model, alignment=None):
         start, stop, origin = root["observed_start_ns"], root["observed_stop_ns"], waits.ns(anchor, "start")
         clock = clocks.get((root["node_id"], root["device_id"]))
         convert = clock.map_ns if clock is not None else lambda value: value
+        try:
+            begin, end, device_anchor = map(convert, (start, stop, origin))
+        except ValueError:
+            continue  # Do not paint outside the measured clock coverage.
         result[root["graph_id"]] = dict(nodeId=root["node_id"], rank=root["user_rank"], device=root["device_id"],
-            anchorRelative=True, startUs=shown["relativeStart"] + (convert(start) - convert(origin)) / 1000,
-            stopUs=shown["relativeStart"] + (convert(stop) - convert(origin)) / 1000,
+            anchorRelative=True, startUs=shown["relativeStart"] + (begin - device_anchor) / 1000,
+            stopUs=shown["relativeStart"] + (end - device_anchor) / 1000,
+            increaseNs=(str(root["delta_ns"]) if root.get("delta_ns") is not None else None),
             durationUs=(stop - start) / 1000, startNs=str(start), stopNs=str(stop))
     return result
 
@@ -245,7 +232,11 @@ def publish_final_report(directory, output, normalized, roots, comparisons, *, g
         if node["id"] in node_roles:
             node["diagnosisRole"] = node_roles[node["id"]]
     model["candidatePathEdges"] = {key: list(dict.fromkeys(value)) for key, value in paths.items()}
-    model["observedHostSources"] = host_source_displays(roots, rows, model, alignment)
+    shown_ids = {n["id"] for n in model["nodes"]}
+    alert_host = [dict(p, component="host_preparation", observed_start_ns=p["start_ns"], observed_stop_ns=p["stop_ns"])
+                  for alert in report.get("online_followup", {}).get("alerts", ()) if alert["route"] == "S1"
+                  for p in alert.get("host_preparation_observation", ()) if p["graph_id"] in shown_ids]
+    model["observedHostSources"] = host_source_displays([*roots, *alert_host], rows, model, alignment)
     model = without_critical_path(model)
     reference_kind = normalized["reference"].get("kind")
     if reference_kind == CLEAN_TASK_REFERENCE:

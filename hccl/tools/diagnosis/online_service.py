@@ -1,7 +1,6 @@
 """Run the opt-in HCCL online collector. The offline CLI is independent."""
 from __future__ import annotations
 
-import argparse
 from contextlib import ExitStack
 import hmac
 import json
@@ -12,6 +11,7 @@ import threading
 import time
 
 from .online_tracker import OnlineTracker
+from .report_paths import load_paths
 
 
 MAX_FRAME = 64 * 1024
@@ -129,12 +129,12 @@ class Collector(socketserver.ThreadingTCPServer):
             self.flush_events()
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--job-id", required=True)
+def add_arguments(parser):
+    parser.add_argument("run_id", metavar="RUN_ID", help="match capture --run-id")
+    parser.add_argument("--config", type=Path, help="report path configuration (default: ./config.yaml)")
     parser.add_argument("--listen", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7341)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", "-o", type=Path, help="override online_output_dir/RUN_ID")
     parser.add_argument("--hang-timeout", type=float, default=30.)
     parser.add_argument("--heartbeat-ttl", type=float, default=5.)
     parser.add_argument("--transport-grace", type=float, default=2.)
@@ -142,38 +142,38 @@ def main(argv=None):
     parser.add_argument("--warmup-iterations", type=int, default=10)
     parser.add_argument("--expected-ranks", type=int, help="global ranks 0..N-1 for final completeness audit")
     parser.add_argument("--expected-collectives", type=int, help="total target CollOps including warmup")
-    args = parser.parse_args(argv)
-    try:
-        if any(v is not None and v < 1 for v in (args.expected_ranks, args.expected_collectives)):
-            raise ValueError("expected counts must be positive")
-        tracker = OnlineTracker(args.job_id, hang_timeout=args.hang_timeout,
-            heartbeat_ttl=args.heartbeat_ttl, transport_grace=args.transport_grace,
-            baseline_window=args.baseline_window, warmup_iterations=args.warmup_iterations)
-        token = os.environ.get("HCCL_TRACE_ONLINE_TOKEN")
-        if args.listen not in {"127.0.0.1", "localhost"} and not token:
-            raise ValueError("non-loopback collectors require HCCL_TRACE_ONLINE_TOKEN")
-        with ExitStack() as stack:
-            args.output.mkdir(parents=True, exist_ok=False)
-            telemetry = stack.enter_context((args.output / "telemetry.jsonl").open("x", encoding="utf-8", buffering=1))
-            events = stack.enter_context((args.output / "events.jsonl").open("x", encoding="utf-8", buffering=1))
-            measurements = stack.enter_context((args.output / "measurements.jsonl").open("x", encoding="utf-8", buffering=1))
-            health = stack.enter_context((args.output / "run_health.jsonl").open("x", encoding="utf-8", buffering=1))
-            server = stack.enter_context(Collector((args.listen, args.port), tracker=tracker,
-                telemetry=telemetry, events=events, measurements=measurements, health_file=health,
-                expected_ranks=args.expected_ranks, expected_collectives=args.expected_collectives, token=token))
-            print(f"Online collector listening on {server.server_address[0]}:{server.server_address[1]}", flush=True)
-            try:
-                server.serve_forever(poll_interval=.2)
-            except KeyboardInterrupt:
-                pass
-            finally:
-                if server.write_error is None:
-                    with server.lock:
-                        server.finish_run(time.monotonic_ns())
-    except (OSError, ValueError, OverflowError) as exc:
-        parser.exit(1, f"collector: {exc}\n")
+
+
+def run(args):
+    from .multi_node_trace import _name
+
+    job_id = _name(args.run_id)
+    output = args.output or load_paths(args.config).for_run("online", job_id)
+    if any(v is not None and v < 1 for v in (args.expected_ranks, args.expected_collectives)):
+        raise ValueError("expected counts must be positive")
+    tracker = OnlineTracker(job_id, hang_timeout=args.hang_timeout,
+        heartbeat_ttl=args.heartbeat_ttl, transport_grace=args.transport_grace,
+        baseline_window=args.baseline_window, warmup_iterations=args.warmup_iterations)
+    token = os.environ.get("HCCL_TRACE_ONLINE_TOKEN")
+    if args.listen not in {"127.0.0.1", "localhost"} and not token:
+        raise ValueError("non-loopback collectors require HCCL_TRACE_ONLINE_TOKEN")
+    with ExitStack() as stack:
+        output.mkdir(parents=True, exist_ok=False)
+        telemetry = stack.enter_context((output / "telemetry.jsonl").open("x", encoding="utf-8", buffering=1))
+        events = stack.enter_context((output / "events.jsonl").open("x", encoding="utf-8", buffering=1))
+        measurements = stack.enter_context((output / "measurements.jsonl").open("x", encoding="utf-8", buffering=1))
+        health = stack.enter_context((output / "run_health.jsonl").open("x", encoding="utf-8", buffering=1))
+        server = stack.enter_context(Collector((args.listen, args.port), tracker=tracker,
+            telemetry=telemetry, events=events, measurements=measurements, health_file=health,
+            expected_ranks=args.expected_ranks, expected_collectives=args.expected_collectives, token=token))
+        print(f"Online collector listening on {server.server_address[0]}:{server.server_address[1]}; output={output.resolve()}",
+              flush=True)
+        try:
+            server.serve_forever(poll_interval=.2)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            if server.write_error is None:
+                with server.lock:
+                    server.finish_run(time.monotonic_ns())
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

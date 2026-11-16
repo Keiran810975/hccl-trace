@@ -5,13 +5,15 @@ from decimal import Decimal
 from heapq import heappop, heappush
 
 from .dependency_timing import ORDER, WAIT
+from .rank_progress import WORK, s2_growth
 
 
-def trace_downstream(seed, graph, progress, limit):
+def trace_downstream(seed, graph, progress, limit, *, s2_threshold=False):
     gid = seed["graph_id"]
-    kind = "independent_execution_overrun" if seed["intrinsic_work_slow"] else "unconfirmed_protocol_stage"
+    independent = seed["task_kind"] in WORK if s2_threshold else seed["intrinsic_work_slow"]
+    kind = "independent_execution_overrun" if independent else "unconfirmed_protocol_stage"
     budget = Decimal(seed["duration_delta_ns"] or 0)
-    if kind == "unconfirmed_protocol_stage" and not seed["slow_wait"]:
+    if kind == "unconfirmed_protocol_stage" and not seed["slow_wait"] and not s2_threshold:
         budget = Decimal((seed["completion_progress"] or {}).get("delta_ns", 0))
     best, settled, queue, prior = {gid: 0}, set(), [(0, gid)], {}
     impacts, gaps = [], set()
@@ -37,21 +39,25 @@ def trace_downstream(seed, graph, progress, limit):
                 gaps.add((key, "outside_forward_iteration_window", None))
                 continue
             edge = prior[key]
+            overrun = s2_growth(item) if s2_threshold else None
+            slow_work = (overrun is not None and item["task_kind"] in WORK if s2_threshold
+                         else item["intrinsic_work_slow"])
+            slow_wait = (overrun is not None and item["task_kind"] in WAIT if s2_threshold else item["slow_wait"])
             change = None
-            if item["intrinsic_work_slow"]:
+            if slow_work:
                 change = "independent_execution_overrun"
-            elif item["slow_wait"] and edge["kind"] != ORDER:
+            elif slow_wait and edge["kind"] != ORDER:
                 change = "wait_growth"
             elif item["starts_late"] and item["duration_comparable"] and not item["duration_slow"]:
                 change = "start_displacement_with_normal_duration"
             if change:
                 late_finish = item["completion_progress"]
-                impacts.append(dict(task=item, change=change, path=path_to(key), path_slack_and_clock_ns=cost,
+                impacts.append(dict(task=overrun or item, change=change, path=path_to(key), path_slack_and_clock_ns=cost,
                     status=("independent_not_attributed" if change == "independent_execution_overrun" else
                             "verified_blocking_path" if change == "wait_growth" and kind == "independent_execution_overrun"
                             and (late_finish is None or item["completion_late"])
                             else "dependency_supported_observation")))
-            if item["intrinsic_work_slow"]:
+            if slow_work:
                 continue
             if (item["task_kind"] in WAIT and edge["kind"] == ORDER
                     and graph.wait_proof(key)["status"] != "producer_already_ready"):
@@ -66,7 +72,8 @@ def trace_downstream(seed, graph, progress, limit):
                 continue
             if e["kind"] == ORDER and graph.nodes[target]["profiler_task_kind"] in WAIT:
                 target_wait = progress.milestone(target)
-                if target_wait["slow_wait"] and graph.wait_proof(target)["status"] != "producer_already_ready":
+                over_wait = (s2_growth(target_wait) is not None if s2_threshold else target_wait["slow_wait"])
+                if over_wait and graph.wait_proof(target)["status"] != "producer_already_ready":
                     # Arrival is not a substitute for the signal releasing a slow Wait.
                     gaps.add((target, "arrival_does_not_establish_wait_release", e["edge_id"]))
                     continue

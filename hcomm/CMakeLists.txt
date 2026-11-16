@@ -79,12 +79,7 @@ set(CMAKE_JOB_POOL_COMPILE "${JOBS}")
 set(CMAKE_JOB_POOL_LINK "${JOBS}")
 
 if(ENABLE_TEST)
-    include(cmake/config.cmake)
-    include(cmake/function.cmake)
-    include(cmake/intf_pub_gccnative.cmake)
-    include(cmake/utils.cmake)
-    add_subdirectory(test)
-    return()
+    message(FATAL_ERROR "Native tests are not included in the submit branch")
 endif()
 
 if(BUILD_OPEN_PROJECT)

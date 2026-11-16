@@ -44,11 +44,10 @@ set(CMAKE_C_COMPILE_OBJECT
 )
 
 if(ENABLE_TEST)
-    include(cmake/config.cmake)
-    include(cmake/intf_pub_gccnative.cmake)
-    add_subdirectory(test)
+    message(FATAL_ERROR "Native tests are not included in the submit branch")
+endif()
 
-elseif(ENABLE_CUSTOM)
+if(ENABLE_CUSTOM)
     # 自定义算子打包
     if(NOT CUSTOM_OPS_NAME)
         message(FATAL_ERROR "Custom ops name is not set")

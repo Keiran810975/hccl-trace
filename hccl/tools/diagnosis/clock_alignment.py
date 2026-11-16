@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from fractions import Fraction
 from collections import defaultdict
+from contextlib import closing
 import hashlib
 import json
 from pathlib import Path
@@ -220,4 +221,35 @@ def models_from_report(report):
     result = {(model.node_id, model.device_id): model for model in models}
     if len(result) != len(models):
         raise ValueError("duplicate device clock model")
+    return result
+
+
+def local_profiler_models(manifest):
+    """Map to each host's RAW clock, never to another host's time axis."""
+    result, duplicate = {}, set()
+    for node in manifest["nodes"]:
+        for path in discover_db_files(node["msprof_db_dir"]):
+            start_path, stop_path = path.parent / "host/start_info", path.parent / "host/end_info"
+            if not start_path.is_file() or not stop_path.is_file():
+                continue
+            with closing(_readonly_connection(str(path))) as db:
+                devices = _device_ids(db)
+                sessions = db.execute("SELECT startTimeNs,endTimeNs FROM SESSION_TIME_INFO").fetchall()
+            if len(devices) != 1 or len(sessions) != 1:
+                continue
+            start, stop = (json.loads(f.read_text()) for f in (start_path, stop_path))
+            try:
+                offset, error, _ = profiler_conversion(start, stop, [])
+                first, last = (_integer(row, "clockMonotonicRaw") for row in (start, stop))
+            except (KeyError, ValueError):
+                continue
+            if tuple(sessions[0]) != (first + offset, _integer(stop, "collectionTimeEnd") * 1000):
+                continue
+            name = manifest["run_id"] + "/" + node["node_id"]
+            key = name, devices[0]
+            if key in result or key in duplicate:
+                result.pop(key, None)
+                duplicate.add(key)
+            else:
+                result[key] = DeviceClock(name, devices[0], offset, first, first, 1, 1, first, last, error)
     return result

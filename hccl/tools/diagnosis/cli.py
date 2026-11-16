@@ -4,9 +4,7 @@ from __future__ import annotations
 import argparse
 from contextlib import redirect_stdout
 import io
-import json
 from pathlib import Path
-import shutil
 import sys
 import tempfile
 
@@ -16,6 +14,7 @@ from . import visualize_dependency_graph as graph
 from .capture_discovery import discover_capture, prepare_capture_identity, read_json, write_json
 from .workload_binder import bind_capture
 from .result_normalizer import normalize
+from .report_paths import load_paths
 from .report_exporter import publish_final_report
 from .run_diagnosis import run_pipeline
 from .workload_coordinates import position
@@ -59,15 +58,30 @@ def _baseline_pairs(current, baseline, work):
     return path
 
 
-def analyze_capture(capture, output, *, mode, baseline=None, topology=None, manifest=None,
-                    min_match_rate=95.0, require_clock_alignment=False, keep_debug=False,
-                    debug_dir=None, verbose=False, allow_uncalibrated_clock=False,
+def _check_output(output, *inputs):
+    if output.exists() or output.is_symlink():
+        raise DiagnosisError(2, "refusing to overwrite existing report: " + str(output))
+    resolved = output.resolve()
+    for source in inputs:
+        if source is not None:
+            source = Path(source).resolve()
+            root = source.parent if source.is_file() else source
+            if resolved == root or root in resolved.parents:
+                raise DiagnosisError(2, "output must be outside read-only capture directories")
+
+
+def analyze_capture(capture, output=None, *, mode, baseline=None, topology=None, manifest=None,
+                    min_match_rate=95.0, require_clock_alignment=False,
+                    verbose=False, allow_uncalibrated_clock=False,
                     source_slowdown_factor="1.5", wait_slowdown_factor=None,
-                    calibrated_release_intervals=False, online=None):
+                    calibrated_release_intervals=False, online=None, paths=None,
+                    without_online=False):
     if require_clock_alignment and allow_uncalibrated_clock:
         raise DiagnosisError(2, "required alignment and explicit local-clock fallback are mutually exclusive")
     if mode not in {"rolling", "baseline"} or (mode == "baseline") != (baseline is not None):
         raise DiagnosisError(2, "baseline mode requires --baseline; rolling forbids it")
+    if online is not None and without_online:
+        raise DiagnosisError(2, "--online and --without-online are mutually exclusive")
     if online is not None and mode != "rolling":
         raise DiagnosisError(2, "--online requires rolling history (do not combine with --baseline)")
     rolling_options = rolling.RollingOptions(slowdown_factor=source_slowdown_factor,
@@ -80,150 +94,138 @@ def analyze_capture(capture, output, *, mode, baseline=None, topology=None, mani
             raise DiagnosisError(2, 'invalid diagnosis options: ' + str(error)) from error
     if not 0 < min_match_rate <= 100:
         raise DiagnosisError(2, "min-match-rate must be in (0,100]")
-    output = Path(output).absolute()
-    keep_debug = keep_debug or debug_dir is not None
-    if output.exists() or output.is_symlink():
-        raise DiagnosisError(2, "refusing to overwrite existing report: " + str(output))
-    inputs = [Path(p).resolve() for p in (capture, baseline) if p is not None]
-    for source in inputs:
-        root = source.parent if source.is_file() else source
-        if output.resolve() == root or root in output.resolve().parents:
-            raise DiagnosisError(2, "output must be outside read-only capture directories")
-    debug = Path(debug_dir).absolute() if debug_dir else output.with_name(output.name + ".debug")
-    if keep_debug:
-        resolved_debug, resolved_output = debug.resolve(), output.resolve()
-        if (debug.exists() or debug.is_symlink() or resolved_debug == resolved_output
-                or resolved_output in resolved_debug.parents or resolved_debug in resolved_output.parents):
-            raise DiagnosisError(2, "debug must be a fresh directory separate from the final report")
-        if any((p.parent if p.is_file() else p) == debug.resolve() or
-               (p.parent if p.is_file() else p) in debug.resolve().parents for p in inputs):
-            raise DiagnosisError(2, "debug cannot be placed inside capture inputs")
-        debug.parent.mkdir(parents=True, exist_ok=True)
-    # Keep replay on its destination filesystem so retention is an atomic move,
-    # not a second full copy of multi-gigabyte captures and graph artifacts.
-    with tempfile.TemporaryDirectory(prefix="hccl-diag-", dir=debug.parent if keep_debug else None) as temporary:
+    paths = paths or load_paths()
+    if output is not None:
+        output = Path(output).absolute()
+        _check_output(output, capture, baseline, manifest)
+    with tempfile.TemporaryDirectory(prefix="hccl-diag-") as temporary:
         work = Path(temporary)
         try:
-            try:
-                current_capture = discover_capture(capture, work / "discovery-current", topology=topology, manifest_path=manifest)
-                online_path = online_followup.alert_path(capture, online) if mode == "rolling" else None
-                alert_events = (online_followup.load_alerts(online_path, current_capture.manifest["run_id"])
-                                if online_path is not None else None)
-                current_capture = prepare_capture_identity(current_capture, work / "identity-current")
-                current = bind_capture(current_capture, work / "current", mode=mode, allow_partial=alert_events is not None)
-                selected = (online_followup.resolve(alert_events, current_capture.call_logs, current.coordinates)
-                            if alert_events is not None else None)
-                reference = None
-                pair_map = current_capture.operation_map
+            current_capture = discover_capture(capture, work / "discovery-current", topology=topology, manifest_path=manifest)
+            run_id = current_capture.manifest["run_id"]
+            if output is None:
+                output = paths.for_run("offline", run_id)
+                _check_output(output, capture, baseline, manifest)
+            online_path = (online_followup.alert_path(capture, online,
+                configured=paths.for_run("online", run_id) / "events.jsonl")
+                if mode == "rolling" and not without_online else None)
+            alert_events = (online_followup.load_alerts(online_path, current_capture.manifest["run_id"])
+                            if online_path is not None else None)
+            current_capture = prepare_capture_identity(current_capture, work / "identity-current")
+            current = bind_capture(current_capture, work / "current", mode=mode, allow_partial=alert_events is not None)
+            selected = (online_followup.resolve(alert_events, current_capture.call_logs, current.coordinates)
+                        if alert_events is not None else None)
+            reference = None
+            pair_map = current_capture.operation_map
+            if baseline is not None:
+                base_capture = discover_capture(baseline, work / "discovery-baseline")
+                base_capture = prepare_capture_identity(base_capture, work / "identity-baseline")
+                base = bind_capture(base_capture, work / "baseline", mode="baseline")
+                pair_map = pair_map or _baseline_pairs(current, base, work)
+        except DiagnosisError:
+            raise
+        except Exception as error:
+            raise DiagnosisError(2, "capture/binding: " + str(error)) from error
+        try:
+            # The core algorithms are invoked directly, not chained subprocesses.
+            live = {} if mode == "rolling" else None
+            with redirect_stdout(sys.stdout if verbose else io.StringIO()):
                 if baseline is not None:
-                    base_capture = discover_capture(baseline, work / "discovery-baseline")
-                    base_capture = prepare_capture_identity(base_capture, work / "identity-baseline")
-                    base = bind_capture(base_capture, work / "baseline", mode="baseline")
-                    pair_map = pair_map or _baseline_pairs(current, base, work)
-            except Exception as error:
-                raise DiagnosisError(2, "capture/binding: " + str(error)) from error
-            try:
-                # The core algorithms are invoked directly, not chained subprocesses.
-                live = {} if mode == "rolling" else None
-                with redirect_stdout(sys.stdout if verbose else io.StringIO()):
-                    if baseline is not None:
-                        reference, ready = run_pipeline(base.manifest, work / "reference",
-                            min_match_rate=min_match_rate,
-                            require_clock_alignment=require_clock_alignment, allow_uncalibrated_clock=allow_uncalibrated_clock)
-                        _gate(reference, ready)
-                    directory, ready = run_pipeline(current.manifest, work / "analysis", baseline=reference,
-                        operation_map=pair_map if baseline is not None else None,
-                        iteration_map=current.iteration_map if mode == "rolling" else None,
-                        preparation_map=current.preparation_map if mode == "rolling" else None,
-                        min_match_rate=min_match_rate, require_clock_alignment=require_clock_alignment,
-                        allow_uncalibrated_clock=allow_uncalibrated_clock,
-                        rolling_options=rolling_options, keep_debug=keep_debug, live=live)
-                pipeline = _gate(directory, ready)
-                if live is None:
-                    report = read_json(directory / "comparison/report.json")
-                    rows = graph.read_graph_artifact_nodes(directory / "dep_graph_nodes.csv")
-                    edges = graph.read_graph_artifact_edges(directory / "dep_graph_edges.csv")
-                else:
-                    report = live.pop("report")
-                    rows, edges = live["graph"]
-                if selected is not None:
-                    clock_path = directory / "clock_alignment.json"
-                    report, followed = online_followup.focus_report(report, selected,
-                        rolling.source_events.load_preparations(current.preparation_map), rows=rows, edges=edges,
-                        timings=waits.read_csv(directory / "operation_timings.csv"),
-                        alignment=read_json(clock_path) if clock_path.is_file() else None, options=rolling_options)
-                normalized, roots, tasks = normalize(report, mode=mode,
-                    run_id=current_capture.manifest["run_id"], rows=rows, edges=edges, pipeline=pipeline,
-                    binding_evidence=dict(current.evidence, identity_exports=list(current_capture.identity_exports)),
-                    merge_metrics=waits.read_csv(directory / "merge_summary.csv"), formal_only=mode == "rolling")
-                if selected is not None:
-                    normalized["online_followup"] = dict(schema_version=2, alert_count=len(followed),
-                        bound_count=sum(bool(a["operation_scope"]) for a in followed), alerts=followed)
-                del report
-                if mode == 'rolling':
-                    nodes = sorted({r['_node_id'] for r in rows})
-                    normalized['automatic_diagnosis'] = dict(node_count=len(nodes), node_ids=nodes,
-                        execution_mode='single_node' if len(nodes) == 1 else 'multi_node',
-                        selected_policy='wait_backtrace_v1')
-                    normalized['source_candidates'] = normalized['candidates'] + normalized['external_anomaly_clues']
-                    for candidate in normalized['source_candidates']:
-                        candidate['source_unit'] = ('host_preparation' if candidate['component'] == 'host_preparation'
-                                                    else 'execution_task')
-            except DiagnosisError:
-                raise
-            except Exception as error:
-                raise DiagnosisError(4, "analysis: " + str(error)) from error
-            try:
-                if mode == 'rolling':
-                    from .report_exporter import publish_selected_iteration_report
-                    return publish_selected_iteration_report(directory, output, normalized, roots, tasks,
-                        full_graph_retained=keep_debug, graph_data=(rows, edges))
-                return publish_final_report(directory, output, normalized, roots, tasks)
-            except Exception as error:
-                raise DiagnosisError(5, "report publication: " + str(error)) from error
-        finally:
-            if keep_debug:
-                try:
-                    if debug.exists() or debug.is_symlink():
-                        raise FileExistsError("debug appeared during analysis; refusing overwrite")
-                    work.rename(debug)
-                except Exception as error:
-                    raise DiagnosisError(5, 'debug retention failed; original capture retained: ' + str(error)) from error
+                    reference, ready = run_pipeline(base.manifest, work / "reference",
+                        min_match_rate=min_match_rate,
+                        require_clock_alignment=require_clock_alignment, allow_uncalibrated_clock=allow_uncalibrated_clock)
+                    _gate(reference, ready)
+                directory, ready = run_pipeline(current.manifest, work / "analysis", baseline=reference,
+                    operation_map=pair_map if baseline is not None else None,
+                    iteration_map=current.iteration_map if mode == "rolling" else None,
+                    preparation_map=current.preparation_map if mode == "rolling" else None,
+                    min_match_rate=min_match_rate, require_clock_alignment=require_clock_alignment,
+                    allow_uncalibrated_clock=allow_uncalibrated_clock,
+                    rolling_options=rolling_options, live=live)
+            pipeline = _gate(directory, ready)
+            if live is None:
+                report = read_json(directory / "comparison/report.json")
+                rows = graph.read_graph_artifact_nodes(directory / "dep_graph_nodes.csv")
+                edges = graph.read_graph_artifact_edges(directory / "dep_graph_edges.csv")
+            else:
+                report = live.pop("report")
+                rows, edges = live["graph"]
+            if selected is not None:
+                from .clock_alignment import local_profiler_models
+                clock_path = directory / "clock_alignment.json"
+                report, followed = online_followup.focus_report(report, selected,
+                    rolling.source_events.load_preparations(current.preparation_map), rows=rows, edges=edges,
+                    timings=waits.read_csv(directory / "operation_timings.csv"),
+                    alignment=read_json(clock_path) if clock_path.is_file() else None, options=rolling_options,
+                    local_clocks=local_profiler_models(read_json(directory / "inputs.json")) if selected else {})
+            normalized, roots, tasks = normalize(report, mode=mode,
+                run_id=current_capture.manifest["run_id"], rows=rows, edges=edges, pipeline=pipeline,
+                binding_evidence=dict(current.evidence, identity_exports=list(current_capture.identity_exports)),
+                merge_metrics=waits.read_csv(directory / "merge_summary.csv"), formal_only=mode == "rolling")
+            if selected is not None:
+                normalized["online_followup"] = dict(schema_version=3, alert_count=len(followed),
+                    bound_count=sum(bool(a["operation_scope"]) for a in followed), alerts=followed)
+            del report
+            if mode == 'rolling':
+                nodes = sorted({r['_node_id'] for r in rows})
+                normalized['automatic_diagnosis'] = dict(node_count=len(nodes), node_ids=nodes,
+                    execution_mode='single_node' if len(nodes) == 1 else 'multi_node',
+                    selected_policy='wait_backtrace_v1')
+                normalized['source_candidates'] = normalized['candidates'] + normalized['external_anomaly_clues']
+                for candidate in normalized['source_candidates']:
+                    candidate['source_unit'] = ('host_preparation' if candidate['component'] == 'host_preparation'
+                                                else 'execution_task')
+        except DiagnosisError:
+            raise
+        except Exception as error:
+            raise DiagnosisError(4, "analysis: " + str(error)) from error
+        try:
+            if mode == 'rolling':
+                from .report_exporter import publish_selected_iteration_report
+                return publish_selected_iteration_report(directory, output, normalized, roots, tasks,
+                    graph_data=(rows, edges))
+            return publish_final_report(directory, output, normalized, roots, tasks)
+        except Exception as error:
+            raise DiagnosisError(5, "report publication: " + str(error)) from error
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, epilog="Exit codes: 0 command completed (capture alone is not diagnosis or numerical validation); 2 input/capture/binding; 3 association gate; 4 graph/diagnosis; 5 publication. Inputs are never deleted.")
     sub = parser.add_subparsers(dest="command", required=True)
     from .capture_command import add_commands, dispatch
-    from . import clock_probe
+    from . import clock_probe, online_service
     add_commands(sub)
+    online_service.add_arguments(sub.add_parser("online", help="start the online collector for RUN_ID"))
     clock_probe.add_arguments(sub.add_parser("clock-probe", help="collect CPU clock evidence for multi-node diagnosis"))
     analyze = sub.add_parser("analyze", aliases=['diag'], help="automatically diagnose single/multi-node capture")
     analyze.add_argument("capture", type=Path)
     analyze.add_argument("--baseline", type=Path)
-    analyze.add_argument("--online", type=Path, help="source events.jsonl or its online output directory; auto-detected beside the capture")
-    analyze.add_argument("--output", "-o", type=Path, help="default: CAPTURE-report")
+    alerts = analyze.add_mutually_exclusive_group()
+    alerts.add_argument("--online", type=Path, help="override the auto-detected events.jsonl or its directory")
+    alerts.add_argument("--without-online", action="store_true", help="analyze without online alert selection")
+    analyze.add_argument("--config", type=Path, help="report path configuration (default: ./config.yaml)")
+    analyze.add_argument("--output", "-o", type=Path, help="override offline_output_dir/RUN_ID")
     analyze.add_argument("--topology", type=Path)
     analyze.add_argument("--manifest", type=Path)
     analyze.add_argument("--min-match-rate", type=float, default=95.0)
     analyze.add_argument("--require-clock-alignment", action="store_true")
     analyze.add_argument("--allow-uncalibrated-clock", action="store_true", help="on rejected display calibration, retain node-local axes and report the reason; semantic/graph gates remain required")
-    analyze.add_argument("--keep-debug", action="store_true")
-    analyze.add_argument("--debug-dir", type=Path, help="retain full intermediate evidence here (implies --keep-debug)")
     analyze.add_argument("--verbose", action="store_true")
     analyze.add_argument("--source-slowdown-factor", default="1.5")
     analyze.add_argument("--wait-slowdown-factor")
     analyze.add_argument("--calibrated-release-intervals", action="store_true")
     args = parser.parse_args(argv)
     try:
+        if args.command == "online":
+            return online_service.run(args)
         if args.command == "clock-probe":
             clock_probe.run(args)
             return 0
         if args.command not in {'analyze', 'diag'}:
             return dispatch(args)
         args.mode = 'baseline' if args.baseline else 'rolling'
-        capture_path = args.capture.absolute()
-        args.output = args.output or capture_path.with_name(capture_path.name + '-report')
+        args.paths = load_paths(args.config)
+        del args.config
         result = analyze_capture(**{key: value for key, value in vars(args).items() if key != "command"})
     except DiagnosisError as error:
         print("hccl-diag: " + str(error), file=sys.stderr)
@@ -234,11 +236,12 @@ def main(argv=None):
     except KeyboardInterrupt as error:
         print("hccl-diag: interrupted; original capture inputs retained", file=sys.stderr)
         return 128 + getattr(error, 'signum', 2)
+    output = args.output or args.paths.for_run("offline", result["run_id"])
     print("status={} candidates={} chains={} output={}".format(result["status"], len(result.get("source_candidates", result["candidates"])),
-          result["propagation"]["chain_count"], args.output.absolute()))
-    if "iteration_start_observations" in result:
-        print("relative late starts={} (not Host causes)".format(
-            result["iteration_start_observations"]["late_task_count"]))
+          result["propagation"]["chain_count"], output.absolute()))
+    late_count = result.get("iteration_start_observations", {}).get("late_task_count")
+    if late_count is not None:
+        print(f"relative late starts={late_count} (not Host causes)")
     return 0
 
 

@@ -1,0 +1,3 @@
+# Relative paths are resolved from the directory containing this file.
+online_output_dir: reports/online
+offline_output_dir: reports/offline
