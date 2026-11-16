@@ -22,10 +22,15 @@ FINAL_FILES = {"execution.html", "root_causes.json", "propagation.html"}
 def publish_selected_iteration_report(directory, output, normalized, roots, tasks, *,
                                       full_graph_retained=False, graph_data=None):
     import csv
-    epochs = sorted({c['iteration'] for c in normalized.get('source_candidates', normalized['candidates'])
-                     + normalized.get('peer_read_observations', [])})
+    followup = normalized.get('online_followup')
+    selected = [a['iteration'] for a in followup['alerts'] if a['operation_scope']] if followup is not None else []
+    epochs = sorted(set(selected) | {c['iteration'] for c in normalized.get('source_candidates', normalized['candidates'])
+                                     + normalized.get('peer_read_observations', [])})
     formal = [t for t in tasks if t.get('stage') == 'measured' and type(t.get('iteration')) is int]
     if not formal:
+        if followup is not None and graph_data is not None:
+            return publish_final_report(directory, output, normalized, roots, tasks, graph_data=graph_data,
+                diagnosis_data=waits.analyze(*graph_data, trace_wait_chains=False))
         raise ValueError('selected-iteration view requires explicit formal coordinates')
     late = normalized.get("iteration_start_observations", {}).get("examples", [])
     cross_node = normalized.get("cross_node_path_candidates", [])
@@ -33,6 +38,11 @@ def publish_selected_iteration_report(directory, output, normalized, roots, task
         epochs = sorted(epochs + [cross_node[0]["iteration"]])
     epochs = epochs or [late[0]["iteration"] if late else max(t['iteration'] for t in formal)]
     wanted = {t['graph_id'] for t in formal if t['iteration'] in epochs}
+    if followup is not None and graph_data is not None:
+        path_ids = {edge for r in roots for path in r.get('evidence_paths', {}).values() for edge in path}
+        for edge in graph_data[1]:
+            if edge['edge_id'] in path_ids:
+                wanted.update((edge['src'], edge['dst']))
     if not {r['graph_id'] for r in roots} <= wanted:
         raise ValueError('selected iteration does not contain every actual source anchor')
     rendered = directory / 'selected-iteration-view'
@@ -163,6 +173,8 @@ def publish_final_report(directory, output, normalized, roots, comparisons, *, g
     report["cross_node_path_candidates"] = normalized.get("cross_node_path_candidates", [])
     if normalized.get("analysis_scope"):
         report["analysis_scope"] = normalized["analysis_scope"]
+    if "online_followup" in normalized:
+        report["online_followup"] = normalized["online_followup"]
     if report["cross_node_path_candidates"]:
         shown = {r["_graph_id"] for r in rows}
         report["cross_node_path_candidates"] = [

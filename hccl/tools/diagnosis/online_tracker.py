@@ -1,6 +1,7 @@
 """Collective identity, telemetry health and device-duration detection (V1)."""
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from math import isfinite
 from statistics import median
@@ -52,6 +53,7 @@ class Operation:
     all_entered: int | None = None
     status: str = "PENDING"
     issued: bool = False
+    blocked_by: set = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,7 @@ class Sample:
     iteration: int
     maximum: int
     preparation: dict
+    duration_by_rank: dict
 
 
 class OnlineTracker:
@@ -84,6 +87,7 @@ class OnlineTracker:
         self.streams, self.groups, self.operations, self.history = {}, {}, {}, {}
         self.events = []
         self.counts = {}
+        self.verified_by_site = Counter()
         self.awaiting_baseline, self.invalid_baselines, self.measured_baselines = {}, set(), set()
 
     def _count(self, key):
@@ -144,7 +148,8 @@ class OnlineTracker:
         self.observe_measurement(dict(job_id=self.job_id, communicator_id=key[0], communicator_generation=key[1],
             op_counter=key[2], status=status, stage=entry["stage"], iteration=entry["iteration"],
             bucket_id=entry["bucket_id"], occurrence=entry["occurrence"], op_type=entry["op_type"],
-            tensor_bytes=entry["tensor_bytes"], device_by_rank=op.spans, **fields))
+            tensor_bytes=entry["tensor_bytes"], device_by_rank=dict(op.spans),
+            blocked_by_op_counters=sorted(op.blocked_by), **fields))
 
     def _finalize(self, key, op, kind, now, reason, **details):
         self._report(key, op, kind, now, reason, **details)
@@ -335,7 +340,13 @@ class OnlineTracker:
                 self._count("COMPLETED")
                 if source != "npu_event_elapsed" or (profile and all(v["algorithm"] and v["rank_role"] for v in op.spans.values())):
                     self._count("VERIFIED_TIMING")
-                if not op.issued:
+                    entry = op.entries[group.ranks[0]]
+                    self.verified_by_site[(*key[:2], entry["bucket_id"], entry["occurrence"])] += 1
+                if op.blocked_by or op.issued:
+                    status = "COMPLETED_AFTER_BLOCK" if op.blocked_by else "COMPLETED_AFTER_ALERT"
+                    self._count(status)
+                    self._measurement(key, op, status, reason="collected_after_timeout_without_updating_baseline")
+                else:
                     op.status = "COMPLETED"
                     self._slow(key, group, op, now)
 
@@ -359,7 +370,8 @@ class OnlineTracker:
                 self.invalid_baselines.add(hkey)
                 self._report(key, op, "INSUFFICIENT_BASELINE", now, "unexpected_or_duplicate_warmup_iteration")
                 return
-            history.append(Sample(key[2], stage, iteration, maximum, preparation))
+            history.append(Sample(key[2], stage, iteration, maximum, preparation,
+                                  dict(zip(group.ranks, durations))))
             self._count("WARMUP_ACCEPTED")
             warm = [h.maximum for h in history if h.stage == "warmup"]
             if len(warm) == len(self.warmup_indices) and max(warm) > 3 * median(warm):
@@ -414,33 +426,48 @@ class OnlineTracker:
         if maximum <= 3*base:
             self._count("NORMAL")
             self._measurement(key, op, "NORMAL", slow=False, baseline_ready=True, **metrics)
-            history.append(Sample(key[2], stage, iteration, maximum, preparation))
+            history.append(Sample(key[2], stage, iteration, maximum, preparation,
+                                  dict(zip(group.ranks, durations))))
             formal = sorted((h for h in history if h.stage == "measured"), key=lambda h: h.counter)
             if len(formal) > self.baseline_window:
                 history[:] = [h for h in history if h.stage == "warmup"] + formal[-self.baseline_window:]
             return True
-        comparable = (len(group.ranks) > 1 and all(s["rank_role"] and s["algorithm"] for s in spans)
-                      and len({(s["rank_role"], s["algorithm"]) for s in spans}) == 1)
+        known_roles = (len(group.ranks) > 1 and all(s["rank_role"] and s["algorithm"] for s in spans)
+                       and len({s["algorithm"] for s in spans}) == 1)
+        comparable = known_roles and len({s["rank_role"] for s in spans}) == 1
         shortest = [r for r, d in zip(group.ranks, durations) if d == minimum]
         longest = [r for r, d in zip(group.ranks, durations) if d == maximum]
         prep = self._preparation(group.ranks, eligible, preparation)
-        kind, reason, suspect, attribution = "SLOW_UNCLASSIFIED", "p_in_ambiguous_range", None, "undetermined"
-        if spans[0]["timing_source"] == "npu_event_elapsed" and not spans[0]["timing_profile_id"]:
-            reason = "consumer_stream_boundary_not_validated"
-        elif not comparable or not 0 <= p <= 1:
-            reason = "rank_roles_not_proven_comparable" if not comparable else "p_outside_interpretation_range"
-        elif p > .6:
-            if prep is not None and len(shortest) == 1 and [r for r in group.ranks if prep[r]["anomalous"]] == shortest:
+        prep_delay = prep is not None and any(x["anomalous"] for x in prep.values())
+        rank_baseline = {r: median(h.duration_by_rank[r] for h in eligible) for r in group.ranks}
+        growth = {r: (ns-rank_baseline[r])/rank_baseline[r] for r, ns in zip(group.ranks, durations)}
+        high, low = max(growth.values()), min(growth.values())
+        # For unlike roles, compare excess relative to the same Rank's historical cost.
+        p_relative = (high-low)/high if high > 0 else None
+        kind, reason, suspect, attribution = "COMMUNICATION_SLOW", "slowdown_without_supported_s1", None, "undetermined"
+        evidence = "slowdown_only"
+        delayed = [r for r in group.ranks if prep is not None and prep[r]["anomalous"]]
+        if p > .6 and len(shortest) == 1 and delayed == shortest:
+            same_clock = len({e["host_clock_domain"] for e in op.entries.values()}) == 1
+            if same_clock and op.entries[shortest[0]]["host_entry_ts"] < max(e["host_entry_ts"] for e in op.entries.values()):
+                reason = "p_conflicts_with_host_entry_order"
+            else:
                 kind, reason, suspect, attribution = ("COMPUTATION_SLOW", "p_and_independent_preparation_delay",
                                                       shortest, "preparation_supported_suspect")
-                same_clock = len({e["host_clock_domain"] for e in op.entries.values()}) == 1
-                if same_clock and op.entries[shortest[0]]["host_entry_ts"] < max(e["host_entry_ts"] for e in op.entries.values()):
-                    kind, reason, suspect, attribution = "SLOW_UNCLASSIFIED", "p_conflicts_with_host_entry_order", None, "undetermined"
-            else:
-                reason = "no_independent_preparation_delay_for_unique_shortest_rank"
-        elif p < .4:
-            kind, reason = "COMMUNICATION_SLOW", "p_below_communication_threshold"
-        metrics.update(shortest_ranks=shortest, longest_ranks=longest, preparation_by_rank=prep)
+                evidence = "independent_host_preparation"
+        elif not prep_delay and known_roles and not comparable and low > 2 and p_relative < .4:
+            reason, evidence = "common_slowdown_relative_to_rank_history", "shared_rank_slowdown"
+        elif not prep_delay and comparable and p < .4:
+            reason, evidence = "p_below_communication_threshold", "similar_rank_durations"
+        elif p > .6:
+            reason = "no_independent_preparation_delay_for_unique_shortest_rank"
+        elif prep_delay:
+            reason = "preparation_delay_without_supported_s1_signature"
+        # Reporting measured slowdown does not certify this timing boundary or a physical cause.
+        metrics.update(shortest_ranks=shortest, longest_ranks=longest, preparation_by_rank=prep,
+                       rank_baseline_ns=rank_baseline, rank_relative_growth=growth, P_relative=p_relative,
+                       classification_evidence=evidence, timing_source=spans[0]["timing_source"],
+                       timing_boundary_verified=bool(spans[0]["timing_profile_id"]))
         self._report(key, op, kind, now, reason, suspected_ranks=suspect, rank_attribution=attribution,
                      metrics=metrics)
         self._measurement(key, op, kind, reason=reason, slow=True, baseline_ready=True, **metrics)
@@ -486,6 +513,8 @@ class OnlineTracker:
             unacknowledged_ranks=sorted(actual-ended), invalid_ranks=bad, missing_sequences=missing, dropped_events=dropped,
             invalid_timing=counts.get("INVALID_TIMING", 0), entered_collectives=counts.get("ALL_ENTERED", 0),
             completed_collectives=counts.get("COMPLETED", 0), collectives_with_valid_timing=counts.get("VERIFIED_TIMING", 0),
+            verified_timing_by_site=[dict(communicator_id=g, communicator_generation=v, bucket_id=b,
+                occurrence=o, completed=n) for (g, v, b, o), n in self.verified_by_site.items()],
             pending_collectives=len(self.operations), pending_baselines=len(self.awaiting_baseline),
             host_log_by_rank={r: s.host_log for r, s in self.streams.items() if s.ended}, counts=dict(counts))
 
@@ -503,8 +532,9 @@ class OnlineTracker:
                 self.awaiting_baseline.pop(key)
         for key, op in list(self.operations.items()):
             group = self.groups[key[:2]]
+            recovery_deadline = op.first_seen + 2*(self.timeout+self.grace+self.ttl)
             if op.issued:
-                if now >= op.first_seen + 2*(self.timeout+self.grace+self.ttl):
+                if now >= max(recovery_deadline, (op.all_entered or 0)+self.timeout+self.grace):
                     self.operations.pop(key)
                 continue
             anchor = op.first_seen if op.all_entered is None else op.all_entered
@@ -515,6 +545,14 @@ class OnlineTracker:
                 and self.streams[r].valid and self.streams[r].connected and self.streams[r].heartbeat is not None
                 and now-self.streams[r].heartbeat <= self.ttl for r in group.ranks)
             missing = sorted(set(group.ranks)-op.entries.keys())
+            if missing and healthy:
+                for rank in missing:
+                    predecessor = self.streams[rank].counters[key[:2]] + 1
+                    earlier = self.operations.get((*key[:2], predecessor))
+                    if predecessor < key[2] and earlier is not None and rank not in earlier.entries:
+                        op.blocked_by.add(predecessor)
+                if op.blocked_by and now < recovery_deadline:
+                    continue
             if missing and healthy and all(self.streams[r].counters.get(key[:2]) == key[2]-1 for r in missing):
                 if all(self.streams[r].heartbeat >= deadline for r in missing):
                     self._report(key, op, "NOT_ENTERED_HANG", now, "missing_rank_heartbeat_counter_confirmed",
@@ -525,5 +563,8 @@ class OnlineTracker:
             if healthy and not missing and len(op.host_bounds) < len(group.ranks):
                 self._report(key, op, "STALLED_UNKNOWN", now, "no_verified_completion_after_all_entered")
                 continue
-            self._finalize(key, op, "INCOMPLETE_DATA", now, "expected_device_timing_missing" if healthy and not missing
-                           else "telemetry_cannot_confirm_missing_rank", suspected_ranks=None)
+            reason = ("expected_device_timing_missing" if healthy and not missing else
+                      "blocked_collective_recovery_timeout" if op.blocked_by and healthy else
+                      "telemetry_cannot_confirm_missing_rank")
+            self._finalize(key, op, "INCOMPLETE_DATA", now, reason, suspected_ranks=None,
+                           blocked_by_op_counters=sorted(op.blocked_by))

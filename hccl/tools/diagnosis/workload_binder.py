@@ -1,7 +1,7 @@
 """Bind public SDK observations through exact DB/API correlation and boundaries."""
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from contextlib import closing
 from dataclasses import dataclass
 from .clock_alignment import raw_to_profiler
@@ -219,7 +219,34 @@ def _unique_assignment(candidates):
     return result
 
 
-def bind_capture(capture, work, *, mode):
+def operation_candidates(call, ops, device, convert):
+    """Find possible DB owners without relying on launch order or proximity."""
+    kind = operation_type(call["operation_type"])
+    dtype = DTYPES.get(call["dtype"].lower())
+    if dtype is None:
+        raise ValueError("unsupported recorded dtype")
+    before, completion = convert(call["before"]["raw_ns"]), convert(call["completion_raw_ns"])
+    matches = set()
+    for index, op in enumerate(ops):
+        api = op["api"]
+        if (op["kind"] == kind and op["count"] == call["element_count"] and op["dataType"] == dtype
+                and ("input_buffer_ptr" not in call or call["input_buffer_ptr"] == op.get("input_buffer_ptr"))
+                and op["deviceId"] == device
+                and (not call.get("db_group_name") or op["group_name"] == call["db_group_name"])
+                and before <= api["startNs"] <= api["endNs"] <= completion
+                and api["startNs"] <= op["startNs"] <= op["endNs"] <= completion):
+            matches.add(index)
+    return matches
+
+
+def _certain_pairs(candidates):
+    """Bind only mutually unique endpoints when unrelated calls are ambiguous."""
+    degree = Counter(index for choices in candidates.values() for index in choices)
+    return {seq: next(iter(choices)) for seq, choices in candidates.items()
+            if len(choices) == 1 and degree[next(iter(choices))] == 1}
+
+
+def bind_capture(capture, work, *, mode, allow_partial=False):
     work = Path(work)
     manifest = json.loads(json.dumps(capture.manifest))
     if not capture.call_logs:
@@ -245,7 +272,7 @@ def bind_capture(capture, work, *, mode):
     for node in manifest["nodes"]:
         if node["node_id"] in pointer_nodes:
             pointer_facts[node["node_id"]] = read_buffers(node["plog_dir"])
-    bound, seen = defaultdict(list), set()
+    bound, seen, omitted = defaultdict(list), set(), set()
     for header, calls, iterations in observations.values():
         rank, node, device = (header[k] for k in ("user_rank", "node_id", "device_id"))
         if rank in seen:
@@ -283,33 +310,21 @@ def bind_capture(capture, work, *, mode):
                     if op["count"] * 4 != fact["input_buffer_bytes"]:
                         raise ValueError("buffer bytes/type disagree with anchored communication op")
                     op.update(input_buffer_ptr=fact["input_buffer_ptr"], buffer_identity_evidence=proof)
-        possible = {}
-        for call in calls:
-            kind = operation_type(call["operation_type"])
-            dtype = DTYPES.get(call["dtype"].lower())
-            if dtype is None:
-                raise ValueError("unsupported recorded dtype")
-            matches = set()
-            before_epoch, completion_epoch = convert(call["before"]["raw_ns"]), convert(call["completion_raw_ns"])
-            for index, op in enumerate(ops):
-                api = op["api"]
-                if (op["kind"] == kind and op["count"] == call["element_count"] and op["dataType"] == dtype
-                        and ("input_buffer_ptr" not in call or call["input_buffer_ptr"] == op.get("input_buffer_ptr"))
-                        and op["deviceId"] == device
-                        and (not call.get("db_group_name") or op["group_name"] == call["db_group_name"])
-                        and before_epoch <= api["startNs"] <= api["endNs"] <= completion_epoch
-                        and api["startNs"] <= op["startNs"] <= op["endNs"] <= completion_epoch):
-                    matches.add(index)
-            possible[call["sequence"]] = matches
+        possible = {call["sequence"]: operation_candidates(call, ops, device, convert) for call in calls}
         try:
             assignment = _unique_assignment(possible)
         except ValueError as error:
-            missing = [sequence for sequence, choices in possible.items() if not choices]
-            raise ValueError("{}; node={} rank={} device={} unmatched public sequences={}".format(
-                error, node, rank, device, missing[:8])) from error
+            if not allow_partial:
+                missing = [sequence for sequence, choices in possible.items() if not choices]
+                raise ValueError("{}; node={} rank={} device={} unmatched public sequences={}".format(
+                    error, node, rank, device, missing[:8])) from error
+            assignment = _certain_pairs(possible)
         for call in calls:
-            op = ops[assignment[call["sequence"]]]
             key = tuple(call[k] for k in ("group_id", "stage", "iteration", "call_site", "occurrence"))
+            if call["sequence"] not in assignment:
+                omitted.add(key)
+                continue
+            op = ops[assignment[call["sequence"]]]
             iteration_start = None
             marker = rounds.get(key[1:3])
             if (marker and int(clock_start["clockMonotonicRaw"]) <= marker["before"]["raw_ns"]
@@ -319,6 +334,8 @@ def bind_capture(capture, work, *, mode):
                                    device_id=device, user_rank=rank, iteration_start_ns=iteration_start))
     coordinates, preparations, operations, evidence = [], [], [], []
     group_names, db_owners = {}, {}
+    for key in omitted:
+        bound.pop(key, None)
     for key, entries in sorted(bound.items()):
         first = entries[0]["call"]
         participants = first["participants"]
@@ -389,4 +406,5 @@ def bind_capture(capture, work, *, mode):
         write_json(prep, dict(schema_version=1, preparations=preparations))
     write_json(work / "binding-evidence.json", dict(schema_version=1, operations=evidence))
     return Binding(path, iteration, prep, tuple(coordinates), dict(kind="sdk_exact_api", sdk_bound_calls=sum(len(v) for v in bound.values()),
-        bound_operation_count=len(operations), auxiliary_bound_operation_count=auxiliary_count, reduction_verified_in_database=False))
+        bound_operation_count=len(operations), omitted_operation_count=len(omitted),
+        auxiliary_bound_operation_count=auxiliary_count, reduction_verified_in_database=False))

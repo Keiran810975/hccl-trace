@@ -56,6 +56,8 @@ def main():
     parser.add_argument("--devices", type=device_list, required=True, help="runtime device IDs in local-rank order")
     parser.add_argument("--profiler-devices", type=device_list, help="actual profiler device IDs when different")
     parser.add_argument("--warmup", type=int, default=10)
+    parser.add_argument("--online-startup-iterations", type=int,
+                        help="untracked steps to initialize communication and Event timing (Event mode default: 3)")
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=1, help="per rank")
     parser.add_argument("--seq-length", type=int, default=256)
@@ -68,6 +70,9 @@ def main():
     args = parser.parse_args()
     if args.warmup < 0 or args.iterations < 2 or args.batch_size < 1 or not 2 <= args.seq_length <= 1024 or args.bucket_mib < 1:
         parser.error("require >=2 formal iterations, positive batch/bucket, and sequence length 2..1024")
+    if (args.online_startup_iterations is not None and (args.online_startup_iterations < 0
+            or (args.online_startup_iterations and os.environ.get("HCCL_TRACE_ONLINE_TIMING") != "npu_event"))):
+        parser.error("a positive startup iteration count is only supported in npu_event mode")
     try:
         local = int(os.environ["LOCAL_RANK"])
         local_size = int(os.environ["LOCAL_WORLD_SIZE"])
@@ -103,52 +108,72 @@ def main():
         delay = args.acceptance_host_delay
         delay_applied = False
         timing = NpuEventTiming.from_environment(torch_npu.npu, torch_npu_version=getattr(torch_npu, "__version__", None))
-        with Trace.from_environment(device_id=profiler[local], timing_adapter=timing) as trace:
-            trace.group("gpt2-data-parallel", range(world))
-            for stage, count in (("warmup", args.warmup), ("measured", args.iterations)):
-                for iteration in range(count):
-                    batch = torch.randint(config.vocab_size, (args.batch_size, args.seq_length),
-                                          generator=tokens).to(device)
-                    optimizer.zero_grad(set_to_none=True)
-                    with trace.iteration(iteration, stage=stage):
-                        precision = torch.autocast(device_type="npu", dtype=torch.bfloat16) if args.precision == "bf16" else nullcontext()
-                        with precision:
-                            loss = model(input_ids=batch, labels=batch).loss
-                        loss.backward()
-                        # Explicit synchronization keeps the SDK on the submitting thread.
-                        for index, grads in enumerate(gradient_buckets(parameters, capacity)):
-                            preparation = trace.mark_preparation() if trace.online_probe is not None else None
-                            flat = torch.cat([grad.reshape(-1) for grad in grads])
-                            if flat.dtype != torch.float32:
-                                raise RuntimeError("sample expects FP32 gradients")
-                            if delay and stage == "measured" and (rank, iteration, index) == delay[:3]:
-                                with args.acceptance_evidence.open("x", encoding="utf-8") as evidence:
-                                    started = trace.mark_preparation()
-                                    time.sleep(delay[3])
-                                    ended = trace.mark_preparation()
-                                    json.dump(dict(run_id=trace.run_id, node_id=trace.node_id, rank=rank, iteration=iteration,
-                                        bucket=index, requested_seconds=delay[3], host_raw_ns=[started, ended]), evidence)
-                                    evidence.write("\n")
-                                delay_applied = True
-                            trace.call_collective(lambda: dist.all_reduce(flat, op=dist.ReduceOp.SUM, async_op=True),
-                                wait_for_work=True, group="gpt2-data-parallel", call_site=f"gradient.bucket.{index}",
-                                operation_type="AllReduce", element_count=flat.numel(), dtype="float32", reduction="sum",
+        if timing is not None and not os.environ.get("HCCL_TRACE_ONLINE_ADDR"):
+            parser.error("npu_event mode requires HCCL_TRACE_ONLINE_ADDR")
+        startup = args.online_startup_iterations if args.online_startup_iterations is not None else (3 if timing else 0)
+
+        def run_rounds(trace, stage, count):
+            nonlocal delay_applied
+            for iteration in range(count):
+                batch = torch.randint(config.vocab_size, (args.batch_size, args.seq_length),
+                                      generator=tokens).to(device)
+                optimizer.zero_grad(set_to_none=True)
+                startup_events = []
+                with trace.iteration(iteration, stage=stage) if trace is not None else nullcontext():
+                    precision = torch.autocast(device_type="npu", dtype=torch.bfloat16) if args.precision == "bf16" else nullcontext()
+                    with precision:
+                        loss = model(input_ids=batch, labels=batch).loss
+                    loss.backward()
+                    # Explicit synchronization keeps the SDK on the submitting thread.
+                    for index, grads in enumerate(gradient_buckets(parameters, capacity)):
+                        preparation = trace.mark_preparation() if trace is not None and trace.online_probe is not None else None
+                        flat = torch.cat([grad.reshape(-1) for grad in grads])
+                        if flat.dtype != torch.float32:
+                            raise RuntimeError("sample expects FP32 gradients")
+                        if delay and stage == "measured" and (rank, iteration, index) == delay[:3]:
+                            with args.acceptance_evidence.open("x", encoding="utf-8") as evidence:
+                                started = trace.mark_preparation()
+                                time.sleep(delay[3])
+                                ended = trace.mark_preparation()
+                                json.dump(dict(run_id=trace.run_id, node_id=trace.node_id, rank=rank, iteration=iteration,
+                                    bucket=index, requested_seconds=delay[3], host_raw_ns=[started, ended]), evidence)
+                                evidence.write("\n")
+                            delay_applied = True
+                        def submit():
+                            return dist.all_reduce(flat, op=dist.ReduceOp.SUM, async_op=True)
+
+                        if trace is None:
+                            startup_events.append(timing.startup_collective(submit))
+                        else:
+                            trace.call_collective(submit, wait_for_work=True, group="gpt2-data-parallel",
+                                call_site=f"gradient.bucket.{index}", operation_type="AllReduce",
+                                element_count=flat.numel(), dtype="float32", reduction="sum",
                                 preparation_start_raw_ns=preparation,
                                 preparation_definition="gradient_bucket_pack_to_submit_v1" if preparation is not None else None)
-                            flat.div_(world)
-                            offset = 0
-                            for grad in grads:
-                                end = offset + grad.numel()
-                                grad.copy_(flat[offset:end].view_as(grad))
-                                offset = end
-                        optimizer.step()
-                        torch_npu.npu.synchronize()
+                        flat.div_(world)
+                        offset = 0
+                        for grad in grads:
+                            end = offset + grad.numel()
+                            grad.copy_(flat[offset:end].view_as(grad))
+                            offset = end
+                    optimizer.step()
+                    torch_npu.npu.synchronize()
+                    if trace is None:
+                        max_ns = max(timing.read_elapsed_ns(*events) for events in startup_events)
+                        print(f"startup rank={rank} iteration={iteration}: max_event_ms={max_ns/1e6:.6f}", flush=True)
+                    else:
                         trace.completion_boundary()
-                    value = float(loss.detach().float().item())
-                    if not math.isfinite(value):
-                        raise RuntimeError(f"non-finite loss on rank {rank}")
-                    if rank == 0:
-                        print(f"{stage} {iteration}: loss={value:.4f}", flush=True)
+                value = float(loss.detach().float().item())
+                if not math.isfinite(value):
+                    raise RuntimeError(f"non-finite loss on rank {rank}")
+                if rank == 0 and trace is not None:
+                    print(f"{stage} {iteration}: loss={value:.4f}", flush=True)
+
+        run_rounds(None, "startup", startup)
+        with Trace.from_environment(device_id=profiler[local], timing_adapter=timing) as trace:
+            trace.group("gpt2-data-parallel", range(world))
+            run_rounds(trace, "warmup", args.warmup)
+            run_rounds(trace, "measured", args.iterations)
             if delay and rank == delay[0] and not delay_applied:
                 raise RuntimeError("specified acceptance bucket was not present")
     finally:

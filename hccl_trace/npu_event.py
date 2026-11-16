@@ -20,7 +20,9 @@ class NpuEventTiming:
             if (profile.get("schema_version") != 1 or profile.get("timing_definition") != EVENT_DEFINITION
                     or not stack_id or profile.get("stack_id") != stack_id
                     or not torch_npu_version or profile.get("torch_npu_version") != torch_npu_version
-                    or not isinstance(evidence, str) or not evidence.strip()):
+                    or not isinstance(evidence, str) or not evidence.strip()
+                    or not isinstance(profile.get("buckets"), dict) or not profile["buckets"]
+                    or type(profile.get("allow_unprofiled_buckets", False)) is not bool):
                 raise ValueError("timing profile must match the running stack and cite independent boundary validation")
             self.profile_id = hashlib.sha256(json.dumps(profile, sort_keys=True).encode()).hexdigest()
         try:
@@ -57,7 +59,8 @@ class NpuEventTiming:
         if op_type != "allreduce":
             raise ValueError("npu_event V1 times explicit AllReduce only")
         metadata = {}
-        if self.profile is not None:
+        if self.profile is not None and (bucket in self.profile["buckets"]
+                                         or not self.profile.get("allow_unprofiled_buckets", False)):
             spec = self.profile.get("buckets", {}).get(bucket, {})
             roles = spec.get("rank_roles", {})
             algorithm = spec.get("algorithm")
@@ -69,33 +72,52 @@ class NpuEventTiming:
                 raise ValueError(f"timing profile does not attest this AllReduce signature/roles: {bucket}")
             metadata = dict(algorithm=algorithm, rank_role=role, timing_profile_id=self.profile_id,
                             boundary_evidence=self.profile["boundary_evidence"])
+        return (*self._start_events(), metadata)
+
+    def _start_events(self):
         pair = self.first_pair or self._events()
         self.first_pair = None
         start, end = pair
         stream = self.npu.current_stream()
         start.record(stream)
-        return start, end, stream, metadata
+        return start, end, stream
 
     def end(self, token, observation):
         start, end, stream, metadata = observation
+        self._record_end(end, stream)
+        self.pending.append((token, start, end, metadata))
+
+    def _record_end(self, end, stream):
         if self.npu.current_stream() != stream:
             raise RuntimeError("Work.wait did not leave the timed consumer stream current")
         end.record(stream)
-        self.pending.append((token, start, end, metadata))
+
+    def startup_collective(self, submit):
+        """Exercise the real timing/Work path before registration or online OpKey allocation."""
+        start, end, stream = self._start_events()
+        if submit().wait() is False:
+            raise RuntimeError("startup collective Work.wait reported failure")
+        self._record_end(end, stream)
+        return start, end
+
+    @staticmethod
+    def read_elapsed_ns(start, end):
+        # The caller already synchronized. Never make a pending Event complete here.
+        if not start.query() or not end.query():
+            raise RuntimeError("NPU timing events are not complete at the existing completion boundary")
+        elapsed_ms = start.elapsed_time(end)
+        if not isfinite(elapsed_ms) or elapsed_ms < .0000005:
+            raise RuntimeError("NPU Event elapsed time is not a positive, finite duration")
+        ns = round(elapsed_ms * 1_000_000)
+        if ns <= 0:
+            raise RuntimeError("NPU Event duration rounded to zero")
+        return ns
 
     def flush(self, probe):
         pending, self.pending = self.pending, []
         for i, (token, start, end, metadata) in enumerate(pending):
             try:
-                # The caller already synchronized. Never make a pending Event complete here.
-                if not start.query() or not end.query():
-                    raise RuntimeError("NPU timing events are not complete at the existing completion boundary")
-                elapsed_ms = start.elapsed_time(end)
-                if not isfinite(elapsed_ms) or elapsed_ms < .0000005:
-                    raise RuntimeError("NPU Event elapsed time is not a positive, finite duration")
-                ns = round(elapsed_ms * 1_000_000)
-                if ns <= 0:
-                    raise RuntimeError("NPU Event duration rounded to zero")
+                ns = self.read_elapsed_ns(start, end)
                 probe.device_duration(token, duration_ns=ns, timing_source="npu_event_elapsed",
                     timing_definition=EVENT_DEFINITION, evidence_ref=f"consumer_events:{probe.session_id}:{token.op_counter}",
                     **metadata)

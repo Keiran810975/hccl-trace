@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from html import escape
 import json
+from urllib.parse import quote
 from .report_contract import CLEAN_TASK_REFERENCE
 from .task_classifier import CATEGORY_LABELS, INTERNAL, EXTERNAL
 
@@ -164,13 +166,55 @@ def build_view_model(report):
                 timing_labels=TIMING_LABELS, boundary_labels=BOUNDARY_LABELS)
 
 
+def _followup_panel(followup):
+    if followup is None:
+        return ""
+    labels = {"bound_exact": "已精确关联设备通信", "profiler_operation_not_uniquely_bound": "设备通信无法唯一绑定",
+              "incomplete_sdk_token": "缺少完整的 Rank 调用记录"}
+
+    def task_list(tasks):
+        items = []
+        for task in tasks:
+            graph_id = quote(task["graph_id"], safe="")
+            label = TASK_LABELS.get(task["task_kind"], task["task_kind"])
+            details = (f'{location(task)} · {label} · {duration(task["duration_ns"])} '
+                       f'/ 参考 {duration(task["reference_mean_ns"])} · {duration(task["delta_ns"], signed=True)}')
+            times = f'{task["observed_start_ns"]} – {task["observed_stop_ns"]} ns（本地 profiler）'
+            items.append(f'<li><a href="execution.html#{graph_id}">{escape(details)}</a><br><small>{escape(times)}</small></li>')
+        return '<ul>' + ''.join(items) + '</ul>' if items else '<p class="muted">当前证据未检出</p>'
+
+    entries = []
+    for row in followup["alerts"]:
+        title = escape(f'iter {row["iteration"]} · {row["bucket"]} · op {row["op_counter"]} · '
+                       + ('S1 准备延迟' if row["route"] == 'S1' else '通信慢化'))
+        state = escape(labels[row["binding_status"]])
+        metrics = row["online_metrics"]
+        note = escape(f'R={metrics["R"]} · P={metrics["P"]} · 计时边界'
+                      + ('已核验' if metrics["timing_boundary_verified"] else '未核验'))
+        content = f'<p>{state} · {note}</p>'
+        if row["operation_scope"]:
+            counts = (f'可比较 Task {row["comparable_task_count"]} · 无对照 Wait {row["uncomparable_wait_count"]} '
+                      f'· 关联候选 {len(row["source_candidate_ids"])} · 已报告依赖路径 {len(row["dependency_paths"])}')
+            content += f'<p>{counts}</p><h3>慢 Task</h3>{task_list(row["slow_tasks"])}<h3>慢 Wait</h3>{task_list(row["slow_waits"])}'
+            if row["route"] == "S1":
+                prep = '; '.join(f'Rank {p["user_rank"]}: {duration(p["stop_ns"]-p["start_ns"])}'
+                                 for p in row["host_preparation"])
+                content += f'<p>已绑定的 Host 准备区间：{escape(prep or "无")}</p>'
+                content += f'<h3>相对轮起点的晚开工</h3>{task_list(row["late_task_observations"])}'
+            if row["unresolved_event_wait_ids"]:
+                content += '<p class="warning">EVENT_WAIT 缺少可验证的生产者，未补造依赖。</p>'
+        entries.append(f'<details><summary>{title}</summary>{content}</details>')
+    return (f'<section style="margin:16px 24px"><h2>在线告警离线追查</h2>'
+            f'<p>{followup["bound_count"]}/{followup["alert_count"]} 条慢化告警已绑定</p>{"".join(entries)}</section>')
+
+
 def render_html(report):
     # Absolute nanoseconds travel as strings; the browser never rounds profiler timestamps.
     data = json.dumps(build_view_model(report), ensure_ascii=False, separators=(",", ":"))
     for value, escaped in (("&", "\\u0026"), ("<", "\\u003c"), (">", "\\u003e"),
                            ("\u2028", "\\u2028"), ("\u2029", "\\u2029")):
         data = data.replace(value, escaped)
-    page = PAGE.replace("__MODEL__", data)
+    page = PAGE.replace("__FOLLOWUP__", _followup_panel(report.get("online_followup"))).replace("__MODEL__", data)
     if report.get("reference", {}).get("statistic") == "median":
         page = page.replace("前5轮均值", "Baseline 中位数").replace("参考均值", "参考中位数")
     elif report.get("reference", {}).get("kind") == CLEAN_TASK_REFERENCE:
@@ -204,6 +248,7 @@ details{border-top:1px solid #d9dde2;margin-top:20px;padding-top:12px}summary{cu
 </style></head><body>
 <header><div><h1>异常传播诊断</h1><div id="report-counts" class="muted"></div><div id="analysis-scope" class="muted" hidden></div></div>
 <nav class="downloads" aria-label="诊断结果"><a href="root_causes.json">根因候选 JSON</a><a href="execution.html">执行依赖图</a></nav></header>
+__FOLLOWUP__
 <p id="input-copy-overlap-summary" class="muted" style="margin:16px 24px" hidden></p>
 <details id="cross-node-paths" style="margin:16px 24px" hidden><summary id="cross-node-title">跨机数据路径慢化候选</summary><p>从数据提交结束到对端数据通知，包含协议推进；不是网卡硬件传输时长，也不证明网卡故障。</p><div class="table-wrap"><table class="wait-table"><thead><tr><th>方向</th><th>轮次 / 通信位置</th><th>实际 / 参考 / 增量</th><th>对端 Wait / 校准起止</th></tr></thead><tbody id="cross-node-rows"></tbody></table></div></details>
 <div class="layout" id="layout"><aside><label for="search">按类别查看</label><input id="search" type="search" placeholder="Rank / iter / 任务名" autocomplete="off"><nav id="candidates" aria-label="分类诊断结果"></nav><p id="no-matches" class="muted" hidden>没有匹配的结果</p></aside>

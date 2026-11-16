@@ -17,7 +17,7 @@ from hccl_trace.online_probe import OnlineProbe
 from .dependency_model import stable_id
 from .online_replay import replay_bound
 from .online_service import Collector
-from .online_timing_audit import compare
+from .online_timing_audit import bind_bucket, compare
 from .online_tracker import OnlineTracker
 
 
@@ -27,12 +27,13 @@ SEC = 1_000_000_000
 class Fixture:
     def __init__(self, **options):
         self.measured = []
+        ranks = list(options.pop("ranks", (0, 1)))
         options.setdefault("warmup_iterations", 1)
         self.tracker = OnlineTracker("fixture", observe_measurement=self.measured.append, **options)
         self.sequence, self.counter = Counter(), Counter()
         self.now = SEC
-        for r in (0, 1):
-            self.push(r, "register", participants=[0, 1], device_timing_expected=True)
+        for r in ranks:
+            self.push(r, "register", participants=ranks, device_timing_expected=True)
 
     def push(self, rank, event, *, generation=0, dropped=0, **fields):
         self.sequence[rank] += 1
@@ -90,6 +91,42 @@ class TrackerTests(unittest.TestCase):
         self.assertEqual(event["suspected_ranks"], [1])
         self.assertEqual(event["ranks"][1]["telemetry"]["counter"], 0)
         self.assertEqual(f.both(35), [])
+
+    def test_h1_recovery_keeps_real_timings_for_all_seventeen_buckets(self):
+        f = Fixture(ranks=range(8))
+        for rank in range(8):
+            if rank != 4:
+                for bucket in range(17):
+                    f.enter(rank, 12, bucket=str(bucket))
+        f.now = 34*SEC
+        for rank in range(8):
+            f.hb(rank)
+        f.tracker.tick(f.now)
+        event, = f.tracker.drain()
+        self.assertEqual((event["op_counter"], event["suspected_ranks"]), (1, [4]))
+        self.assertEqual(len(f.tracker.operations), 17)
+        f.now = 41*SEC
+        for bucket in range(17):
+            f.enter(4, 12, bucket=str(bucket))
+        for rank in range(8):
+            for counter in range(1, 18):
+                f.span(rank, counter, 900)
+        self.assertEqual(f.tracker.drain(), [])
+        self.assertEqual(f.tracker.health()["completed_collectives"], 17)
+        self.assertEqual(f.tracker.health()["invalid_timing"], 0)
+        self.assertEqual(f.tracker.counts["COMPLETED_AFTER_BLOCK"], 16)
+        self.assertEqual(f.measured[-1]["blocked_by_op_counters"], [1])
+        self.assertEqual(len(f.measured[-1]["device_by_rank"]), 8)
+        self.assertFalse(f.tracker.history, "blocked samples must not contaminate baselines")
+
+    def test_h1_blocked_operations_expire_bounded_if_the_rank_never_recovers(self):
+        f = Fixture()
+        f.enter(0, 0)
+        f.enter(0, 1)
+        self.assertEqual([r["event_type"] for r in f.both(34)], ["NOT_ENTERED_HANG"])
+        expired, = f.both(76)
+        self.assertEqual(expired["reason"], "blocked_collective_recovery_timeout")
+        self.assertEqual(expired["blocked_by_op_counters"], [1])
 
     def test_loss_disconnection_and_all_entered_are_not_h1(self):
         for situation in ("loss", "disconnect", "all_entered", "stale_queue"):
@@ -152,18 +189,37 @@ class TrackerTests(unittest.TestCase):
         self.assertEqual(f.complete(2, (100, 100)), [])
         self.assertEqual(f.measured[-1]["t_base_ns"], 200)
 
-    def test_computation_and_unclassified_bounds(self):
+    def test_preparation_route_and_slowdown_fallback(self):
         for duration, roles, expected, suspects in (
                 (110, ("ring", "ring"), "COMPUTATION_SLOW", [1]),
-                (280, ("ring", "ring"), "SLOW_UNCLASSIFIED", None),
-                (220, ("ring", "ring"), "SLOW_UNCLASSIFIED", None),
-                (90, ("ring", "ring"), "SLOW_UNCLASSIFIED", None),
-                (110, ("root", "leaf"), "SLOW_UNCLASSIFIED", None)):
+                (280, ("ring", "ring"), "COMMUNICATION_SLOW", None),
+                (220, ("ring", "ring"), "COMMUNICATION_SLOW", None),
+                (90, ("ring", "ring"), "COMPUTATION_SLOW", [1]),
+                (110, ("root", "leaf"), "COMPUTATION_SLOW", [1])):
             with self.subTest(duration=duration, roles=roles):
                 f = Fixture()
                 f.complete(0, (100, 100), stage="warmup", roles=roles, prep=(4_000_000, 4_000_000))
                 event, = f.complete(0, (400, duration), roles=roles, prep=(4_000_000, 44_000_000))
                 self.assertEqual((event["event_type"], event["suspected_ranks"]), (expected, suspects))
+                if duration == 90:
+                    self.assertGreater(event["metrics"]["P"], 1)
+
+    def test_s2_uses_relative_growth_for_different_attested_roles(self):
+        for durations, prep, result, evidence in (
+                ((400, 2000), (2_000_000, 2_000_000), "COMMUNICATION_SLOW", "shared_rank_slowdown"),
+                ((100, 2000), (2_000_000, 2_000_000), "COMMUNICATION_SLOW", "slowdown_only"),
+                ((400, 2000), (20_000_000, 2_000_000), "COMPUTATION_SLOW", "independent_host_preparation")):
+            with self.subTest(durations=durations, prep=prep):
+                f = Fixture()
+                roles = ("inter_node", "local")
+                f.complete(0, (100, 500), stage="warmup", roles=roles, prep=(2_000_000, 2_000_000))
+                event, = f.complete(0, durations, roles=roles, prep=prep)
+                self.assertEqual(event["event_type"], result)
+                self.assertEqual(event["suspected_ranks"], [0] if result == "COMPUTATION_SLOW" else None)
+                self.assertEqual(event["metrics"]["classification_evidence"], evidence)
+                self.assertGreater(event["metrics"]["P"], 1)
+                if evidence == "shared_rank_slowdown":
+                    self.assertEqual(event["metrics"]["P_relative"], 0)
 
     def test_future_sample_and_mixed_definitions_do_not_become_baseline(self):
         f = Fixture()
@@ -225,7 +281,7 @@ class TrackerTests(unittest.TestCase):
         self.assertEqual(event["event_type"], "INCOMPLETE_DATA")
         self.assertEqual(f.tracker.health()["invalid_ranks"], [1])
 
-    def test_unvalidated_event_timing_reports_duration_but_not_s2(self):
+    def test_unvalidated_event_reports_communication_slowdown_without_certification(self):
         f = Fixture()
         for stage, duration in (("warmup", 100), ("measured", 700)):
             for rank in (0, 1):
@@ -235,8 +291,8 @@ class TrackerTests(unittest.TestCase):
                     algorithm="loop", timing_definition="consumer_stream_collective_v1", timing_source="npu_event_elapsed",
                     evidence_ref="elapsed-only")
         event, = f.tracker.drain()
-        self.assertEqual(event["event_type"], "SLOW_UNCLASSIFIED")
-        self.assertEqual(event["reason"], "consumer_stream_boundary_not_validated")
+        self.assertEqual(event["event_type"], "COMMUNICATION_SLOW")
+        self.assertFalse(event["metrics"]["timing_boundary_verified"])
         self.assertIsNone(event["ranks"][0]["device"]["start_ns"])
         self.assertEqual(f.tracker.health()["collectives_with_valid_timing"], 0)
 
@@ -264,6 +320,36 @@ class TrackerTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "readback failed"):
             adapter.flush(Probe())
         self.assertEqual(failures, [(1, "npu_event_readback_failed")])
+
+    def test_startup_warms_event_path_without_allocating_online_samples(self):
+        from unittest.mock import Mock
+
+        npu, start, stop, work = Mock(), Mock(), Mock(), Mock()
+        npu.Event.side_effect = [start, stop]
+        start.elapsed_time.return_value = 1.5
+        adapter = NpuEventTiming(npu)
+        pair = adapter.startup_collective(lambda: work)
+        work.wait.assert_called_once()
+        start.record.assert_called_once_with(npu.current_stream())
+        stop.record.assert_called_once_with(npu.current_stream())
+        start.elapsed_time.assert_not_called()
+        self.assertEqual(adapter.read_elapsed_ns(*pair), 1_500_000)
+        self.assertFalse(adapter.pending)
+
+    def test_scoped_profile_does_not_attest_unprofiled_buckets_or_changed_shapes(self):
+        from unittest.mock import Mock
+
+        npu = Mock()
+        base = dict(schema_version=1, timing_definition="consumer_stream_collective_v1", stack_id="fixture",
+                    torch_npu_version="fixture", boundary_evidence="local audit", allow_unprofiled_buckets=True,
+                    buckets={"a": dict(dtype="float32", reduction="sum", tensor_bytes=128,
+                                      rank_roles={"0": "local", "1": "inter_node"}, algorithm="ring")})
+        timing = NpuEventTiming(npu, stack_id="fixture", torch_npu_version="fixture", profile=base)
+        op = dict(op_type="allreduce", tensor_bytes=128, dtype="float32", reduction="sum", rank=0, participants=[0, 1])
+        self.assertEqual(timing.begin(bucket="b", **op)[-1], {})
+        self.assertEqual(timing.begin(bucket="a", **op)[-1]["rank_role"], "local")
+        with self.assertRaisesRegex(ValueError, "does not attest"):
+            timing.begin(bucket="a", **dict(op, tensor_bytes=512))
 
     def test_host_clock_cannot_be_used_for_device_span(self):
         f = Fixture()
@@ -469,7 +555,7 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(result["counts"]["WARMUP_ACCEPTED"], 2)
         report, = result["events"]
         self.assertEqual(report["metrics"]["t_base_ns"], 95)
-        self.assertEqual(report["event_type"], "SLOW_UNCLASSIFIED")
+        self.assertEqual(report["event_type"], "COMMUNICATION_SLOW")
         self.assertNotIn("collector", report)
         rank_calls[1][1][0]["sequence"], rank_calls[1][1][1]["sequence"] = 1, 0
         with self.assertRaisesRegex(ValueError, "order differs"):
@@ -495,9 +581,32 @@ class ReplayTests(unittest.TestCase):
         self.assertFalse(report["classification_certified"])
         self.assertEqual(report["rows"][0]["event_to_profiler_ratio"], 1.25)
         self.assertEqual(report["rows"][0]["profiler_algorithm"], "observed_alg")
+        other = dict(frames[0], bucket_id="another-bucket", op_counter=13), dict(frames[1], op_counter=13)
+        self.assertEqual(compare(payload, frames+list(other), algorithms, bucket="bucket")["bucket_scope"], "bucket")
         frames[0]["host_entry_ts"] = 901
         with self.assertRaisesRegex(ValueError, "does not match"):
             compare(payload, frames, algorithms)
+
+    def test_scoped_timing_audit_counts_out_of_scope_competitors(self):
+        from types import SimpleNamespace
+
+        node = dict(node_id="node", device_id=1, user_rank=0)
+        target = dict(sequence=0, group_id="g", stage="measured", iteration=0, occurrence=0,
+                      call_site="target", operation_type="allreduce", element_count=8, participants=[0])
+        other = dict(target, sequence=1, call_site="other")
+        manifest = dict(run_id="case", nodes=[dict(node_id="node")])
+        op = dict(group_name="g-native", op_name="native-op", startNs=4, endNs=8, dataType=4)
+        capture = SimpleNamespace(manifest=manifest, call_logs=["rank-0.jsonl"])
+        data = {1: dict(operations=[op], clock_start=None, clock_stop=None)}
+        mod = "hccl.tools.diagnosis.online_timing_audit."
+        with patch(mod+"discover_capture", return_value=capture), patch(mod+"_inventory", return_value=data), \
+                patch(mod+"_read_calls", return_value=(node, [target, other])), \
+                patch(mod+"operation_candidates", side_effect=[{0}, {0}, {0}, set()]):
+            with self.assertRaisesRegex(ValueError, "not mutually unique"):
+                bind_bucket("cap", "work", "target")
+            bound = bind_bucket("cap", "work", "target")
+        self.assertEqual(bound["rank_calls"][0][1], [target])
+        self.assertEqual(len(bound["spans"]), 1)
 
 
 if __name__ == "__main__":

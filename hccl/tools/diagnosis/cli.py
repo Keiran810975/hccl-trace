@@ -10,7 +10,7 @@ import shutil
 import sys
 import tempfile
 
-from . import analyze_waits as waits
+from . import analyze_waits as waits, online_followup
 from . import rolling_diagnosis as rolling
 from . import visualize_dependency_graph as graph
 from .capture_discovery import discover_capture, prepare_capture_identity, read_json, write_json
@@ -63,11 +63,13 @@ def analyze_capture(capture, output, *, mode, baseline=None, topology=None, mani
                     min_match_rate=95.0, require_clock_alignment=False, keep_debug=False,
                     debug_dir=None, verbose=False, allow_uncalibrated_clock=False,
                     source_slowdown_factor="1.5", wait_slowdown_factor=None,
-                    calibrated_release_intervals=False):
+                    calibrated_release_intervals=False, online=None):
     if require_clock_alignment and allow_uncalibrated_clock:
         raise DiagnosisError(2, "required alignment and explicit local-clock fallback are mutually exclusive")
     if mode not in {"rolling", "baseline"} or (mode == "baseline") != (baseline is not None):
         raise DiagnosisError(2, "baseline mode requires --baseline; rolling forbids it")
+    if online is not None and mode != "rolling":
+        raise DiagnosisError(2, "--online requires rolling history (do not combine with --baseline)")
     rolling_options = rolling.RollingOptions(slowdown_factor=source_slowdown_factor,
         wait_slowdown_factor=wait_slowdown_factor if wait_slowdown_factor is not None else "1.2",
         calibrated_release_intervals=calibrated_release_intervals)
@@ -104,8 +106,13 @@ def analyze_capture(capture, output, *, mode, baseline=None, topology=None, mani
         try:
             try:
                 current_capture = discover_capture(capture, work / "discovery-current", topology=topology, manifest_path=manifest)
+                online_path = online_followup.alert_path(capture, online) if mode == "rolling" else None
+                alert_events = (online_followup.load_alerts(online_path, current_capture.manifest["run_id"])
+                                if online_path is not None else None)
                 current_capture = prepare_capture_identity(current_capture, work / "identity-current")
-                current = bind_capture(current_capture, work / "current", mode=mode)
+                current = bind_capture(current_capture, work / "current", mode=mode, allow_partial=alert_events is not None)
+                selected = (online_followup.resolve(alert_events, current_capture.call_logs, current.coordinates)
+                            if alert_events is not None else None)
                 reference = None
                 pair_map = current_capture.operation_map
                 if baseline is not None:
@@ -139,10 +146,16 @@ def analyze_capture(capture, output, *, mode, baseline=None, topology=None, mani
                 else:
                     report = live.pop("report")
                     rows, edges = live["graph"]
+                if selected is not None:
+                    report, followed = online_followup.focus_report(report, selected,
+                        rolling.source_events.load_preparations(current.preparation_map))
                 normalized, roots, tasks = normalize(report, mode=mode,
                     run_id=current_capture.manifest["run_id"], rows=rows, edges=edges, pipeline=pipeline,
                     binding_evidence=dict(current.evidence, identity_exports=list(current_capture.identity_exports)),
                     merge_metrics=waits.read_csv(directory / "merge_summary.csv"), formal_only=mode == "rolling")
+                if selected is not None:
+                    normalized["online_followup"] = dict(alert_count=len(followed),
+                        bound_count=sum(bool(a["operation_scope"]) for a in followed), alerts=followed)
                 del report
                 if mode == 'rolling':
                     nodes = sorted({r['_node_id'] for r in rows})
@@ -185,6 +198,7 @@ def main(argv=None):
     analyze = sub.add_parser("analyze", aliases=['diag'], help="automatically diagnose single/multi-node capture")
     analyze.add_argument("capture", type=Path)
     analyze.add_argument("--baseline", type=Path)
+    analyze.add_argument("--online", type=Path, help="source events.jsonl or its online output directory; auto-detected beside the capture")
     analyze.add_argument("--output", "-o", type=Path, help="default: CAPTURE-report")
     analyze.add_argument("--topology", type=Path)
     analyze.add_argument("--manifest", type=Path)
