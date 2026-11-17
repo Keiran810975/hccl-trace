@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
-from .control_trace import parse_control_inputs, enrich_control_tasks, AUDIT_FIELDS as CONTROL_AUDIT_FIELDS
+from .control_trace import parse_control_inputs, enrich_control_tasks
 from .dependency_model import (
     OPERATION_SCOPE_AMBIGUOUS,
     OPERATION_SCOPE_MISSING,

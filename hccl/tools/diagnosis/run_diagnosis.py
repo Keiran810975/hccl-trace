@@ -11,7 +11,6 @@ from . import cross_node_path
 from . import visualize_dependency_graph as graph
 from .capture_discovery import read_json, write_json
 from .multi_node_trace import load_manifest, replay_manifest
-from .schema import write_csv
 
 
 def _alignment(directory, rows, *, allow_uncalibrated_clock):
@@ -40,27 +39,17 @@ def _graph(directory):
             graph.read_graph_artifact_edges(directory / "dep_graph_edges.csv"))
 
 
-def _save_comparison(directory, name, report, keep_debug):
-    output = directory / name
-    output.mkdir()
-    write_json(output / "report.json", report)
-    if keep_debug:
-        for kind, records in (("task_comparison", report["tasks"]),
-                              ("slow_tasks", [t for t in report["tasks"] if t["is_slow"]]),
-                              ("root_causes", report["root_causes"])):
-            fields = list(dict.fromkeys(k for record in records for k in record))
-            write_csv(str(output / (kind + ".csv")), fields, records)
-
-
 def run_pipeline(manifest: Path, output: Path, *, baseline: Path | None = None,
                  min_match_rate: float = 95.0, operation_map: Path | None = None,
                  iteration_map: Path | None = None, preparation_map: Path | None = None,
-                 rolling_options=rolling.RollingOptions(), keep_debug=False,
-                 require_clock_alignment=False, allow_uncalibrated_clock=False, live=None):
+                 rolling_options=rolling.RollingOptions(),
+                 require_clock_alignment=False, allow_uncalibrated_clock=False, live=None, iteration_window=None):
     if require_clock_alignment and allow_uncalibrated_clock:
         raise ValueError("required alignment and explicit local-clock fallback are mutually exclusive")
     if iteration_map is not None and (baseline is not None or operation_map is not None):
         raise ValueError("rolling history must not be combined with an external baseline")
+    if iteration_map is not None and live is None:
+        raise ValueError("rolling analysis requires in-memory results")
     if preparation_map is not None and iteration_map is None:
         raise ValueError("public preparations require an evidenced iteration map")
     directory = output / load_manifest(manifest)["run_id"]
@@ -68,13 +57,13 @@ def run_pipeline(manifest: Path, output: Path, *, baseline: Path | None = None,
         raise FileExistsError("refusing to reuse diagnosis directory: {}".format(directory))
     result = dict(status="failed", replay_gate_passed=False, analysis_completed=False)
     try:
-        directory, ready = (replay_manifest(manifest, output, min_match_rate) if live is None else
-                            replay_manifest(manifest, output, min_match_rate, live=live, keep_debug=keep_debug))
+        directory, ready = replay_manifest(manifest, output, min_match_rate, live=live,
+                                           iteration_window=iteration_window)
         result["replay_gate_passed"] = ready
         if not ready:
             return directory, False
         rows, edges = _graph(directory) if live is None else live["graph"]
-        result["resource_graph_validated"] = live is None or live["resource_graph_validated"]
+        result["resource_graph_validated"] = live is None
         alignment, clock_error = _alignment(directory, rows, allow_uncalibrated_clock=allow_uncalibrated_clock)
         result.update(clock_alignment_available=alignment is not None,
                       clock_alignment_status=alignment["status"] if alignment else "uncalibrated",
@@ -87,7 +76,7 @@ def run_pipeline(manifest: Path, output: Path, *, baseline: Path | None = None,
         reference, reference_edges = _graph(baseline) if baseline is not None else ([], [])
         issues = waits.read_csv(directory / "dep_graph_notify_ambiguities.csv")
         spans = [row for path in sorted(directory.glob("*/build_spans.csv")) for row in waits.read_csv(path)]
-        if live is not None and not keep_debug:
+        if live is not None:
             waits.validate_build_span_anchors(rows, spans)
             wait_ids = {r["_graph_id"] for r in rows if r.get("profiler_task_kind") == "notify_wait"}
             wait_count = len(wait_ids)
@@ -97,23 +86,19 @@ def run_pipeline(manifest: Path, output: Path, *, baseline: Path | None = None,
             diagnosis = waits.analyze(rows, edges, issues, spans, reference, trace_wait_chains=iteration_map is None)
             wait_count = len(diagnosis["waits"])
             paired_wait_count = sum(w["status"] == "paired" for w in diagnosis["waits"])
-            waits.export_analysis(diagnosis, directory)
+            write_json(directory / "diagnosis.json", diagnosis)
         if not wait_count:
             raise ValueError("no Notify Wait evidence in the selected capture")
         if iteration_map is not None:
             coordinates = rolling.load_coordinates(iteration_map)
             report = rolling.analyze(rows, edges, coordinates, rolling_options,
                                      preparations=rolling.source_events.load_preparations(preparation_map),
-                                     alignment=alignment, compact_unbound=live is not None and not keep_debug,
-                                     graph_validated=live is not None)
+                                     alignment=alignment, compact_unbound=True, graph_validated=True)
             path_coverage = {}
             report["cross_node_path_candidates"] = cross_node_path.analyze(
                 rows, edges, coordinates, alignment, rolling_options, coverage=path_coverage)
             report["cross_node_path_coverage"] = path_coverage
-            if live is None or keep_debug:
-                _save_comparison(directory, "rolling", report, keep_debug)
-            if live is not None:
-                live["report"] = report
+            live["report"] = report
             result.update(reference_mode=report["reference_mode"], source_policy_version=report["source_policy_version"],
                           rolling_status=report["status"], comparison_coverage=report["coverage"],
                           slow_task_count=report["slow_task_count"], diagnosis_status=report["diagnosis_status"])
@@ -123,7 +108,7 @@ def run_pipeline(manifest: Path, output: Path, *, baseline: Path | None = None,
             comparison.validate_comparison_graph(reference, reference_edges)
             report = comparison.analyze(rows, edges, reference,
                 operation_pairs=comparison.load_operation_map(operation_map), baseline_edges=reference_edges)
-            _save_comparison(directory, "comparison", report, keep_debug)
+            write_json(directory / "comparison/report.json", report)
             result.update(comparison_completed=True, source_policy_version=report["source_policy_version"],
                           slow_task_count=report["slow_task_count"])
         result.update(status="passed", analysis_completed=True, node_count=len({r["_node_id"] for r in rows}),

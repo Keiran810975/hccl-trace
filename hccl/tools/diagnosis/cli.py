@@ -75,7 +75,7 @@ def analyze_capture(capture, output=None, *, mode, baseline=None, topology=None,
                     verbose=False, allow_uncalibrated_clock=False,
                     source_slowdown_factor="1.5", wait_slowdown_factor=None,
                     calibrated_release_intervals=False, online=None, paths=None,
-                    without_online=False):
+                    without_online=False, target_iteration=None, online_records=None):
     if require_clock_alignment and allow_uncalibrated_clock:
         raise DiagnosisError(2, "required alignment and explicit local-clock fallback are mutually exclusive")
     if mode not in {"rolling", "baseline"} or (mode == "baseline") != (baseline is not None):
@@ -84,6 +84,9 @@ def analyze_capture(capture, output=None, *, mode, baseline=None, topology=None,
         raise DiagnosisError(2, "--online and --without-online are mutually exclusive")
     if online is not None and mode != "rolling":
         raise DiagnosisError(2, "--online requires rolling history (do not combine with --baseline)")
+    if target_iteration is not None and (mode != "rolling" or not online_records or
+            any(a.get("iteration") != target_iteration for a in online_records)):
+        raise DiagnosisError(2, "whole-iteration follow-up requires online alerts for that iteration")
     rolling_options = rolling.RollingOptions(slowdown_factor=source_slowdown_factor,
         wait_slowdown_factor=wait_slowdown_factor if wait_slowdown_factor is not None else "1.2",
         calibrated_release_intervals=calibrated_release_intervals)
@@ -94,7 +97,8 @@ def analyze_capture(capture, output=None, *, mode, baseline=None, topology=None,
             raise DiagnosisError(2, 'invalid diagnosis options: ' + str(error)) from error
     if not 0 < min_match_rate <= 100:
         raise DiagnosisError(2, "min-match-rate must be in (0,100]")
-    paths = paths or load_paths()
+    if paths is None and (output is None or (mode == "rolling" and not without_online and online_records is None)):
+        paths = load_paths()
     if output is not None:
         output = Path(output).absolute()
         _check_output(output, capture, baseline, manifest)
@@ -108,13 +112,18 @@ def analyze_capture(capture, output=None, *, mode, baseline=None, topology=None,
                 _check_output(output, capture, baseline, manifest)
             online_path = (online_followup.alert_path(capture, online,
                 configured=paths.for_run("online", run_id) / "events.jsonl")
-                if mode == "rolling" and not without_online else None)
-            alert_events = (online_followup.load_alerts(online_path, current_capture.manifest["run_id"])
-                            if online_path is not None else None)
+                if mode == "rolling" and not without_online and online_records is None else None)
+            alert_events = (online_followup.load_alerts(online_path, run_id)
+                            if online_path is not None else online_records)
+            if alert_events and any(a.get("job_id") != run_id for a in alert_events):
+                raise ValueError("online event job ID disagrees with capture")
             current_capture = prepare_capture_identity(current_capture, work / "identity-current")
-            current = bind_capture(current_capture, work / "current", mode=mode, allow_partial=alert_events is not None)
+            current = bind_capture(current_capture, work / "current", mode=mode, allow_partial=alert_events is not None,
+                                   target_iteration=target_iteration)
             selected = (online_followup.resolve(alert_events, current_capture.call_logs, current.coordinates)
                         if alert_events is not None else None)
+            if target_iteration is not None and any(not s["operation_scope"] for s in selected):
+                raise ValueError("target alerts do not bind exactly to the sealed iteration")
             reference = None
             pair_map = current_capture.operation_map
             if baseline is not None:
@@ -141,7 +150,7 @@ def analyze_capture(capture, output=None, *, mode, baseline=None, topology=None,
                     preparation_map=current.preparation_map if mode == "rolling" else None,
                     min_match_rate=min_match_rate, require_clock_alignment=require_clock_alignment,
                     allow_uncalibrated_clock=allow_uncalibrated_clock,
-                    rolling_options=rolling_options, live=live)
+                    rolling_options=rolling_options, live=live, iteration_window=current.iteration_window)
             pipeline = _gate(directory, ready)
             if live is None:
                 report = read_json(directory / "comparison/report.json")
@@ -183,7 +192,7 @@ def analyze_capture(capture, output=None, *, mode, baseline=None, topology=None,
             if mode == 'rolling':
                 from .report_exporter import publish_selected_iteration_report
                 return publish_selected_iteration_report(directory, output, normalized, roots, tasks,
-                    graph_data=(rows, edges))
+                    graph_data=(rows, edges), iteration_window=current.iteration_window)
             return publish_final_report(directory, output, normalized, roots, tasks)
         except Exception as error:
             raise DiagnosisError(5, "report publication: " + str(error)) from error

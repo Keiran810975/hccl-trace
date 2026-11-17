@@ -11,9 +11,6 @@ from .schema import ProfilerTask
 
 TAG = "[HcclTaskControl]"
 INVALID_U64 = (1 << 64) - 1
-AUDIT_FIELDS = ["node_id", "device_id", "stream_id", "task_id", "task_kind",
-                "anchor_stream_id", "anchor_task_id", "original_notify_id", "notify_id",
-                "original_op_name", "op_name", "group_name", "evidence"]
 
 
 @dataclass(frozen=True)
@@ -27,7 +24,6 @@ class ControlTask:
     db_notify_id: int
     anchor_stream_id: int
     anchor_task_id: int
-    evidence: str = ""
 
     @property
     def key(self):
@@ -64,8 +60,7 @@ def parse_control_inputs(paths, node_id: str):
                     raise ValueError("invalid control execution identity")
                 if kind.startswith("notify") and values["notify_id"] == INVALID_U64:
                     raise ValueError("missing control Notify resource")
-                records.append(ControlTask(node_id=node_id, task_kind=kind,
-                    evidence="{}:{}".format(path, line_number), **values))
+                records.append(ControlTask(node_id=node_id, task_kind=kind, **values))
     return records
 
 
@@ -134,17 +129,9 @@ def enrich_control_tasks(profilers, records):
         visiting.remove(key)
         return result
 
-    audit = []
-    for key, record in controls.items():
-        result = resolve(key)
-        original = unique(key)
-        audit.append(dict(node_id=record.node_id, device_id=record.device_id,
-            stream_id=record.stream_id, task_id=record.task_id, task_kind=record.task_kind,
-            anchor_stream_id=record.anchor_stream_id, anchor_task_id=record.anchor_task_id,
-            original_notify_id=original.profiler_notify_id, notify_id=result.profiler_notify_id,
-            original_op_name=original.op_name, op_name=result.op_name,
-            group_name=result.group_name, evidence=record.evidence))
-    return [resolved.get(task.merge_key, task) for task in tasks], audit
+    for key in controls:
+        resolve(key)
+    return [resolved.get(task.merge_key, task) for task in tasks], len(resolved)
 
 
 BUILD_FIELDS = ["node_id", "device_id", "kernel_stream_id", "kernel_task_id", "user_rank",

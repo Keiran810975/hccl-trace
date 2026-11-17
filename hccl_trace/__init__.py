@@ -24,11 +24,13 @@ class Trace:
     """
 
     def __init__(self, directory, *, node_id, user_rank, device_id, run_id="capture", online_probe=None,
-                 timing_adapter=None):
+                 timing_adapter=None, world_size=None):
         if any(type(v) is not int or v < 0 for v in (user_rank, device_id)):
             raise ValueError("explicit nonnegative global rank and profiler device ID required")
         if not node_id or not run_id:
             raise ValueError("node and shared run ID required")
+        if world_size is not None and (type(world_size) is not int or world_size <= user_rank):
+            raise ValueError("world_size must include this global rank")
         self.node_id, self.rank, self.device, self.run_id = node_id, user_rank, device_id, run_id
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -41,8 +43,11 @@ class Trace:
         self.online_token = None
         self._host_log_ns = self._host_log_writes = 0
         self._online_generations, self._online_pending = {}, []
-        self._write(dict(event="runtime", schema_version=1, run_id=run_id, node_id=node_id,
-                         user_rank=user_rank, device_id=device_id, pid=os.getpid()))
+        runtime = dict(event="runtime", schema_version=1, run_id=run_id, node_id=node_id,
+                       user_rank=user_rank, device_id=device_id, pid=os.getpid())
+        if world_size is not None:
+            runtime["world_size"] = world_size
+        self._write(runtime)
 
     @classmethod
     def from_environment(cls, *, device_id=None, node_id=None, timing_adapter=None):
@@ -56,6 +61,7 @@ class Trace:
             device_id = int(env["HCCL_TRACE_DEVICE_ID"])
         node_id = node_id or env.get("HCCL_TRACE_NODE_ID", socket.gethostname())
         user_rank = int(env["RANK"])
+        world_size = int(env["WORLD_SIZE"]) if "WORLD_SIZE" in env else None
         run_id = env.get("HCCL_TRACE_RUN_ID", "capture")
         probe = None
         if env.get("HCCL_TRACE_ONLINE_ADDR") or env.get("HCCL_TRACE_ONLINE_TIMING", "host") != "host" or timing_adapter:
@@ -67,7 +73,7 @@ class Trace:
                                                  timing_adapter=timing_adapter)
         try:
             return cls(directory, node_id=node_id, user_rank=user_rank, device_id=device_id,
-                       run_id=run_id, online_probe=probe, timing_adapter=timing_adapter)
+                       run_id=run_id, online_probe=probe, timing_adapter=timing_adapter, world_size=world_size)
         except BaseException:
             if probe is not None:
                 with suppress(RuntimeError):

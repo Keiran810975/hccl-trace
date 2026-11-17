@@ -408,8 +408,7 @@ const interval=(start,stop)=>start==null||stop==null?"不可用":`${start} – $
 $("report-counts").textContent=`${model.summary.communication_source_count??model.summary.candidate_count} 个通信内部候选 · ${model.summary.external_clue_count??0} 个外部线索 · ${model.summary.chain_count} 条已报告路径`;
 const copyOverlap=model.input_copy_overlap_summary;
 if(copyOverlap.explained_pairs||copyOverlap.retained_pairs){const p=$("input-copy-overlap-summary");p.hidden=false;p.textContent=`双流输入 Copy：${copyOverlap.explained_pairs} 对的单条慢化已由重叠解释；${copyOverlap.retained_pairs} 对未排除。证据见根因 JSON。`;}
-if(model.analysis_scope?.kind==="selected_iteration_slice_from_original_artifacts"){$("analysis-scope").hidden=false;$("analysis-scope").textContent=`原图切片 · 正式 iteration ${model.analysis_scope.iterations.join(", ")} · 非全采集`;}
-if(model.analysis_scope?.kind==="selected_call_slice_from_original_artifacts"){$("analysis-scope").hidden=false;$("analysis-scope").textContent=`原图通信调用切片 · ${model.analysis_scope.selected_operation_scopes.length} 次通信 · 非完整迭代或全采集`;}
+if(model.analysis_scope?.kind==="selected_iteration_slice_from_original_artifacts"){$("analysis-scope").hidden=false;$("analysis-scope").textContent=`${model.analysis_scope.whole_captured_iteration?"整轮采集图":"原图切片"} · 正式 iteration ${model.analysis_scope.iterations.join(", ")} · 非全采集`;}
 function renderNavigation(){
   $("candidates").innerHTML=["communication_source_candidate","external_anomaly_clue"].map(category=>`<h3>${category==="communication_source_candidate"?"通信内部源头候选":"外部异常线索"}</h3>`+model.candidates.map((root,i)=>root.diagnosis_category!==category?"":`<button type="button" class="candidate" data-root="${i}" aria-pressed="${i===selected}"><strong>候选 ${root.category_rank} · Rank ${esc(root.source.user_rank)}</strong><span>${esc(root.source_label)}</span><small>iter ${esc(root.source.iteration)} · ${esc(root.delta)} · ${esc(root.factor)}</small></button>`).join("")).join("");
   applySearch();

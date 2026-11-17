@@ -7,11 +7,14 @@ from dataclasses import dataclass
 from .clock_alignment import raw_to_profiler
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .capture_discovery import write_json, read_json
 from .dependency_model import stable_id
 from .parse_msprof_db import discover_db_files, _readonly_connection, _table_columns, _device_ids
 
+if TYPE_CHECKING:
+    from .iteration_window import IterationWindow
 
 DTYPES = {"int8": 0, "int16": 1, "int32": 2, "float16": 3, "fp16": 3,
           "float32": 4, "fp32": 4, "int64": 5, "uint64": 6, "uint8": 7,
@@ -35,6 +38,7 @@ class Binding:
     preparation_map: Path | None
     coordinates: tuple
     evidence: dict
+    iteration_window: IterationWindow | None = None
 
 
 def _read_observations(path):
@@ -246,10 +250,12 @@ def _certain_pairs(candidates):
             if len(choices) == 1 and degree[next(iter(choices))] == 1}
 
 
-def bind_capture(capture, work, *, mode, allow_partial=False):
+def bind_capture(capture, work, *, mode, allow_partial=False, target_iteration=None):
     work = Path(work)
     manifest = json.loads(json.dumps(capture.manifest))
     if not capture.call_logs:
+        if target_iteration is not None:
+            raise ValueError("online whole-iteration reports require SDK observations")
         if mode == "rolling" and capture.iteration_map is None:
             raise ValueError("rolling requires SDK observations or an evidenced legacy iteration-map.json")
         path = work / "manifest.json"
@@ -397,6 +403,12 @@ def bind_capture(capture, work, *, mode, allow_partial=False):
         operations.extend(controls)
         evidence.extend(audit)
         auxiliary_count = len(controls)
+    window = None
+    if target_iteration is not None:
+        from .iteration_window import from_observations
+        window = from_observations(target_iteration, manifest, observations, inventory, coordinates)
+        coordinates = [c for c in coordinates if c["operation_scope"] in window.scopes]
+        preparations = [p for p in preparations if p["operation_scope"] in window.scopes]
     manifest["operations"] = operations
     path, iteration = work / "manifest.json", work / "iteration-map.json"
     write_json(path, manifest)
@@ -407,4 +419,4 @@ def bind_capture(capture, work, *, mode, allow_partial=False):
     write_json(work / "binding-evidence.json", dict(schema_version=1, operations=evidence))
     return Binding(path, iteration, prep, tuple(coordinates), dict(kind="sdk_exact_api", sdk_bound_calls=sum(len(v) for v in bound.values()),
         bound_operation_count=len(operations), omitted_operation_count=len(omitted),
-        auxiliary_bound_operation_count=auxiliary_count, reduction_verified_in_database=False))
+        auxiliary_bound_operation_count=auxiliary_count, reduction_verified_in_database=False), window)

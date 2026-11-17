@@ -2,14 +2,12 @@
 from __future__ import annotations
 
 import csv
-import json
 from collections import defaultdict
 from decimal import Decimal
 from pathlib import Path
 from statistics import median
 
 from . import visualize_dependency_graph as graph
-from .schema import write_csv
 from .visualize_html import build_wait_inventory
 
 
@@ -33,14 +31,6 @@ def signature(row):
     return (row["_user_rank"], row.get("algorithm", ""), row.get("phase", ""),
             row.get("step", ""), row.get("event", ""), row.get("profiler_task_kind", ""),
             row.get("profiler_size_bytes", ""))
-
-
-def union_ns(intervals):
-    result, end = 0, None
-    for start, stop in sorted(intervals):
-        result += max(0, stop - max(start, end if end is not None else start))
-        end = max(stop, end if end is not None else stop)
-    return result
 
 
 def _span_key(node, device, stream, task):
@@ -177,32 +167,7 @@ def analyze(rows, edges, issues=(), spans=(), baseline_rows=(), min_wait_ns=1000
             evidence_path_edge_ids=";".join(dict.fromkeys(e for _, point, _ in related for e in paths[point])),
             attribution=";".join(dict.fromkeys(link for _, _, link in related)),
             traversal_truncated=int(position < len(queue) and len(seen) >= 4096))
-    grouped = defaultdict(list)
-    for row in rows:
-        grouped[(row.get("_operation_scope", ""), row["_node_id"], row["_user_rank"],
-                 row.get("algorithm", ""), row.get("phase", ""))].append(row)
-    summaries = []
-    for key, group in sorted(grouped.items()):
-        local_waits = [r for r in group if r.get("profiler_task_kind") == "notify_wait"]
-        payload = [r for r in group if r.get("profiler_task_kind") in ("sdma", "reduce_inline")]
-        summaries.append(dict(zip(("operation_scope", "node_id", "user_rank", "algorithm", "phase"), key),
-            task_count=len(group), wait_count=len(local_waits),
-            wait_sum_ns=sum(duration(r) for r in local_waits),
-            wait_union_ns=union_ns((ns(r, "start"), ns(r, "stop")) for r in local_waits),
-            sdma_reduce_sum_ns=sum(duration(r) for r in payload),
-            sdma_reduce_union_ns=union_ns((ns(r, "start"), ns(r, "stop")) for r in payload)))
-    return dict(schema_version=1, waits=waits, candidates=candidates, summaries=summaries,
+    return dict(schema_version=1, waits=waits, candidates=candidates,
         limits=["Node clocks uncalibrated; no cross-node time subtraction or global critical path.",
                 "CPU build spans are sparse (>=1ms), can overlap, and are not summed as hardware time.",
                 "Candidate attribution is correlation where explicitly marked; RDMA completion is unmeasured."])
-
-
-def export_analysis(result, directory):
-    directory = Path(directory)
-    (directory / "diagnosis.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    for key in ("waits", "candidates", "summaries"):
-        values = result[key]
-        fields = list(values[0]) if values else (["id", "graph_id", "node_id", "user_rank",
-            "operation_scope", "algorithm", "phase", "step", "duration_ns", "baseline_median_ns",
-            "category", "evidence"] if key == "candidates" else [])
-        write_csv(str(directory / ("diagnosis_" + key + ".csv")), fields, values)

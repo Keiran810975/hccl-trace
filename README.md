@@ -88,7 +88,8 @@ hccl-diag capture --run-id "$RUN_ID" -o "runs/$RUN_ID" -- \
 `capture` 自动打开语义打点和低日志 msprof 采集；不要再套一层 profiler。它会保留设备任务时间线
 和通信绑定需要的 Host API，不采集 AI Core 性能计数器。保存整个 `runs/$RUN_ID`，尤其是
 `nodes/<node>/` 下的 `plog/`、`msprof/` 和 `calls/`。不要只复制 DB。
-采集结束后用 CPU 执行：
+采集目录使用上面的默认路径时，在线收集器会自动寻找已完成的采集来补发慢化报告。
+没有开启在线时，或想独立离线重看时，在采集结束后用 CPU 执行：
 
 ```bash
 hccl-diag analyze "runs/$RUN_ID"
@@ -148,6 +149,9 @@ with Trace.from_environment(device_id=profiler_device_id, timing_adapter=timing)
   纯离线也可用 `with trace.collective(...):` 包住显式 API。推荐先照着
   [GPT-2 样例](examples/gpt2_normal.py) 验证后再扩到自定义训练。
 
+要自动生成整轮报告，`completion_boundary()` 必须放在对应的 `trace.iteration(...)` 内；
+工具用各 Rank 的已结束轮次边界检查通信是否完成并裁出设备图，不会额外插入同步。
+
 ## 5. 多机采集
 
 每台机器采集自己的 Rank；两边使用同一提交和 `RUN_ID`，节点名不同。两机各 2 Rank 时：
@@ -179,7 +183,39 @@ hccl-diag analyze "runs/$RUN_ID"
 `capture.json` 的对应 `nodes` 条目中用 `clock_probe_files` 声明相对路径；`join` 会保留。
 分析时加 `--require-clock-alignment` 可要求校时通过，否则只使用有依据的时钟范围，不推算网卡真实传输时间。
 
-## 6. 看报告
+## 6. 自动生成慢化轮的详细报告
+
+`hccl-diag online RUN_ID` 默认开启后台报告。Hang/Slow 仍立即写入 `events.jsonl`；
+只有测量到 Slow 才排队构图，Hang 不触发完整图。同一正式轮的多个慢桶共用一次构图和一份报告。
+所有 Rank 的轮次边界、已完成的设备 Task 和该轮各通信的在线判定都到齐后，独立 CPU 进程再处理，
+不持有收集器的接收锁，训练也无需等待报告。优先用 SDK 记录的 `WORLD_SIZE` 核对整轮覆盖，
+旧日志没有这个字段时，在收集器上指定 `--expected-ranks`。
+
+- 在线目录的 `diagnostics.jsonl` 记录等待、诊断、已发布或失败，保留所用采集来源。
+- 成功时生成 `iterations/iter-N/execution.html`、`root_causes.json`、`propagation.html`。
+  图按每个 Rank 的本地轮次起止裁出该轮所有**已采到**的设备 Task 和证据支持的边，
+  包括正常桶；必要的上游端点可以超出目标轮。只保留最近至多 10 个连续正式轮作为分析历史，
+  没有可比历史或校时证据时不猜测。后台满时记录 `skipped_queue_full`，保留原告警。
+- 默认输入是 `runs/RUN_ID`。自定义目录（包括多机合并后的目录）在启动收集器时传
+  `--capture /path/to/assembled-capture`。标准 `hccl-diag capture` 的 msprof 汇总 DB 只在采集封存后
+  用于这条路径，因此可以自动出报告，但这并不意味着训练过程中已有实时设备 Task 流。
+  采集封存或多机 `join` 后，可用 `tail -f reports/online/RUN_ID/diagnostics.jsonl` 等到发布。
+- 如果部署环境已有兼容且验证过的训练中分段导出器，可启动
+  `hccl-diag online RUN_ID --iteration-snapshots /path/to/spool`。生产者须先准备与普通采集同结构的
+  `/path/to/spool/iter-N/`，含全 Rank 的已封存 DB、语义日志、完整 SDK 日志及目标轮结束标记，
+  并保留所需历史。SDK 日志必须有该快照的完整序列和 `capture_end`，原在线通信 token 不能改。
+  完成后将下面的 `online-ready.json` 原子放入该目录，再保持快照不可变：
+
+  ```json
+  {"schema_version": 1, "run_id": "gpt2-001", "iteration": 5, "complete": true}
+  ```
+
+  此模式在训练仍在继续时即可处理已封存的轮。本仓没有为所有 CANN 版本实现训练中的设备 Task 导出器，
+  不读取仍在更新的 DB，也不把 Host 提交或 Rank 总耗时当作设备 Task 完成。默认启用的标准采集回退仍然可用。
+- 只要快告警时用 `--no-detailed-reports`。关闭收集器后，后台最多等待
+  `--report-drain-seconds`（默认 120 秒）；缺失的输入不会生成完整图。
+
+## 7. 看报告
 
 **在线**：从 `online_output_dir/RUN_ID/events.jsonl` 看一行一条告警，例如
 `tail -f reports/online/gpt2-001/events.jsonl`。先看 `event_type`、`iteration`、`bucket_id`，

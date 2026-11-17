@@ -1,12 +1,17 @@
-"""Run the opt-in HCCL online collector. The offline CLI is independent."""
+"""Run the online collector and an independent iteration-report worker."""
 from __future__ import annotations
 
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager, suppress
 import hmac
 import json
+from math import isfinite
 import os
 from pathlib import Path
 import socketserver
+import signal
+import subprocess
+import sys
+from tempfile import TemporaryDirectory
 import threading
 import time
 
@@ -142,6 +147,56 @@ def add_arguments(parser):
     parser.add_argument("--warmup-iterations", type=int, default=10)
     parser.add_argument("--expected-ranks", type=int, help="global ranks 0..N-1 for final completeness audit")
     parser.add_argument("--expected-collectives", type=int, help="total target CollOps including warmup")
+    parser.add_argument("--capture", type=Path, help="finalized capture root (default: runs/RUN_ID)")
+    parser.add_argument("--iteration-snapshots", type=Path, help="root containing separately sealed iter-N captures")
+    parser.add_argument("--no-detailed-reports", action="store_true", help="only write online Hang/Slow alerts")
+    parser.add_argument("--report-drain-seconds", type=float, default=120,
+                        help="maximum time to drain iteration reports when the collector stops")
+
+
+@contextmanager
+def _report_worker(args, output, job_id):
+    if args.no_detailed_reports:
+        yield
+        return
+    with TemporaryDirectory(prefix="hccl-online-reports-") as temporary:
+        stop = Path(temporary)/"closed"
+        capture = args.capture or Path("runs")/job_id
+        command = [sys.executable, "-m", "hccl.tools.diagnosis.online_reports",
+                   "--directory", str(output.resolve()), "--job-id", job_id, "--capture", str(capture.resolve()),
+                   "--stop", str(stop), "--drain-seconds", str(args.report_drain_seconds),
+                   "--parent-pid", str(os.getpid())]
+        if args.iteration_snapshots is not None:
+            command += ["--snapshots", str(args.iteration_snapshots.resolve())]
+        if args.expected_ranks is not None:
+            command += ["--expected-ranks", str(args.expected_ranks)]
+        with subprocess.Popen(command, start_new_session=os.name == "posix") as worker:
+            try:
+                yield
+            finally:
+                stop.touch()
+                try:
+                    code = worker.wait(timeout=args.report_drain_seconds+5)
+                except subprocess.TimeoutExpired:
+                    with suppress(ProcessLookupError):
+                        if os.name == "posix":
+                            os.killpg(worker.pid, signal.SIGTERM)
+                        else:
+                            worker.terminate()
+                    try:
+                        worker.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        with suppress(ProcessLookupError):
+                            if os.name == "posix":
+                                os.killpg(worker.pid, signal.SIGKILL)
+                            else:
+                                worker.kill()
+                        worker.wait()
+                    code = worker.returncode
+                    with (output/"diagnostics.jsonl").open("a", encoding="utf-8") as log:
+                        _write(log, dict(run_id=job_id, status="worker_drain_timeout"))
+                if code:
+                    print(f"iteration report worker exited with {code}; raw online alerts retained", file=sys.stderr)
 
 
 def run(args):
@@ -151,6 +206,8 @@ def run(args):
     output = args.output or load_paths(args.config).for_run("online", job_id)
     if any(v is not None and v < 1 for v in (args.expected_ranks, args.expected_collectives)):
         raise ValueError("expected counts must be positive")
+    if not isfinite(args.report_drain_seconds) or not 0 <= args.report_drain_seconds <= 900:
+        raise ValueError("report drain must be between 0 and 900 seconds")
     tracker = OnlineTracker(job_id, hang_timeout=args.hang_timeout,
         heartbeat_ttl=args.heartbeat_ttl, transport_grace=args.transport_grace,
         baseline_window=args.baseline_window, warmup_iterations=args.warmup_iterations)
@@ -166,8 +223,12 @@ def run(args):
         server = stack.enter_context(Collector((args.listen, args.port), tracker=tracker,
             telemetry=telemetry, events=events, measurements=measurements, health_file=health,
             expected_ranks=args.expected_ranks, expected_collectives=args.expected_collectives, token=token))
+        stack.enter_context(_report_worker(args, output, job_id))
         print(f"Online collector listening on {server.server_address[0]}:{server.server_address[1]}; output={output.resolve()}",
               flush=True)
+        if threading.current_thread() is threading.main_thread():
+            previous_handler = signal.signal(signal.SIGTERM, signal.default_int_handler)
+            stack.callback(signal.signal, signal.SIGTERM, previous_handler)
         try:
             server.serve_forever(poll_interval=.2)
         except KeyboardInterrupt:

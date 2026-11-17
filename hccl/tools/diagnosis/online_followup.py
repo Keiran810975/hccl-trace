@@ -12,8 +12,11 @@ from .dependency_timing import EvidenceGraph, WAIT
 from .workload_binder import _read_calls, operation_type
 
 
-SLOW = {"COMPUTATION_SLOW", "COMMUNICATION_SLOW", "SLOW_UNCLASSIFIED"}  # Last entry reads older archives only.
+# SLOW_UNCLASSIFIED reads older archives only.
 ROUTES = {"COMPUTATION_SLOW": "S1", "COMMUNICATION_SLOW": "S2", "SLOW_UNCLASSIFIED": "undetermined"}
+SLOW = frozenset(ROUTES)
+EVENT_TOKEN = ("communicator_id", "communicator_generation", "op_counter")
+CALL_TOKEN = ("group_id", "online_communicator_generation", "online_op_counter")
 
 
 def alert_path(capture, requested=None, *, configured=None):
@@ -48,7 +51,7 @@ def load_alerts(path, run_id):
     return events
 
 
-def _token(row, names):
+def operation_token(row, names=EVENT_TOKEN):
     group, generation, counter = (row.get(k) for k in names)
     if (not isinstance(group, str) or not group or type(generation) is not int or generation < 0
             or type(counter) is not int or counter <= 0):
@@ -59,7 +62,7 @@ def _token(row, names):
 def resolve(events, call_logs, coordinates):
     slots = {(c["group_id"], c["stage"], c["iteration"], c["call_site"], c["occurrence"]): c["operation_scope"]
              for c in coordinates if "group_id" in c}
-    pending = {_token(e, ("communicator_id", "communicator_generation", "op_counter")): e for e in events}
+    pending = {operation_token(e): e for e in events}
     if len(pending) != len(events):
         raise ValueError("duplicate online slowdown token")
     calls = defaultdict(dict)
@@ -69,7 +72,7 @@ def resolve(events, call_logs, coordinates):
         for row in rows:
             if "online_op_counter" not in row:
                 continue
-            token = _token(row, ("group_id", "online_communicator_generation", "online_op_counter"))
+            token = operation_token(row, CALL_TOKEN)
             if token in pending:
                 if rank in calls[token] or header["run_id"] != pending[token]["job_id"]:
                     raise ValueError("duplicate or foreign SDK call for online token")

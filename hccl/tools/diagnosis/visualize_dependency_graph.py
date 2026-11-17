@@ -1261,7 +1261,7 @@ def _add_local_notify_sync_edges(rows: List[dict], add) -> List[dict]:
                 producer["row"],
                 consumer["row"],
                 "same verified device-local Notify resource and DB per-stream execution ordinal; "
-                "explicit control aliases, when present, are audited in control_metadata.csv",
+                "explicit control aliases, when present, are verified against captured DB and plog",
                 "verified_local_notify_resource_and_db_per_stream_ordinal",
                 "exact",
                 relation.stable_id,

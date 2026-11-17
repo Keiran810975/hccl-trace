@@ -20,8 +20,8 @@ from .report_contract import CLEAN_TASK_REFERENCE, without_critical_path
 FINAL_FILES = {"execution.html", "root_causes.json", "propagation.html"}
 
 
-def publish_selected_iteration_report(directory, output, normalized, roots, tasks, *, graph_data):
-    import csv
+def publish_selected_iteration_report(directory, output, normalized, roots, tasks, *, graph_data,
+                                      iteration_window=None):
     followup = normalized.get('online_followup')
     selected = [a['iteration'] for a in followup['alerts'] if a['operation_scope']] if followup is not None else []
     epochs = sorted(set(selected) | {c['iteration'] for c in normalized.get('source_candidates', normalized['candidates'])
@@ -38,6 +38,9 @@ def publish_selected_iteration_report(directory, output, normalized, roots, task
         epochs = sorted(epochs + [cross_node[0]["iteration"]])
     epochs = epochs or [late[0]["iteration"] if late else max(t['iteration'] for t in formal)]
     wanted = {t['graph_id'] for t in formal if t['iteration'] in epochs}
+    if iteration_window is not None:
+        epochs = [iteration_window.target]
+        wanted = {r["_graph_id"] for r in graph_data[0] if iteration_window.target_row(r)}
     if followup is not None:
         path_ids = {edge for r in roots for path in r.get('evidence_paths', {}).values() for edge in path}
         for alert in followup["alerts"]:
@@ -48,28 +51,20 @@ def publish_selected_iteration_report(directory, output, normalized, roots, task
                 wanted.update((edge['src'], edge['dst']))
     if not {r['graph_id'] for r in roots} <= wanted:
         raise ValueError('selected iteration does not contain every actual source anchor')
-    rendered = directory / 'selected-iteration-view'
-    rendered.mkdir()
     rows = [dict(r, _source_row=i) for i, r in enumerate(
         r for r in graph_data[0] if r['_graph_id'] in wanted)]
     edges = [e for e in graph_data[1] if e['src'] in wanted and e['dst'] in wanted]
     diagnosis = waits.analyze(rows, edges, trace_wait_chains=False)
     scopes = {r.get('_operation_scope') for r in rows}
-    with (directory/'operation_timings.csv').open(encoding='utf-8-sig', newline='') as source, \
-            (rendered/'operation_timings.csv').open('x', encoding='utf-8', newline='') as target:
-        reader = csv.DictReader(source)
-        writer = csv.DictWriter(target, reader.fieldnames)
-        writer.writeheader()
-        writer.writerows(r for r in reader if r['operation_scope'] in scopes)
-    # Quality describes the full analysis, not a synthetic zero-ambiguity slice.
-    shutil.copy2(directory/'dep_graph_notify_ambiguities.csv', rendered/'dep_graph_notify_ambiguities.csv')
-    if (directory / 'clock_alignment.json').is_file():
-        shutil.copy2(directory / 'clock_alignment.json', rendered / 'clock_alignment.json')
     normalized = dict(normalized, analysis_scope=dict(kind='selected_iteration_slice_from_original_artifacts',
         iterations=epochs, diagnosis_used_full_capture=True, original_full_graph_retained=False,
         full_graph_replayable_from_capture=True))
-    return publish_final_report(rendered, output, normalized, roots, [t for t in tasks if t['graph_id'] in wanted],
-                                graph_data=(rows, edges), diagnosis_data=diagnosis)
+    if iteration_window is not None:
+        normalized["analysis_scope"].update(diagnosis_used_full_capture=False,
+            whole_captured_iteration=True, first_history_iteration=iteration_window.first,
+            source_boundary="rank_local_sdk_iteration_markers_in_profiler_clock")
+    return publish_final_report(directory, output, normalized, roots, [t for t in tasks if t['graph_id'] in wanted],
+                                graph_data=(rows, edges), diagnosis_data=diagnosis, timing_scopes=scopes)
 
 
 def host_source_displays(roots, rows, model, alignment=None):
@@ -145,7 +140,8 @@ def _attach_chain_ids(normalized, by_id):
         candidate["chain_ids"] = [c["chain_id"] for c in by_id[candidate["id"]]["chains"]]
 
 
-def publish_final_report(directory, output, normalized, roots, comparisons, *, graph_data=None, diagnosis_data=None):
+def publish_final_report(directory, output, normalized, roots, comparisons, *,
+                         graph_data=None, diagnosis_data=None, timing_scopes=None):
     directory, output = Path(directory), Path(output)
     if output.exists() or output.is_symlink():
         raise FileExistsError("refusing to overwrite existing report: " + str(output))
@@ -199,8 +195,10 @@ def publish_final_report(directory, output, normalized, roots, comparisons, *, g
         if sources:
             wait["classification"] = "upstream_slow_candidate"
     alignment = read_json(directory / "clock_alignment.json") if (directory / "clock_alignment.json").is_file() else None
-    model = view.build_execution_dependency_model(rows, edges,
-        view.read_operation_timings(directory / "operation_timings.csv"), alignment=alignment)
+    timings = view.read_operation_timings(directory / "operation_timings.csv")
+    if timing_scopes is not None:
+        timings = [row for row in timings if row["_operation_scope"] in timing_scopes]
+    model = view.build_execution_dependency_model(rows, edges, timings, alignment=alignment)
     model.update(graphView="execution", issueCount=len(waits.read_csv(directory / "dep_graph_notify_ambiguities.csv")))
     normalized["quality"]["notify_ambiguity_count"] = model["issueCount"]
     view.attach_diagnosis(model, diagnosis, diagnosis["waits"])
@@ -245,7 +243,8 @@ def publish_final_report(directory, output, normalized, roots, comparisons, *, g
         model["caseNote"] = "Reference: " + ("previous five measured iteration mean" if normalized["mode"] == "rolling" else "independent baseline median (explicit or structural reference)")
     scope = normalized.get("analysis_scope", {})
     if scope.get("kind") == "selected_iteration_slice_from_original_artifacts":
-        model["caseNote"] += "; original graph slice, measured iteration " + ", ".join(map(str, scope["iterations"])) + "; not the complete capture"
+        label = "whole captured iteration" if scope.get("whole_captured_iteration") else "original graph slice"
+        model["caseNote"] += "; " + label + ", measured iteration " + ", ".join(map(str, scope["iterations"])) + "; not the complete capture"
     output.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix="." + output.name + "-", dir=str(output.parent)))
     try:
