@@ -1,4 +1,4 @@
-"""Publish exactly three self-contained reports; never remove capture inputs."""
+"""Publish self-contained reports; never remove capture inputs."""
 from __future__ import annotations
 
 from html.parser import HTMLParser
@@ -105,9 +105,10 @@ class _References(HTMLParser):
                 raise ValueError("report references a missing/external resource: " + value)
 
 
-def validate_final(directory):
-    if {p.name for p in directory.iterdir()} != FINAL_FILES:
-        raise ValueError("final report must contain exactly three files")
+def validate_final(directory, *, json_only=False):
+    expected = {"root_causes.json"} if json_only else FINAL_FILES
+    if {p.name for p in directory.iterdir()} != expected:
+        raise ValueError("final report files do not match the selected output")
     result = read_json(directory / "root_causes.json")
     if result.get("schema_version") not in {1, 2} or not isinstance(result.get("candidates"), list):
         raise ValueError("invalid normalized root-cause report")
@@ -116,7 +117,7 @@ def validate_final(directory):
                 or not isinstance(result.get("external_anomaly_clues"), list)
                 or not isinstance(result.get("unresolved_observations"), list)):
             raise ValueError("schema 2 requires separate internal, external and unresolved results")
-    for name in ("execution.html", "propagation.html"):
+    for name in expected - {"root_causes.json"}:
         text = (directory / name).read_text(encoding="utf-8")
         if "<!doctype html>" not in text.lower() or "<script" not in text:
             raise ValueError("report is not a standalone HTML document")
@@ -141,7 +142,7 @@ def _attach_chain_ids(normalized, by_id):
 
 
 def publish_final_report(directory, output, normalized, roots, comparisons, *,
-                         graph_data=None, diagnosis_data=None, timing_scopes=None):
+                         graph_data=None, diagnosis_data=None, timing_scopes=None, json_only=False):
     directory, output = Path(directory), Path(output)
     if output.exists() or output.is_symlink():
         raise FileExistsError("refusing to overwrite existing report: " + str(output))
@@ -171,6 +172,31 @@ def publish_final_report(directory, output, normalized, roots, comparisons, *,
     _attach_chain_ids(normalized, by_id)
     normalized["propagation"] = dict(report["summary"], exhaustive_downstream_search=False,
                                      physical_causation_proven=False)
+    normalized["quality"]["notify_ambiguity_count"] = len(waits.read_csv(directory / "dep_graph_notify_ambiguities.csv"))
+    if json_only:
+        normalized["propagation"].update(candidates=report["candidates"], nodes=report["nodes"])
+    output.parent.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix="." + output.name + "-", dir=str(output.parent)))
+    try:
+        write_json(stage / "root_causes.json", normalized)
+        if not json_only:
+            model = _execution_model(directory, rows, edges, normalized, roots, comparisons, report,
+                                     diagnosis_data, timing_scopes)
+            view.write_html(stage / "execution.html", "HCCL execution", model)
+            (stage / "propagation.html").write_text(presentation.render_html(report), encoding="utf-8")
+        validate_final(stage, json_only=json_only)
+        if output.exists() or output.is_symlink():
+            raise FileExistsError("report appeared during analysis; refusing to overwrite it")
+        # Respect the destination parent's read/traverse policy without granting additional write access.
+        stage.chmod(output.parent.stat().st_mode & 0o755)
+        stage.rename(output)
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage)
+    return normalized
+
+
+def _execution_model(directory, rows, edges, normalized, roots, comparisons, report, diagnosis_data, timing_scopes):
     diagnosis = without_critical_path(diagnosis_data if diagnosis_data is not None else read_json(directory / "diagnosis.json"))
     # The execution model already carries exact task and Host anchor times.
     display_candidates = [
@@ -199,8 +225,7 @@ def publish_final_report(directory, output, normalized, roots, comparisons, *,
     if timing_scopes is not None:
         timings = [row for row in timings if row["_operation_scope"] in timing_scopes]
     model = view.build_execution_dependency_model(rows, edges, timings, alignment=alignment)
-    model.update(graphView="execution", issueCount=len(waits.read_csv(directory / "dep_graph_notify_ambiguities.csv")))
-    normalized["quality"]["notify_ambiguity_count"] = model["issueCount"]
+    model.update(graphView="execution", issueCount=normalized["quality"]["notify_ambiguity_count"])
     view.attach_diagnosis(model, diagnosis, diagnosis["waits"])
     model["waits"] = diagnosis["waits"]
     classifications = {t["graph_id"]: t.get("task_domain", "unknown") for t in comparisons}
@@ -245,20 +270,6 @@ def publish_final_report(directory, output, normalized, roots, comparisons, *,
     if scope.get("kind") == "selected_iteration_slice_from_original_artifacts":
         label = "whole captured iteration" if scope.get("whole_captured_iteration") else "original graph slice"
         model["caseNote"] += "; " + label + ", measured iteration " + ", ".join(map(str, scope["iterations"])) + "; not the complete capture"
-    output.parent.mkdir(parents=True, exist_ok=True)
-    stage = Path(tempfile.mkdtemp(prefix="." + output.name + "-", dir=str(output.parent)))
-    try:
-        write_json(stage / "root_causes.json", normalized)
-        view.write_html(stage / "execution.html", "HCCL execution", model)
-        (stage / "propagation.html").write_text(presentation.render_html(report), encoding="utf-8")
-        validate_final(stage)
-        if output.exists() or output.is_symlink():
-            raise FileExistsError("report appeared during analysis; refusing to overwrite it")
-        # mkdtemp is private (0700); publication should respect the destination
-        # parent's read/traverse policy without granting additional write access.
-        stage.chmod(output.parent.stat().st_mode & 0o755)
-        stage.rename(output)
-    finally:
-        if stage.exists():
-            shutil.rmtree(stage)
-    return normalized
+    elif scope.get("kind") == "full_capture_execution_graph":
+        model["caseNote"] += "; full captured execution graph"
+    return model

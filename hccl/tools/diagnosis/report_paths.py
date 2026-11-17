@@ -1,25 +1,37 @@
-"""Resolve the two report roots from the supported flat YAML configuration."""
+"""Resolve separate alert and report roots from the flat YAML configuration."""
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import combinations
 import json
 import os
 from pathlib import Path
 import re
 
 
-DEFAULTS = {"online_output_dir": "reports/online", "offline_output_dir": "reports/offline"}
+DEFAULTS = {
+    "online_output_dir": "reports/online",
+    "online_report_output_dir": "reports/online-details",
+    "offline_output_dir": "reports/offline",
+}
 
 
 @dataclass(frozen=True)
 class ReportPaths:
     online: Path
+    online_reports: Path
     offline: Path
 
     def for_run(self, kind, run_id):
         from .multi_node_trace import _name
 
         return getattr(self, kind) / _name(run_id)
+
+
+def require_separate(*directories):
+    for left, right in combinations((directory.resolve() for directory in directories), 2):
+        if left == right or left in right.parents or right in left.parents:
+            raise ValueError(f"alert and report directories must be separate: {left} and {right}")
 
 
 def _scalar(value):
@@ -60,15 +72,14 @@ def load_paths(config=None):
         key, separator, value = line.partition(":")
         try:
             if not separator or key.rstrip() not in DEFAULTS:
-                raise ValueError("expected online_output_dir or offline_output_dir")
+                raise ValueError("expected one of " + ", ".join(DEFAULTS))
             key = key.rstrip()
             if key in values:
                 raise ValueError(f"duplicate key {key}")
             values[key] = _scalar(value)
         except ValueError as error:
             raise ValueError(f"{path}:{index}: {error}") from error
-    online, offline = ((path.parent / Path(values.get(key, default)).expanduser()).resolve()
-                       for key, default in DEFAULTS.items())
-    if online == offline or online in offline.parents or offline in online.parents:
-        raise ValueError("online and offline report roots must be separate directories")
-    return ReportPaths(online, offline)
+    directories = tuple((path.parent / Path(values.get(key, default)).expanduser()).resolve()
+                        for key, default in DEFAULTS.items())
+    require_separate(*directories)
+    return ReportPaths(*directories)

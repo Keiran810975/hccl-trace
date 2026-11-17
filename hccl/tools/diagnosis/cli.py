@@ -15,7 +15,7 @@ from .capture_discovery import discover_capture, prepare_capture_identity, read_
 from .workload_binder import bind_capture
 from .result_normalizer import normalize
 from .report_paths import load_paths
-from .report_exporter import publish_final_report
+from .report_exporter import publish_final_report, publish_selected_iteration_report
 from .run_diagnosis import run_pipeline
 from .workload_coordinates import position
 
@@ -75,7 +75,7 @@ def analyze_capture(capture, output=None, *, mode, baseline=None, topology=None,
                     verbose=False, allow_uncalibrated_clock=False,
                     source_slowdown_factor="1.5", wait_slowdown_factor=None,
                     calibrated_release_intervals=False, online=None, paths=None,
-                    without_online=False, target_iteration=None, online_records=None):
+                    without_online=False, target_iteration=None, online_records=None, report_style="standard"):
     if require_clock_alignment and allow_uncalibrated_clock:
         raise DiagnosisError(2, "required alignment and explicit local-clock fallback are mutually exclusive")
     if mode not in {"rolling", "baseline"} or (mode == "baseline") != (baseline is not None):
@@ -87,6 +87,8 @@ def analyze_capture(capture, output=None, *, mode, baseline=None, topology=None,
     if target_iteration is not None and (mode != "rolling" or not online_records or
             any(a.get("iteration") != target_iteration for a in online_records)):
         raise DiagnosisError(2, "whole-iteration follow-up requires online alerts for that iteration")
+    if report_style not in {"standard", "full", "json"} or (target_iteration is not None and report_style != "standard"):
+        raise DiagnosisError(2, "choose a supported offline report style; online reports are iteration scoped")
     rolling_options = rolling.RollingOptions(slowdown_factor=source_slowdown_factor,
         wait_slowdown_factor=wait_slowdown_factor if wait_slowdown_factor is not None else "1.2",
         calibrated_release_intervals=calibrated_release_intervals)
@@ -189,11 +191,16 @@ def analyze_capture(capture, output=None, *, mode, baseline=None, topology=None,
         except Exception as error:
             raise DiagnosisError(4, "analysis: " + str(error)) from error
         try:
-            if mode == 'rolling':
-                from .report_exporter import publish_selected_iteration_report
+            if mode == 'rolling' and report_style == "standard":
                 return publish_selected_iteration_report(directory, output, normalized, roots, tasks,
                     graph_data=(rows, edges), iteration_window=current.iteration_window)
-            return publish_final_report(directory, output, normalized, roots, tasks)
+            json_only = report_style == "json"
+            if not json_only:
+                normalized["analysis_scope"] = dict(kind="full_capture_execution_graph",
+                    diagnosis_used_full_capture=True, original_full_graph_retained=True)
+            diagnosis = waits.analyze(rows, edges, trace_wait_chains=False) if mode == "rolling" and not json_only else None
+            return publish_final_report(directory, output, normalized, roots, tasks, graph_data=(rows, edges),
+                                        diagnosis_data=diagnosis, json_only=json_only)
         except Exception as error:
             raise DiagnosisError(5, "report publication: " + str(error)) from error
 
@@ -214,6 +221,8 @@ def main(argv=None):
     alerts.add_argument("--without-online", action="store_true", help="analyze without online alert selection")
     analyze.add_argument("--config", type=Path, help="report path configuration (default: ./config.yaml)")
     analyze.add_argument("--output", "-o", type=Path, help="override offline_output_dir/RUN_ID")
+    analyze.add_argument("--report", dest="report_style", choices=("standard", "full", "json"), default="standard",
+                         help="standard: default report bundle; full: include the complete captured graph; json: no HTML")
     analyze.add_argument("--topology", type=Path)
     analyze.add_argument("--manifest", type=Path)
     analyze.add_argument("--min-match-rate", type=float, default=95.0)

@@ -16,7 +16,7 @@ import threading
 import time
 
 from .online_tracker import OnlineTracker
-from .report_paths import load_paths
+from .report_paths import load_paths, require_separate
 
 
 MAX_FRAME = 64 * 1024
@@ -139,7 +139,7 @@ def add_arguments(parser):
     parser.add_argument("--config", type=Path, help="report path configuration (default: ./config.yaml)")
     parser.add_argument("--listen", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7341)
-    parser.add_argument("--output", "-o", type=Path, help="override online_output_dir/RUN_ID")
+    parser.add_argument("--output", "-o", type=Path, help="override the alert directory (online_output_dir/RUN_ID)")
     parser.add_argument("--hang-timeout", type=float, default=30.)
     parser.add_argument("--heartbeat-ttl", type=float, default=5.)
     parser.add_argument("--transport-grace", type=float, default=2.)
@@ -149,21 +149,25 @@ def add_arguments(parser):
     parser.add_argument("--expected-collectives", type=int, help="total target CollOps including warmup")
     parser.add_argument("--capture", type=Path, help="finalized capture root (default: runs/RUN_ID)")
     parser.add_argument("--iteration-snapshots", type=Path, help="root containing separately sealed iter-N captures")
-    parser.add_argument("--no-detailed-reports", action="store_true", help="only write online Hang/Slow alerts")
+    reports = parser.add_mutually_exclusive_group()
+    reports.add_argument("--no-detailed-reports", action="store_true", help="only write online Hang/Slow alerts")
+    reports.add_argument("--report-output", type=Path, help="override online_report_output_dir/RUN_ID")
     parser.add_argument("--report-drain-seconds", type=float, default=120,
                         help="maximum time to drain iteration reports when the collector stops")
 
 
 @contextmanager
-def _report_worker(args, output, job_id):
-    if args.no_detailed_reports:
+def _report_worker(args, output, report_output, job_id):
+    if report_output is None:
         yield
         return
+    report_output.mkdir(parents=True, exist_ok=False)
     with TemporaryDirectory(prefix="hccl-online-reports-") as temporary:
         stop = Path(temporary)/"closed"
         capture = args.capture or Path("runs")/job_id
         command = [sys.executable, "-m", "hccl.tools.diagnosis.online_reports",
-                   "--directory", str(output.resolve()), "--job-id", job_id, "--capture", str(capture.resolve()),
+                   "--directory", str(output.resolve()), "--report-directory", str(report_output.resolve()),
+                   "--job-id", job_id, "--capture", str(capture.resolve()),
                    "--stop", str(stop), "--drain-seconds", str(args.report_drain_seconds),
                    "--parent-pid", str(os.getpid())]
         if args.iteration_snapshots is not None:
@@ -193,7 +197,7 @@ def _report_worker(args, output, job_id):
                                 worker.kill()
                         worker.wait()
                     code = worker.returncode
-                    with (output/"diagnostics.jsonl").open("a", encoding="utf-8") as log:
+                    with (report_output/"diagnostics.jsonl").open("a", encoding="utf-8") as log:
                         _write(log, dict(run_id=job_id, status="worker_drain_timeout"))
                 if code:
                     print(f"iteration report worker exited with {code}; raw online alerts retained", file=sys.stderr)
@@ -203,7 +207,14 @@ def run(args):
     from .multi_node_trace import _name
 
     job_id = _name(args.run_id)
-    output = args.output or load_paths(args.config).for_run("online", job_id)
+    paths = load_paths(args.config)
+    output = args.output or paths.for_run("online", job_id)
+    report_output = None
+    if not args.no_detailed_reports:
+        report_output = args.report_output or paths.for_run("online_reports", job_id)
+        require_separate(output, report_output)
+        if report_output.exists() or report_output.is_symlink():
+            raise FileExistsError("refusing to reuse online report directory: " + str(report_output))
     if any(v is not None and v < 1 for v in (args.expected_ranks, args.expected_collectives)):
         raise ValueError("expected counts must be positive")
     if not isfinite(args.report_drain_seconds) or not 0 <= args.report_drain_seconds <= 900:
@@ -223,9 +234,11 @@ def run(args):
         server = stack.enter_context(Collector((args.listen, args.port), tracker=tracker,
             telemetry=telemetry, events=events, measurements=measurements, health_file=health,
             expected_ranks=args.expected_ranks, expected_collectives=args.expected_collectives, token=token))
-        stack.enter_context(_report_worker(args, output, job_id))
+        stack.enter_context(_report_worker(args, output, report_output, job_id))
         print(f"Online collector listening on {server.server_address[0]}:{server.server_address[1]}; output={output.resolve()}",
               flush=True)
+        if report_output is not None:
+            print(f"Online iteration reports: {report_output.resolve()}", flush=True)
         if threading.current_thread() is threading.main_thread():
             previous_handler = signal.signal(signal.SIGTERM, signal.default_int_handler)
             stack.callback(signal.signal, signal.SIGTERM, previous_handler)

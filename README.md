@@ -49,14 +49,16 @@ python3 -c 'import torch, torch_npu; print(torch.__version__, torch_npu.__versio
 
 ```yaml
 online_output_dir: reports/online
+online_report_output_dir: reports/online-details
 offline_output_dir: reports/offline
 ```
 
-两个目录必须分开。相对路径以配置文件所在目录为准。默认读取当前目录的 `config.yaml`；
+三个目录分别存在线告警及测量日志、在线整轮详细报告、手动离线报告，不能相同或互相包含。
+相对路径以配置文件所在目录为准。默认读取当前目录的 `config.yaml`；
 也可给 `online` 或 `analyze` 加 `--config /path/to/config.yaml`，或设置 `HCCL_TRACE_CONFIG`。
-配置支持上面两个顶层路径键，可用普通路径或引号；不需要额外 YAML 依赖。
-默认在对应目录下创建 `RUN_ID/`。单次覆盖用 `-o <新目录>`，不会覆盖上一份报告。
-原始采集由 `capture -o` 指定，独立于两个报告目录。
+旧配置没有 `online_report_output_dir` 时使用上面的默认值。默认在各目录下创建 `RUN_ID/`。
+`online -o <新目录>` 只改告警目录，`online --report-output <新目录>` 可单独改详细报告目录。
+`analyze -o <新目录>` 改离线输出目录。原始采集仍由 `capture -o` 单独指定，不覆盖旧产物。
 
 ## 3. 启动：先跑通 GPT-2 样例
 
@@ -191,15 +193,15 @@ hccl-diag analyze "runs/$RUN_ID"
 不持有收集器的接收锁，训练也无需等待报告。优先用 SDK 记录的 `WORLD_SIZE` 核对整轮覆盖，
 旧日志没有这个字段时，在收集器上指定 `--expected-ranks`。
 
-- 在线目录的 `diagnostics.jsonl` 记录等待、诊断、已发布或失败，保留所用采集来源。
-- 成功时生成 `iterations/iter-N/execution.html`、`root_causes.json`、`propagation.html`。
+- `online_report_output_dir/RUN_ID/diagnostics.jsonl` 记录等待、诊断、已发布或失败，保留所用采集来源。
+- 在同一详细报告目录下生成 `iterations/iter-N/execution.html`、`root_causes.json`、`propagation.html`。
   图按每个 Rank 的本地轮次起止裁出该轮所有**已采到**的设备 Task 和证据支持的边，
   包括正常桶；必要的上游端点可以超出目标轮。只保留最近至多 10 个连续正式轮作为分析历史，
   没有可比历史或校时证据时不猜测。后台满时记录 `skipped_queue_full`，保留原告警。
 - 默认输入是 `runs/RUN_ID`。自定义目录（包括多机合并后的目录）在启动收集器时传
   `--capture /path/to/assembled-capture`。标准 `hccl-diag capture` 的 msprof 汇总 DB 只在采集封存后
   用于这条路径，因此可以自动出报告，但这并不意味着训练过程中已有实时设备 Task 流。
-  采集封存或多机 `join` 后，可用 `tail -f reports/online/RUN_ID/diagnostics.jsonl` 等到发布。
+  采集封存或多机 `join` 后，可用 `tail -f reports/online-details/RUN_ID/diagnostics.jsonl` 等到发布。
 - 如果部署环境已有兼容且验证过的训练中分段导出器，可启动
   `hccl-diag online RUN_ID --iteration-snapshots /path/to/spool`。生产者须先准备与普通采集同结构的
   `/path/to/spool/iter-N/`，含全 Rank 的已封存 DB、语义日志、完整 SDK 日志及目标轮结束标记，
@@ -233,14 +235,25 @@ T 是各 Rank 的观测耗时，不是跨机绝对时间。只有在训练同步
 `measurements.jsonl` 包括正常、异常和证据不足的通信；`telemetry.jsonl` 保存原始帧；
 `run_health.jsonl` 用于看是否丢帧、预热是否齐全以及计时覆盖。健康门禁不代表诊断准确率。
 
-**离线**：`offline_output_dir/RUN_ID/` 只保留以下三个文件：
+**离线**：`hccl-diag analyze` 默认把以下三个文件写到 `offline_output_dir/RUN_ID/`。
+滚动分析的默认图只展示选出的轮次；使用独立 `--baseline` 时默认导出完整图。
+需要整份采集的全部已解析任务和依赖，或只需要机器可读结果时，可分别运行：
+
+```bash
+hccl-diag analyze "runs/$RUN_ID" --report full -o "reports/offline/${RUN_ID}-full"
+hccl-diag analyze "runs/$RUN_ID" --report json -o "reports/offline/${RUN_ID}-json"
+```
+
+`full` 保留三件套，但 `execution.html` 不裁轮次，长训练的文件可能很大。
+`json` 只保存 `root_causes.json`（含传播链及节点），不渲染 HTML。两种选项都不改变诊断门槛，
+完整图也不会补造未采到的任务或依赖。
 
 | 文件 | 阅读方法 |
 | --- | --- |
-| `execution.html` | 在浏览器查看各节点、Rank、Stream 的任务和依赖；可从报告跳到标记任务。滚动模式展示相关轮及必要依赖端点，不是全程原始时间线。 |
+| `execution.html` | 在浏览器查看各节点、Rank、Stream 的任务和依赖；可从报告跳到标记任务。 |
 | `root_causes.json` | 机器可读的传播报告；先看 `quality`、`coverage`，再看候选、传播链和 `online_followup`。 |
 | `propagation.html` | 同一诊断的可读报告。S1 查准备区间和入口 Wait 的可信上游；S2 按 Rank 看慢化至少 +100% 的 Task/Wait 及后续传播。证据不足和未过线分别显示。 |
 
-在线后续离线分析只绑定可以唯一核验的通信实例；不凭桶顺序或时间接近补配。H1 的缺席判断留在
+基于在线告警的详细分析只绑定可以唯一核验的通信实例；不凭桶顺序或时间接近补配。H1 的缺席判断留在
 在线告警里，不把一条未完成通信当成已采齐的 Task 图。单一候选不能证明物理故障，计时或依赖缺失也
 不代表没有异常。分析报错时优先核查实际库、设备映射、语义 plog 和每个 Rank 的调用日志。

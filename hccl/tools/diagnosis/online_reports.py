@@ -118,12 +118,12 @@ def _diagnose(source, output, *, epoch, alerts):
         raise ValueError(str(error)) from error
 
 
-def run_reports(directory, job_id, capture, snapshots, stop, expected_ranks, *, drain_seconds=120,
+def run_reports(directory, job_id, capture, snapshots, stop, expected_ranks, *, report_directory, drain_seconds=120,
                 poll_seconds=POLL_SECONDS, parent_pid=None):
     pending, done, tokens_cache = {}, set(), {}
     last_state = {}
 
-    with (directory/"events.jsonl").open("rb") as events, (directory/"diagnostics.jsonl").open(
+    with (directory/"events.jsonl").open("rb") as events, (report_directory/"diagnostics.jsonl").open(
             "x", encoding="utf-8", buffering=1) as log:
         def status(epoch, state, **details):
             if last_state.get(epoch) == state:
@@ -181,11 +181,11 @@ def run_reports(directory, job_id, capture, snapshots, stop, expected_ranks, *, 
                     if set(states) != wanted or {t for t, s in states.items() if s in SLOW} != set(alerts):
                         status(epoch, "waiting_for_final_online_results")
                         continue
-                    report = directory/"iterations"/f"iter-{epoch}"
+                    report = report_directory/"iterations"/f"iter-{epoch}"
                     status(epoch, "diagnosing", alert_count=len(alerts), trace_source=source_kind)
                     started = True
                     result = _diagnose(source, report, epoch=epoch, alerts=list(alerts.values()))
-                    finish(epoch, "published", alert_count=len(alerts), report=str(report.relative_to(directory)),
+                    finish(epoch, "published", alert_count=len(alerts), report=str(report.relative_to(report_directory)),
                            trace_source=source_kind, diagnosis_status=result["diagnosis_status"])
                 except (ValueError, KeyError, TypeError, AttributeError, OSError, RuntimeError) as error:
                     finish(epoch, "failed", reason=str(error))
@@ -197,7 +197,7 @@ def run_reports(directory, job_id, capture, snapshots, stop, expected_ranks, *, 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("directory", "capture", "stop"):
+    for name in ("directory", "report-directory", "capture", "stop"):
         parser.add_argument("--"+name, type=Path, required=True)
     parser.add_argument("--snapshots", type=Path, default=None)
     parser.add_argument("--job-id", required=True)
