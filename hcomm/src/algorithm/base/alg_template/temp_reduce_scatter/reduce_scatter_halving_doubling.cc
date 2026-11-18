@@ -10,6 +10,7 @@
 
 #include "reduce_scatter_halving_doubling.h"
 #include "alg_template_register.h"
+#include "task_semantic_scope.h"
 
 namespace hccl {
 ReduceScatterHalvingDoubling::ReduceScatterHalvingDoubling(const HcclDispatcher dispatcher)
@@ -92,7 +93,11 @@ HcclResult ReduceScatterHalvingDoubling::CalcStepSlices(const std::vector<Slice>
 
 HcclResult ReduceScatterHalvingDoubling::RunSourceReducer(const LINK &link, const Slice &txSlice)
 {
-    HcclResult ret = link->RxAck(stream_);
+    HcclResult ret;
+    {
+        TaskSemanticEventScope eventScope("rx_ack_start", "link_rx_ack");
+        ret = link->RxAck(stream_);
+    }
     CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[Run][SourceReducer]txSlice.size[%llu] rx ack run failed",
         txSlice.size), ret);
 
@@ -157,6 +162,9 @@ HcclResult ReduceScatterHalvingDoubling::RunAsync(const u32 rank, const u32 rank
     // 仅一个rank, 则直接input拷贝到output
     if (rankSize == 1) {
         if (inputMem_ != outputMem_) {
+            TaskSemanticScope location(MakeTaskSemanticTraceInfo(
+                "reduce_scatter", 0, rank, rankSize, rank, "copy_start", "hccl_local_copy",
+                INVALID_VALUE_RANKID, "rhd", rank));
             ret = HcclD2DMemcpyAsync(dispatcher_, outputMem_, inputMem_, stream_);
         }
         return ret;
@@ -196,22 +204,35 @@ HcclResult ReduceScatterHalvingDoubling::RunReduceScatter(const u32 rank, const 
                                                           const std::vector<LINK> &links)
 {
     HcclResult ret = HCCL_SUCCESS;
+    const u32 rankSize = static_cast<u32>(slices_.size());
 
     for (u32 step = 0; step < stepNum; step++) {
         // reduce-scatter操作, peer_rank_bitmask从高往低循环
         u32 peerRankBitmask = 1 << (stepNum - step - 1);
         u32 peerRank = rank ^ peerRankBitmask;
+        const u32 txSliceIndex = peerRank & ~(peerRankBitmask - 1);
+        const u32 rxSliceIndex = rank & ~(peerRankBitmask - 1);
 
         CHK_SMART_PTR_NULL(links[peerRank]);
 
-        ret = links[peerRank]->TxAck(stream_);
+        {
+            TaskSemanticScope location(MakeTaskSemanticTraceInfo(
+                "reduce_scatter", step, rank, rankSize, rxSliceIndex, "tx_ack_start", "link_tx_ack",
+                links[peerRank]->GetRemoteRank(), "rhd", rank));
+            ret = links[peerRank]->TxAck(stream_);
+        }
         CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[Run][ReduceScatter]rank[%u] tx ack to peerrank[%u] in step[%u] "\
             "run failed", rank, peerRank, step), ret);
 
         HCCL_DEBUG("rank[%u] send to peerrank[%u] in step[%u], silce.offset[%llu], slice.size[%llu]", \
                    rank, peerRank, step, txSlices_[step].offset, txSlices_[step].size);
         // 本rank作为reducer的发送侧的动作
-        ret = RunSourceReducer(links[peerRank], txSlices_[step]);
+        {
+            TaskSemanticScope location(MakeTaskSemanticTraceInfo(
+                "reduce_scatter", step, rank, rankSize, txSliceIndex, nullptr, nullptr,
+                links[peerRank]->GetRemoteRank(), "rhd", rank));
+            ret = RunSourceReducer(links[peerRank], txSlices_[step]);
+        }
         CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[Run][ReduceScatter]rank[%u] to peerrank[%u] reducer_src_run "\
             "failed", rank, peerRank), ret);
 
@@ -222,7 +243,12 @@ HcclResult ReduceScatterHalvingDoubling::RunReduceScatter(const u32 rank, const 
         HCCL_DEBUG("rank[%u] Reduce from peerrank[%u] in step[%u], silce.offset[%llu], slice.size[%llu]", \
                    rank, peerRank, step, rxSlices_[step].offset, rxSlices_[step].size);
 
-        ret = RunDestRducer(links[peerRank], dispatcher, rxSlices_[step], reduceDst);
+        {
+            TaskSemanticScope location(MakeTaskSemanticTraceInfo(
+                "reduce_scatter", step, rank, rankSize, rxSliceIndex, nullptr, nullptr,
+                links[peerRank]->GetRemoteRank(), "rhd", rank));
+            ret = RunDestRducer(links[peerRank], dispatcher, rxSlices_[step], reduceDst);
+        }
         CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[Run][ReduceScatter]rank[%u] to peerrank[%u] reducer_dst_run "\
             "failed", rank, peerRank), ret);
         ret = links[peerRank]->RxWaitDone(stream_);
@@ -233,7 +259,12 @@ HcclResult ReduceScatterHalvingDoubling::RunReduceScatter(const u32 rank, const 
 
     DeviceMem reduceSrcMem = inputMem_.range(rxSlices_[stepNum-1].offset, rxSlices_[stepNum-1].size);
     DeviceMem reduceDstMem = outputMem_.range(rxSlices_[stepNum-1].offset, rxSlices_[stepNum-1].size);
-    ret = HcclD2DMemcpyAsync(dispatcher_, reduceDstMem, reduceSrcMem, stream_);
+    {
+        TaskSemanticScope location(MakeTaskSemanticTraceInfo(
+            "reduce_scatter", stepNum - 1, rank, rankSize, rank, "copy_start", "hccl_local_copy",
+            INVALID_VALUE_RANKID, "rhd", rank));
+        ret = HcclD2DMemcpyAsync(dispatcher_, reduceDstMem, reduceSrcMem, stream_);
+    }
     CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[Run][ReduceScatter]HcclD2DMemcpyAsync failed"), ret);
 
     return ret;

@@ -10,6 +10,7 @@
 
 #include "all_gather_halving_doubling.h"
 #include "alg_template_register.h"
+#include "task_semantic_scope.h"
 
 namespace hccl {
 AllGatherHalvingDoubling::AllGatherHalvingDoubling(const HcclDispatcher dispatcher)
@@ -90,7 +91,10 @@ HcclResult AllGatherHalvingDoubling::Rx(const LINK &link, const Slice &rxSlice)
         rxMem.ptr(), rxSlice.size, stream_);
     CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[AllGatherHalvingDoubling][Rx]rank[%u] rx_async with rxMem[%p] Failed",
         interRank_, rxMem.ptr()), ret);
-    ret = link->DataReceivedAck(stream_);
+    {
+        TaskSemanticEventScope eventScope("data_received_ack_start", "link_data_received_ack");
+        ret = link->DataReceivedAck(stream_);
+    }
     CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[AllGatherHalvingDoubling][Rx]rank[%u] data_received_ack Failed",
         interRank_), ret);
     return HCCL_SUCCESS;
@@ -99,7 +103,11 @@ HcclResult AllGatherHalvingDoubling::Rx(const LINK &link, const Slice &rxSlice)
 HcclResult AllGatherHalvingDoubling::Tx(const LINK &link, const Slice &txSlice)
 {
     // 目前不考虑Halving-Doubling算法引入inlne-reduce
-    HcclResult ret = link->RxAck(stream_);
+    HcclResult ret;
+    {
+        TaskSemanticEventScope eventScope("rx_ack_start", "link_rx_ack");
+        ret = link->RxAck(stream_);
+    }
     CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[AllGatherHalvingDoubling][Tx]rank[%u] txSlice.size[%llu]Link rx_ack "\
         "Failed", interRank_, txSlice.size), ret);
     DeviceMem txMem = inputMem_.range(txSlice.offset, txSlice.size);
@@ -127,6 +135,9 @@ HcclResult AllGatherHalvingDoubling::RunAsync(const u32 rank, const u32 rankSize
     // 仅一个rank, 则直接input拷贝到output
     if (rankSize == 1) {
         if (inputMem_ != outputMem_) {
+            TaskSemanticScope location(MakeTaskSemanticTraceInfo(
+                "allgather", 0, rank, rankSize, rank, "copy_start", "hccl_local_copy",
+                INVALID_VALUE_RANKID, "rhd", rank));
             ret = HcclD2DMemcpyAsync(dispatcher_, outputMem_, inputMem_, stream_);
         }
 
@@ -169,22 +180,40 @@ HcclResult AllGatherHalvingDoubling::RunAllGather(u32 rank, u32 stepNum,
         // all-gather操作, peer_rank_bitmask从低往高循环
         u32 peerRankBitmask = (1 << step);
         u32 peerRank = rank ^ peerRankBitmask;
+        const u32 txSliceIndex = rank & ~(peerRankBitmask - 1);
+        const u32 rxSliceIndex = peerRank & ~(peerRankBitmask - 1);
         CHK_SMART_PTR_NULL(links[peerRank]);
 
-        ret = links[peerRank]->TxAck(stream_);
+        {
+            TaskSemanticScope location(MakeTaskSemanticTraceInfo(
+                "allgather", step, rank, interRankSize_, rxSliceIndex, "tx_ack_start", "link_tx_ack",
+                links[peerRank]->GetRemoteRank(), "rhd", rank));
+            ret = links[peerRank]->TxAck(stream_);
+        }
         CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[Run][AllGather]rank[%u] step[%u] tx ack to dstrank[%u] Failed", \
             rank, step, peerRank), ret);
 
         // 本rank的发送侧的动作
         HCCL_DEBUG("Rank[%u] send to PeerRank[%u] in Round[%u], silce.offset[%llu], slice.size[%llu]", \
             rank, peerRank, step, txSlices_[step].offset, txSlices_[step].size);
-        ret = Tx(links[peerRank], txSlices_[step]);
+        // These exchanges may produce both payload and control tasks.
+        {
+            TaskSemanticScope location(MakeTaskSemanticTraceInfo(
+                "allgather", step, rank, interRankSize_, txSliceIndex, "tx_exchange_start", "link_tx_exchange",
+                links[peerRank]->GetRemoteRank(), "rhd", rank));
+            ret = Tx(links[peerRank], txSlices_[step]);
+        }
         CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[Run][AllGather]Rank[%u] end to PeerRank[%u] run tx failed ", \
             rank, peerRank), ret);
         HCCL_DEBUG("Rank[%u]receive from PeerRank[%u] in Round[%u], silce.offset[%llu], slice.size[%llu]", \
                    rank, peerRank, step, rxSlices_[step].offset, rxSlices_[step].size);
         // 本rank的接收侧的动作
-        ret = Rx(links[peerRank], rxSlices_[step]);
+        {
+            TaskSemanticScope location(MakeTaskSemanticTraceInfo(
+                "allgather", step, rank, interRankSize_, rxSliceIndex, "rx_exchange_start", "link_rx_exchange",
+                links[peerRank]->GetRemoteRank(), "rhd", rank));
+            ret = Rx(links[peerRank], rxSlices_[step]);
+        }
         CHK_PRT_RET(ret != HCCL_SUCCESS, HCCL_ERROR("[Run][AllGather]Rank[%u] rx from PeerRank[%u] failed", \
             rank, peerRank), ret);
         ret = links[peerRank]->RxWaitDone(stream_);

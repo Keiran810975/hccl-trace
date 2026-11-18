@@ -43,6 +43,11 @@ python3 -c 'import torch, torch_npu; print(torch.__version__, torch_npu.__versio
   另传 `--profiler-devices` 指明对应的 **profiler device ID**。以实际 msprof 设备元数据核对，
   不能用全局 Rank、逻辑序号或物理卡号猜。
 
+RHD（Recursive Halving-Doubling）AllReduce 走配套 HCOMM 模板时，任务可以记录为
+`algorithm=rhd`，分别标出 ReduceScatter、AllGather 的递归 Step，以及非 2 次幂 Rank 的
+折叠和回传阶段。采集指令不变，实际选路仍由 HCCL 决定。复合传输调用的标签只表示所属阶段，
+不代表逐笔 RDMA 硬件传输时长。
+
 ## 2. 配置报告目录
 
 根目录的 [config.yaml](config.yaml) 可直接编辑：
