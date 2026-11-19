@@ -190,6 +190,22 @@ hccl-diag analyze "runs/$RUN_ID"
 `capture.json` 的对应 `nodes` 条目中用 `clock_probe_files` 声明相对路径；`join` 会保留。
 分析时加 `--require-clock-alignment` 可要求校时通过，否则只使用有依据的时钟范围，不推算网卡真实传输时间。
 
+按次取数试用：知道目标调用在 msprof 中的精确通信组、调用名和 profiler device ID 后，可以运行：
+
+```bash
+hccl-diag slice-collop /path/to/PROF_XXX --phase s2-internal \
+  --device-id 1 --group-name "$DB_GROUP_NAME" --op-name "$DB_OP_NAME" > s2-internal.json
+```
+
+对原始 `PROF_*` 目录，命令默认等 30 秒，然后复制原始文件、导出副本中的 DB，再只返回目标调用。
+S1 用 `s1-upstream`，另取设备开工前 1 秒；S2 首次分析后可再运行 `s2-downstream`，
+默认再等 30 秒，另取该设备上通信完成后 30 秒内重叠的 Task。等待和窗口长度可分别覆盖。
+输入已封存的 `msprof_*.db` 则默认立即提取，不重新导出。多 Rank 按各自的 profiler device ID 取数。
+原始文件复制上限为 192 MiB；复制期间检测到源变化时拒绝导出。本命令不修改原始采集。
+
+这是手动取数入口，不自动订阅 Slow 告警，不做语义关联或溯源，也不把导出成功认作数据齐全。
+没有目标或没有 Task 时以 JSON 状态区分；`coverage_verified` 为 false 代表覆盖未认证。
+
 ## 6. 自动生成慢化轮的详细报告
 
 `hccl-diag online RUN_ID` 默认开启后台报告。Hang/Slow 仍立即写入 `events.jsonl`；

@@ -209,10 +209,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, epilog="Exit codes: 0 command completed (capture alone is not diagnosis or numerical validation); 2 input/capture/binding; 3 association gate; 4 graph/diagnosis; 5 publication. Inputs are never deleted.")
     sub = parser.add_subparsers(dest="command", required=True)
     from .capture_command import add_commands, dispatch
-    from . import clock_probe, online_service
+    from . import clock_probe, collop_slice, online_service
     add_commands(sub)
     online_service.add_arguments(sub.add_parser("online", help="start the online collector for RUN_ID"))
     clock_probe.add_arguments(sub.add_parser("clock-probe", help="collect CPU clock evidence for multi-node diagnosis"))
+    collop_slice.add_arguments(sub.add_parser("slice-collop", help="read one collective and its local context from an msprof snapshot"))
     analyze = sub.add_parser("analyze", aliases=['diag'], help="automatically diagnose single/multi-node capture")
     analyze.add_argument("capture", type=Path)
     analyze.add_argument("--baseline", type=Path)
@@ -239,6 +240,8 @@ def main(argv=None):
         if args.command == "clock-probe":
             clock_probe.run(args)
             return 0
+        if args.command == "slice-collop":
+            return collop_slice.run(args)
         if args.command not in {'analyze', 'diag'}:
             return dispatch(args)
         args.mode = 'baseline' if args.baseline else 'rolling'
