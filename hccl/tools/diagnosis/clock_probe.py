@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 import socket
 import socketserver
@@ -77,30 +78,38 @@ class ProbeServer:
 
 
 def probe_batch(address, port, capture_id, node_id, reference_node, phase, *, samples=16, timeout=30):
-    if phase not in {"before", "after"} or not 4 <= samples <= 256 or timeout <= 0:
+    if phase not in {"before", "after"} or not 4 <= samples <= 256 or not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("invalid clock probe configuration")
     deadline = time.monotonic() + timeout
+
+    def remaining():
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("clock probe batch deadline exceeded")
+        return left
+
     while True:
+        budget = remaining()
         try:
-            connection = socket.create_connection((address, port), timeout=min(timeout, 5))
+            connection = socket.create_connection((address, port), timeout=min(budget, 5))
             break
         except OSError:
-            if time.monotonic() >= deadline:
-                raise
-            time.sleep(0.1)
+            time.sleep(min(remaining(), 0.1))
     records = []
     with connection:
-        connection.settimeout(min(timeout, 5))
         with connection.makefile("rwb") as stream:
             for sequence in range(samples + (phase == "after")):
                 request = dict(capture_id=capture_id, node_id=node_id, sequence=sequence,
                                phase="after_done" if sequence == samples else phase)
                 encoded = (json.dumps(request) + "\n").encode()
+                connection.settimeout(min(remaining(), 5))
                 start = raw_ns()
                 stream.write(encoded)
                 stream.flush()
+                connection.settimeout(min(remaining(), 5))
                 line = stream.readline(4097)
                 stop = raw_ns()
+                remaining()
                 if len(line) > 4096 or not line:
                     raise ValueError("invalid clock probe response")
                 reply = json.loads(line)
@@ -127,6 +136,8 @@ def add_arguments(parser):
 
 
 def run(args):
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        raise ValueError("clock probe timeout must be positive and finite")
     if args.output.exists():
         raise FileExistsError("refusing to overwrite clock evidence")
     data = dict(schema_version=1, clock="CLOCK_MONOTONIC_RAW", capture_id=args.capture_id,
@@ -134,7 +145,10 @@ def run(args):
     if args.mode == "serve":
         if args.node_id != args.reference_node:
             raise ValueError("server must be the reference node")
-        with ProbeServer(args.address, args.port, args.capture_id, args.node_id, args.peers.split(",")) as server:
+        peers = args.peers.split(",")
+        if not all(peers) or len(set(peers)) != len(peers) or args.node_id in peers:
+            raise ValueError("provide distinct non-reference peers")
+        with ProbeServer(args.address, args.port, args.capture_id, args.node_id, peers) as server:
             data["before_raw_ns"] = raw_ns()
             print("Clock probe server ready", flush=True)
             if not server.wait_for_after(args.timeout):

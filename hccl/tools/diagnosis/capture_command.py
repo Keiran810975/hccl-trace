@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import hashlib
 import os
 from pathlib import Path
@@ -11,10 +12,12 @@ import signal
 import socket
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
 import threading
 
 from .capture_discovery import write_json, read_json
 from .multi_node_trace import _name
+from .parse_msprof_db import _device_ids, _readonly_connection, discover_db_files
 
 
 def _complete_sdk_logs(directory):
@@ -31,6 +34,42 @@ def _complete_sdk_logs(directory):
             raise ValueError('SDK rank needs explicit collective observations; iteration markers alone are not sufficient')
         logs.append((path, runtime))
     return logs
+
+
+def _node_capture_logs(calls_dir, msprof_dir):
+    logs = _complete_sdk_logs(calls_dir)
+    ranks = {runtime['user_rank'] for _, runtime in logs}
+    devices = {runtime['device_id'] for _, runtime in logs}
+    if len(ranks) != len(logs) or len(devices) != len(logs):
+        raise ValueError('node capture needs one SDK runtime per Rank and profiler device')
+    profiled = set()
+    for path in discover_db_files(msprof_dir):
+        with closing(_readonly_connection(str(path))) as db:
+            ids = _device_ids(db)
+        if len(ids) != 1 or profiled.intersection(ids):
+            raise ValueError('node capture needs one consolidated DB per profiler device')
+        profiled.update(ids)
+    if profiled != devices:
+        raise ValueError('consolidated DB devices differ from complete SDK runtimes')
+    return logs
+
+
+def _digest(path):
+    h = hashlib.sha256()
+    with path.open('rb') as stream:
+        for block in iter(lambda: stream.read(8 * 1024**2), b''):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _capture_files(node):
+    files = set()
+    for path in node.rglob('*'):
+        if path.is_symlink() or not (path.is_file() or path.is_dir()):
+            raise ValueError('capture assembly accepts only ordinary files/directories, not symlinks')
+        if path.is_file():
+            files.add(path.relative_to(node))
+    return files
 
 
 def add_commands(sub):
@@ -104,9 +143,7 @@ def capture(output, application, *, node=None, run_id=None):
                 raise
         if code:
             raise ValueError('training/profiler exited with code %d; raw data retained' % code)
-        if not any((target / 'msprof').rglob('msprof_*.db')):
-            raise ValueError('missing consolidated DB or Trace SDK logs; add training observations and keep the raw capture')
-        logs = _complete_sdk_logs(target/'calls')
+        logs = _node_capture_logs(target/'calls', target/'msprof')
         for _, runtime in logs:
             if runtime['run_id'] != run_id or runtime['node_id'] != node:
                 raise ValueError('SDK runtime identity disagrees with this node capture')
@@ -125,6 +162,7 @@ def join(inputs, output):
     if output.exists() or output.is_symlink():
         raise ValueError('join output must be a fresh directory')
     sources, ids, descriptions, ranks, operations, auxiliary = {}, set(), {}, {}, {}, set()
+    world_sizes, clock_limits = set(), set()
     for source in inputs:
         source = Path(source)
         if source.is_symlink() or (source/'nodes').is_symlink():
@@ -138,6 +176,11 @@ def join(inputs, output):
         metadata = read_json(metadata_path) if metadata_path.is_file() else {}
         if not isinstance(metadata, dict):
             raise ValueError('capture.json must contain an object')
+        if 'clock_alignment_max_error_ns' in metadata:
+            clock_limit = metadata['clock_alignment_max_error_ns']
+            if type(clock_limit) is not int or clock_limit <= 0:
+                raise ValueError('clock error tolerance must be a positive integer')
+            clock_limits.add(clock_limit)
         nodes = metadata.get('nodes', [])
         if not isinstance(nodes, list) or any(not isinstance(n, dict) or not isinstance(n.get('node_id'), str) for n in nodes):
             raise ValueError('capture.json nodes must declare unique node identities')
@@ -164,11 +207,9 @@ def join(inputs, output):
             if node.name in sources:
                 raise ValueError('duplicate or invalid node capture')
             _name(node.name)
-            for path in node.rglob('*'):
-                if path.is_symlink() or not (path.is_file() or path.is_dir()):
-                    raise ValueError('capture assembly accepts only ordinary files/directories, not symlinks')
+            expected_files = _capture_files(node)
             description = dict(declarations.get(node.name, dict(node_id=node.name)))
-            for key in ('plog_dir','msprof_db_dir','calls_dir'):
+            for key in ('plog_dir', 'msprof_db_dir', 'calls_dir'):
                 if key in description:
                     if not isinstance(description[key], str) or not description[key]:
                         raise ValueError('declared node paths must be nonempty strings: ' + key)
@@ -176,61 +217,71 @@ def join(inputs, output):
                     original = original if original.is_absolute() else source/original
                     relative = original.resolve().relative_to(node.resolve())
                     description[key] = str(Path('nodes')/node.name/relative)
+            state_path = node/'collection.json'
+            state = read_json(state_path) if state_path.is_file() else None
+            if state_path.exists() and (not isinstance(state, dict) or state.get('node_id') != node.name
+                    or state.get('status') != 'captured_not_yet_diagnosed'):
+                raise ValueError('join requires a successfully finished node capture: ' + node.name)
             calls_dir = source/description.get('calls_dir', str(Path('nodes')/node.name/'calls'))
-            logs = _complete_sdk_logs(calls_dir)
+            msprof_dir = source/description.get('msprof_db_dir', str(Path('nodes')/node.name/'msprof'))
+            logs = _node_capture_logs(calls_dir, msprof_dir)
             for _, runtime in logs:
                 if runtime['node_id'] != node.name:
                     raise ValueError('node directory differs from actual SDK node identity')
                 ids.add(runtime['run_id'])
-                if metadata.get('run_id', runtime['run_id']) != runtime['run_id']:
+                if (metadata.get('run_id', runtime['run_id']) != runtime['run_id']
+                        or (state is not None and state.get('run_id') != runtime['run_id'])):
                     raise ValueError('capture metadata conflicts with SDK run identity')
+                if 'world_size' in runtime:
+                    world_sizes.add(runtime['world_size'])
                 rank = {k:runtime[k] for k in ('node_id','user_rank','device_id')}
                 if runtime['user_rank'] in ranks:
                     raise ValueError('global rank occurs on more than one joined runtime')
                 ranks[runtime['user_rank']] = rank
-            sources[node.name] = node
-            if 'clock_probe_files' in description:
-                if (not isinstance(description['clock_probe_files'], list)
-                        or any(not isinstance(p, str) or not p for p in description['clock_probe_files'])):
-                    raise ValueError('clock_probe_files must be a list of node-local paths')
-                description['clock_probe_files'] = [str(Path('nodes')/node.name/(source/p).resolve().relative_to(node.resolve()))
-                                                    for p in description['clock_probe_files']]
+            sources[node.name] = node, expected_files
+            for key in ('clock_probe_files', 'clock_validation_files'):
+                if key not in description:
+                    continue
+                if (not isinstance(description[key], list)
+                        or any(not isinstance(p, str) or not p for p in description[key])):
+                    raise ValueError(key + ' must be a list of node-local paths')
+                description[key] = [str(Path('nodes')/node.name/(source/p).resolve().relative_to(node.resolve()))
+                                    for p in description[key]]
             descriptions[node.name] = description
     if len(ids) != 1 or not sources:
         raise ValueError('all node captures must belong to one shared run_id')
-    output.mkdir(parents=True)
+    world_size = next(iter(world_sizes), None)
+    if len(world_sizes) > 1 or (world_size is not None and (len(ranks) != world_size or max(ranks) >= world_size)):
+        raise ValueError('joined Rank coverage differs from SDK WORLD_SIZE')
+    if len(clock_limits) > 1:
+        raise ValueError('joined captures disagree on clock error tolerance')
+    output.parent.mkdir(parents=True, exist_ok=True)
     verified = {}
-    try:
-        for name, source in sources.items():
-            for path in source.rglob('*'):
-                if path.is_symlink() or not (path.is_file() or path.is_dir()):
-                    raise ValueError('capture assembly accepts only ordinary files/directories')
-            target = output / 'nodes' / name
-            shutil.copytree(source, target)
-            for path in source.rglob('*'):
-                if path.is_file():
-                    relative = path.relative_to(source)
-                    def digest(file):
-                        h = hashlib.sha256()
-                        with file.open('rb') as stream:
-                            for block in iter(lambda: stream.read(8 * 1024**2), b''):
-                                h.update(block)
-                        return h.hexdigest()
-                    value = digest(path)
-                    if value != digest(target / relative):
-                        raise ValueError('capture copy hash mismatch')
-                    verified[str(Path('nodes') / name / relative)] = value
+    with TemporaryDirectory(prefix='.hccl-join-', dir=output.parent) as temporary:
+        stage = Path(temporary) / 'capture'
+        for name, (source, expected) in sources.items():
+            target = stage / 'nodes' / name
+            shutil.copytree(source, target, symlinks=True)
+            if _capture_files(source) != expected or _capture_files(target) != expected:
+                raise ValueError('capture file inventory changed during assembly')
+            for relative in sorted(expected):
+                value = _digest(source / relative)
+                if value != _digest(target / relative):
+                    raise ValueError('capture copy hash mismatch')
+                verified[str(Path('nodes') / name / relative)] = value
         run_id = ids.pop()
         metadata = dict(run_id=run_id, nodes=list(descriptions.values()), ranks=list(ranks.values()), operations=list(operations.values()))
         if auxiliary:
             metadata['sdk_auxiliary_operation_types'] = sorted(auxiliary)
-        write_json(output/'capture.json', metadata)
+        if clock_limits:
+            metadata['clock_alignment_max_error_ns'] = clock_limits.pop()
+        write_json(stage/'capture.json', metadata)
         result = dict(status='assembled', run_id=run_id, node_count=len(sources), sha256=verified)
-        write_json(output / 'assembly.json', result)
-        return result
-    except BaseException as error:
-        write_json(output / 'assembly-error.json', dict(error=str(error), inputs_unchanged=True))
-        raise
+        write_json(stage / 'assembly.json', result)
+        if output.exists() or output.is_symlink():
+            raise ValueError('join output must remain a fresh directory')
+        stage.rename(output)
+    return result
 
 
 def dispatch(args):

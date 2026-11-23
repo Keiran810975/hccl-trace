@@ -8,6 +8,7 @@ from contextlib import closing
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 
 from .parse_msprof_db import _readonly_connection, _device_ids, discover_db_files
 
@@ -25,17 +26,23 @@ class DeviceClock:
     valid_stop_ns: int
     estimated_error_ns: int
 
-    def map_ns(self, timestamp_ns):
+    def raw_ns(self, timestamp_ns):
         raw = timestamp_ns - self.profiler_to_raw_offset_ns
         if not self.valid_start_ns <= raw <= self.valid_stop_ns:
             raise ValueError("timestamp outside clock probe coverage")
+        return raw
+
+    def map_ns(self, timestamp_ns):
+        raw = self.raw_ns(timestamp_ns)
         return self.reference_anchor_ns + round(Fraction(
             (raw - self.local_anchor_ns) * self.rate_numerator, self.rate_denominator))
 
 
 def _integer(data, key):
     value = data[key]
-    if isinstance(value, bool) or not str(value).isdigit():
+    if type(value) is not int and (not isinstance(value, str) or not value.isascii() or not value.isdecimal()):
+        raise ValueError("invalid integer clock field: " + key)
+    if int(value) < 0:
         raise ValueError("invalid integer clock field: " + key)
     return int(value)
 
@@ -44,14 +51,16 @@ def _anchor(samples):
     if not 4 <= len(samples) <= 256:
         raise ValueError("clock alignment requires 4..256 independent samples per batch")
     candidates = []
+    previous_local = previous_reference = -1
     for sample in samples:
         a, b, c, d = (_integer(sample, key) for key in
                        ("local_send_ns", "reference_recv_ns", "reference_send_ns", "local_recv_ns"))
         width = (d - a) - (c - b)
-        if d < a or c < b or width < 0:
+        if d <= a or c < b or width < 0 or a < previous_local or b < previous_reference:
             raise ValueError("incompatible four-timestamp clock sample")
-        candidates.append((width, (a + d) // 2, (b + c) // 2, a, d))
-    width, local, reference, _, _ = min(candidates)
+        candidates.append((width, (a + d) // 2, (b + c) // 2))
+        previous_local, previous_reference = d, c
+    width, local, reference = min(candidates)
     return local, reference, (width + 1) // 2
 
 
@@ -65,20 +74,23 @@ def _validation_samples(manifest, node):
     declared = {(r["user_rank"], r["device_id"]) for r in manifest.get("ranks", []) if r["node_id"] == node["node_id"]}
     for filename in files:
         path = Path(filename)
-        records = [json.loads(line) for line in path.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
+        encoded = path.read_bytes()
+        records = [json.loads(line) for line in encoded.decode("utf-8-sig").splitlines() if line.strip()]
         if not records:
             raise ValueError("empty public clock validation file")
         header = records[0]
-        if (header.get("event") != "runtime" or header.get("schema_version") != 1
+        if (not isinstance(header, dict) or header.get("event") != "runtime" or header.get("schema_version") != 1
                 or header.get("run_id") != manifest["run_id"] or header.get("node_id") != node["node_id"]
                 or (header.get("user_rank"), header.get("device_id")) not in declared):
             raise ValueError("public clock validation identity mismatch")
         for record in records:
+            if not isinstance(record, dict):
+                raise ValueError("invalid public clock validation record")
             for name in ("before", "after", "clocks"):
                 value = record.get(name)
                 if isinstance(value, dict) and "unix_ns" in value and "raw_ns" in value:
                     samples[header["device_id"]].append((_integer(value, "unix_ns"), _integer(value, "raw_ns")))
-        evidence.append(dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
+        evidence.append(dict(path=str(path), sha256=hashlib.sha256(encoded).hexdigest()))
     return samples, evidence
 
 
@@ -120,8 +132,9 @@ def build(manifest, *, max_error_ns=1000000):
         combined = {}
         for filename in node["clock_probe_files"]:
             path = Path(filename)
-            data = json.loads(path.read_text(encoding="utf-8-sig"))
-            if (data.get("schema_version") != 1 or data.get("clock") != "CLOCK_MONOTONIC_RAW"
+            encoded = path.read_bytes()
+            data = json.loads(encoded.decode("utf-8-sig"))
+            if (not isinstance(data, dict) or data.get("schema_version") != 1 or data.get("clock") != "CLOCK_MONOTONIC_RAW"
                     or data.get("node_id") != node["node_id"]):
                 raise ValueError("clock evidence identity/schema mismatch")
             capture_ids.add(data["capture_id"])
@@ -131,7 +144,7 @@ def build(manifest, *, max_error_ns=1000000):
                     if key in combined:
                         raise ValueError("duplicate clock probe phase")
                     combined[key] = data[key]
-            sources.append(dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
+            sources.append(dict(path=str(path), sha256=hashlib.sha256(encoded).hexdigest()))
         probes[node["node_id"]] = combined
     if len(capture_ids) != 1 or len(references) != 1 or not next(iter(capture_ids)):
         raise ValueError("clock evidence mixes capture sessions/reference nodes")
@@ -179,7 +192,6 @@ def build(manifest, *, max_error_ns=1000000):
             raw_start, raw_stop = _integer(start, "clockMonotonicRaw"), _integer(stop, "clockMonotonicRaw")
             if tuple(session[0]) != (epoch_start, epoch_stop) or not first <= raw_start < raw_stop <= last:
                 raise ValueError("clock probes do not bracket this actual profiler session")
-            offset = epoch_start - raw_start
             offset, conversion_error, audit = profiler_conversion(start, stop, validation.get(devices[0], []))
             calibrations.append(dict(node_id=node["node_id"], device_id=devices[0], **audit))
             error = network_error + conversion_error
@@ -189,6 +201,8 @@ def build(manifest, *, max_error_ns=1000000):
                 x0, y0, rate.numerator, rate.denominator, first, last, error))
             for path in (start_path, stop_path):
                 sources.append(dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
+    if not models:
+        raise ValueError("clock evidence did not produce any device clock models")
     return dict(schema_version=3, status="network_probe_estimate", capture_id=next(iter(capture_ids)),
                 reference_node=manifest["run_id"] + "/" + reference_node,
                 estimated_error_ns=max(model.estimated_error_ns for model in models),
@@ -196,7 +210,7 @@ def build(manifest, *, max_error_ns=1000000):
                 limits=["Affine interpolation between before/after raw-clock probes; not hardware PTP synchronization.",
                         "CANN DB event time is monotonic raw plus the fixed start_info offset. Realtime end_info/SDK drift is audited, not applied to DB timestamps.",
                         "Error estimates combine network-delay bounds and start metadata quantization; unsampled network nonlinearity and device/Host synchronization error may remain. This is not a hardware-verified error bound.",
-                        "Mapping supports display and estimated cross-node Host/Wait overlap checks; raw timestamps, task durations, graph edges and local critical paths are unchanged."])
+                        "Mapping supports display and estimated cross-node Host/Wait overlap checks; raw timestamps, task durations and graph edges are unchanged."])
 
 
 def models_from_report(report):
@@ -232,16 +246,16 @@ def local_profiler_models(manifest):
             start_path, stop_path = path.parent / "host/start_info", path.parent / "host/end_info"
             if not start_path.is_file() or not stop_path.is_file():
                 continue
-            with closing(_readonly_connection(str(path))) as db:
-                devices = _device_ids(db)
-                sessions = db.execute("SELECT startTimeNs,endTimeNs FROM SESSION_TIME_INFO").fetchall()
-            if len(devices) != 1 or len(sessions) != 1:
-                continue
-            start, stop = (json.loads(f.read_text()) for f in (start_path, stop_path))
             try:
+                with closing(_readonly_connection(str(path))) as db:
+                    devices = _device_ids(db)
+                    sessions = db.execute("SELECT startTimeNs,endTimeNs FROM SESSION_TIME_INFO").fetchall()
+                if len(devices) != 1 or len(sessions) != 1:
+                    continue
+                start, stop = (json.loads(f.read_text()) for f in (start_path, stop_path))
                 offset, error, _ = profiler_conversion(start, stop, [])
                 first, last = (_integer(row, "clockMonotonicRaw") for row in (start, stop))
-            except (KeyError, ValueError):
+            except (OSError, KeyError, ValueError, sqlite3.Error):
                 continue
             if tuple(sessions[0]) != (first + offset, _integer(stop, "collectionTimeEnd") * 1000):
                 continue

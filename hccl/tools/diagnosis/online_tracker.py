@@ -423,7 +423,7 @@ class OnlineTracker:
                        sample_count=len(values), samples=[dict(op_counter=h.counter, stage=h.stage,
                            iteration=h.iteration, max_ns=h.maximum) for h in eligible], R=delta/base, P=p)
         preparation = {r: (e["preparation_definition"], e["preparation_ns"]) for r, e in op.entries.items()}
-        if maximum <= 3*base:
+        if maximum <= 2*base:
             self._count("NORMAL")
             self._measurement(key, op, "NORMAL", slow=False, baseline_ready=True, **metrics)
             history.append(Sample(key[2], stage, iteration, maximum, preparation,

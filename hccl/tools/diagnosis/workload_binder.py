@@ -56,6 +56,9 @@ def _read_observations(path):
                             or any(not isinstance(record.get(k), str) or not record[k] for k in ('run_id', 'node_id'))
                             or any(type(record.get(k)) is not int or record[k] < 0 for k in ('user_rank', 'device_id'))):
                         raise ValueError('SDK log requires explicit runtime identity')
+                    if 'world_size' in record and (type(record['world_size']) is not int
+                            or record['world_size'] <= record['user_rank']):
+                        raise ValueError('invalid SDK world_size')
                     header = record
                     continue
                 if ended:
@@ -89,6 +92,8 @@ def _read_observations(path):
                         raise ValueError('invalid, failed or overlapping SDK iteration markers')
                     iterations.append(record)
                 elif record['event'] == 'capture_end':
+                    if record.get('status') == 'failed_completion':
+                        raise ValueError('SDK capture observed a failed collective completion')
                     if record.get('pending_sequences') != [] or pending:
                         raise ValueError('SDK capture is incomplete or missing a user-controlled completion boundary')
                     ended = True
@@ -250,8 +255,10 @@ def _certain_pairs(candidates):
             if len(choices) == 1 and degree[next(iter(choices))] == 1}
 
 
-def bind_capture(capture, work, *, mode, allow_partial=False, target_iteration=None):
+def bind_capture(capture, work, *, mode, allow_partial=False, target_iteration=None, target_locations=None):
     work = Path(work)
+    if target_locations is not None and target_iteration is None:
+        raise ValueError("target locations require a target iteration")
     manifest = json.loads(json.dumps(capture.manifest))
     if not capture.call_logs:
         if target_iteration is not None:
@@ -406,7 +413,8 @@ def bind_capture(capture, work, *, mode, allow_partial=False, target_iteration=N
     window = None
     if target_iteration is not None:
         from .iteration_window import from_observations
-        window = from_observations(target_iteration, manifest, observations, inventory, coordinates)
+        window = from_observations(target_iteration, manifest, observations, inventory, coordinates,
+                                   locations=target_locations)
         coordinates = [c for c in coordinates if c["operation_scope"] in window.scopes]
         preparations = [p for p in preparations if p["operation_scope"] in window.scopes]
     manifest["operations"] = operations

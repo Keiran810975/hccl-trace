@@ -9,7 +9,7 @@ from . import compare_diagnosis as comparison
 from .dependency_model import stable_id
 from .task_classifier import classify_task
 from .clock_alignment import models_from_report
-from .dependency_timing import ORDER, WAIT, edge_observation
+from .dependency_timing import ORDER, WAIT, cross_node_observation
 from . import wait_arrival
 
 
@@ -107,20 +107,33 @@ def trace_blocking_wait(gid, graph, progress, limit):
                 visited_count=len(settled), search_truncated=truncated)
 
 
-def local_release_check(src, dst, clocks, quantization):
+def local_release_check(src, dst, clocks, quantization, local_clocks=None):
     """Compare availability intervals, never rewrite an execution timestamp."""
-    source = clocks.get((src["_node_id"], src["_device_id"]))
-    target = clocks.get((dst["_node_id"], dst["_device_id"]))
-    if source is None or target is None:
-        return None
     keys = ((src["_node_id"], src["_device_id"]), (dst["_node_id"], dst["_device_id"]))
-    if any(key not in quantization for key in keys):
-        return None
-    rs = waits.ns(src, "start") - source.profiler_to_raw_offset_ns
-    re = waits.ns(src, "stop") - source.profiler_to_raw_offset_ns
-    ws = waits.ns(dst, "start") - target.profiler_to_raw_offset_ns
-    we = waits.ns(dst, "stop") - target.profiler_to_raw_offset_ns
-    uncertainty = 0 if keys[0] == keys[1] else sum(quantization[key] for key in keys)
+    producer = [waits.ns(src, side) for side in ("start", "stop")]
+    waiter = [waits.ns(dst, side) for side in ("start", "stop")]
+    if keys[0][0] != keys[1][0]:
+        raise ValueError("local Notify release check cannot compare different nodes")
+    if keys[0] == keys[1]:
+        rs, re = producer
+        ws, we = waiter
+        uncertainty, domain = 0, "same_profiler_device"
+    else:
+        local_clocks = local_clocks or {}
+        if all(key in local_clocks for key in keys):
+            offsets = local_clocks
+            uncertainty = sum(offsets[key].estimated_error_ns for key in keys)
+        elif all(key in clocks and key in quantization for key in keys):
+            offsets = clocks
+            uncertainty = sum(quantization[key] for key in keys)
+        else:
+            return dict(timing_status="missing_same_node_cross_device_clock")
+        try:
+            rs, re = (offsets[keys[0]].raw_ns(ns) for ns in producer)
+            ws, we = (offsets[keys[1]].raw_ns(ns) for ns in waiter)
+        except ValueError:
+            return dict(timing_status="clock_coverage_boundary")
+        domain = "same_node_monotonic_raw"
     if rs - uncertainty > we:
         status = "incompatible_notify_timestamps"
     elif re + uncertainty <= ws:
@@ -129,14 +142,13 @@ def local_release_check(src, dst, clocks, quantization):
         status = "producer_observed_during_wait"
     else:
         status = "producer_release_interval_compatible"
-    return dict(timing_status=status, timing_domain="same_node_monotonic_raw",
-                producer_profiler_interval_ns=[waits.ns(src, "start"), waits.ns(src, "stop")],
-                wait_profiler_interval_ns=[waits.ns(dst, "start"), waits.ns(dst, "stop")],
+    return dict(timing_status=status, timing_domain=domain,
+                producer_profiler_interval_ns=producer, wait_profiler_interval_ns=waiter,
                 producer_interval_ns=[rs, re], wait_interval_ns=[ws, we],
                 metadata_uncertainty_ns=uncertainty, exact_release_time_available=False)
 
 
-def trace_sources(rows, edges, tasks, options, *, alignment=None, graph_validated=False):
+def trace_sources(rows, edges, tasks, options, *, alignment=None, local_clocks=None, graph_validated=False):
     if not graph_validated:
         comparison.validate_comparison_graph(rows, edges)
     nodes = {row["_graph_id"]: row for row in rows}
@@ -157,17 +169,14 @@ def trace_sources(rows, edges, tasks, options, *, alignment=None, graph_validate
         (syncs if sync else orders)[dst].append((edge["src"], edge_id))
     seeds = [t for t in tasks if t["task_kind"] == "notify_wait" and t["duration_slow"]]
     roots, traces = {}, []
-    clocks = models_from_report(alignment) if options.calibrated_release_intervals else {}
     protocol_clocks = models_from_report(alignment)
-    quantization = {}
-    if clocks:
-        for item in alignment.get("profiler_calibrations", []):
-            for key in clocks:
-                if (key[1] == item["device_id"] and key[0] in {
-                        item["node_id"], str(alignment["capture_id"]) + "/" + item["node_id"]}):
-                    value = item.get("metadata_quantization_ns")
-                    if type(value) is int and value >= 0:
-                        quantization[key] = value
+    calibration = {(item["node_id"], item["device_id"]): item.get("metadata_quantization_ns")
+                   for item in (alignment or {}).get("profiler_calibrations", ())}
+    quantization = {key: value for key in protocol_clocks
+                    if type(value := calibration.get((key[0].rsplit("/", 1)[-1], key[1]))) is int and value >= 0}
+    clocks = ({**protocol_clocks, **(local_clocks or {})} if options.calibrated_release_intervals else {})
+    arrival_quantization = dict(quantization)
+    arrival_quantization.update({key: clock.estimated_error_ns for key, clock in (local_clocks or {}).items()})
     origins = wait_arrival.local_origins(rows, clocks) if clocks else {}
     for seed in sorted(seeds, key=lambda t: t["graph_id"]):
         target = seed["graph_id"]
@@ -248,10 +257,7 @@ def trace_sources(rows, edges, tasks, options, *, alignment=None, graph_validate
                             continue
                         remote = src["_node_id"] != row["_node_id"]
                         if remote:
-                            try:
-                                observation = edge_observation(edge_by_id[edge_id], changes[producer], item, protocol_clocks)
-                            except ValueError:
-                                observation = dict(status="cross_node_clock_coverage_boundary")
+                            observation = cross_node_observation(edge_by_id[edge_id], changes[producer], item, protocol_clocks)
                             trace["release_checks"].append(dict(observation, edge_id=edge_id,
                                 wait_graph_id=key, producer_graph_id=producer,
                                 timing_status=observation["status"], dependency_identity_preserved=True))
@@ -262,29 +268,16 @@ def trace_sources(rows, edges, tasks, options, *, alignment=None, graph_validate
                             if mode != "wait_duration" and (item.get("start_late") or item["gap_slow"]):
                                 follow_order(key, path)
                             continue
-                        timing = "rdma_completion_unmeasured" if src.get("profiler_task_kind") == "rdma" else "remote_clock_boundary"
-                        interval = None
-                        if not remote and src.get("profiler_task_kind") == "notify_record":
-                            if options.calibrated_release_intervals:
-                                interval = local_release_check(src, row, clocks, quantization)
-                            if interval is not None:
-                                timing = interval["timing_status"]
-                            elif waits.ns(src, "stop") > waits.ns(row, "stop"):
-                                timing = "incompatible_notify_timestamps"
-                            elif waits.ns(src, "stop") <= waits.ns(row, "start"):
-                                timing = "signal_precedes_wait_start"
-                            else:
-                                timing = "producer_observed_during_wait"
+                        interval = (dict(timing_status="rdma_completion_unmeasured")
+                                    if src.get("profiler_task_kind") == "rdma" else
+                                    local_release_check(src, row, protocol_clocks, quantization, local_clocks))
                         check = dict(wait_graph_id=key, producer_graph_id=producer,
-                                     edge_id=edge_id, timing_status=timing,
-                                     dependency_identity_preserved=True)
-                        if interval is not None:
-                            check.update(interval)
+                                     edge_id=edge_id, dependency_identity_preserved=True, **interval)
                         trace["release_checks"].append(check)
-                        if timing in {"incompatible_notify_timestamps", "signal_precedes_wait_start"}:
-                            boundary(key, path, timing)
-                        else:
+                        if interval["timing_status"] == "producer_observed_during_wait":
                             queue.append((producer, (edge_id,) + path, "completion"))
+                        else:
+                            boundary(key, path, interval["timing_status"])
                 if mode != "wait_duration" and (item.get("start_late") or item["gap_slow"]):
                     follow_order(key, path)
                 elif mode != "wait_duration" and not item["duration_slow"]:
@@ -314,7 +307,7 @@ def trace_sources(rows, edges, tasks, options, *, alignment=None, graph_validate
         trace["visited_count"] = len(seen)
         if len(syncs[target]) == 1 and clocks:
             producer = nodes[syncs[target][0][0]]
-            arrival = wait_arrival.observe(nodes[target], producer, seed, nodes, syncs, clocks, quantization, origins,
+            arrival = wait_arrival.observe(nodes[target], producer, seed, nodes, syncs, clocks, arrival_quantization, origins,
                                            comparisons=changes)
             if arrival is not None:
                 trace["arrival_observation"] = arrival

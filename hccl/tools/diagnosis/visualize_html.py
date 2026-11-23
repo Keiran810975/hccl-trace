@@ -12,6 +12,7 @@ from typing import Dict, List, Tuple
 
 from . import visualize_dependency_graph as dep
 from . import resource_dependency_graph as resource_dep
+from .clock_alignment import models_from_report
 from .dependency_model import stable_id
 
 
@@ -100,7 +101,7 @@ def node_record(row: dict, x: float, y: float, w: float, h: float, fill: str, st
 
 
 def build_execution_dependency_model(rows: List[dict], edges: List[dict],
-                                     operations: List[dict] = (), *, alignment=None) -> dict:
+                                     operations: List[dict] = (), *, alignment=None, local_clocks=None) -> dict:
     rows = list(rows) + list(operations)
     if not rows:
         raise ValueError("no timed profiler executions to render")
@@ -111,28 +112,42 @@ def build_execution_dependency_model(rows: List[dict], edges: List[dict],
     lanes = sorted({(row["_node_id"], row["_device_id"], row["_stream_id"]) for row in rows})
     lane_index = {key: index for index, key in enumerate(lanes)}
     lane_items = []
-    node_origins = {}
-    precise_origins = {}
+    by_node = defaultdict(list)
+    native_times = {}
     for row in rows:
-        node = row["_node_id"]
-        node_origins[node] = min(node_origins.get(node, row["_start"]), row["_start"])
-        precise_start = dep.execution_time_order_value(row, "start")
-        precise_origins[node] = min(precise_origins.get(node, precise_start), precise_start)
-    multi_node = len(node_origins) > 1
-    clock_models, aligned_times = {}, {}
+        by_node[row["_node_id"]].append(row)
+        native_times[row["_graph_id"]] = tuple(int(dep.execution_time_order_value(row, side) * 1000)
+                                               for side in ("start", "stop"))
+    multi_node = len(by_node) > 1
+    clock_models = models_from_report(alignment)
+    display_times, raw_nodes = dict(native_times), set()
     if alignment is not None:
-        if __package__ in (None, ""):
-            from diagnosis.clock_alignment import models_from_report
-        else:
-            from .clock_alignment import models_from_report
-        clock_models = models_from_report(alignment)
         for row in rows:
             clock = clock_models.get((row["_node_id"], row["_device_id"]))
             if clock is None:
                 raise ValueError("clock evidence does not cover a displayed device")
-            aligned_times[row["_graph_id"]] = tuple(clock.map_ns(int(dep.execution_time_order_value(row, side) * 1000))
-                                                   for side in ("start", "stop"))
-        common_origin = min(pair[0] for pair in aligned_times.values())
+            gid = row["_graph_id"]
+            display_times[gid] = tuple(map(clock.map_ns, native_times[gid]))
+    else:
+        local_clocks = local_clocks or {}
+        for node, group in by_node.items():
+            if not all((node, r["_device_id"]) in local_clocks for r in group):
+                continue
+            try:
+                mapped = {r["_graph_id"]: tuple(map(local_clocks[node, r["_device_id"]].raw_ns,
+                          native_times[r["_graph_id"]])) for r in group}
+            except ValueError:
+                continue  # A node must use one time base for every displayed lane.
+            display_times.update(mapped)
+            raw_nodes.add(node)
+    domains = {}
+    origins = {}
+    for row in rows:
+        node, device, gid = row["_node_id"], row["_device_id"], row["_graph_id"]
+        domain = () if clock_models else (node,) if node in raw_nodes else (node, device)
+        domains[gid] = domain
+        start = display_times[gid][0]
+        origins[domain] = min(origins.get(domain, start), start)
     if multi_node:
         left = 300
     for index, key in enumerate(lanes):
@@ -144,34 +159,27 @@ def build_execution_dependency_model(rows: List[dict], edges: List[dict],
             "height": 30,
             "taskCount": 0,
         })
-    min_start = 0 if multi_node else min(row["_start"] for row in rows)
-    max_stop = max(row["_stop"] - (node_origins[row["_node_id"]] if multi_node else 0) for row in rows)
-    if clock_models:
-        min_start = 0
-        max_stop = max((pair[1] - common_origin) / 1000 for pair in aligned_times.values())
-    span = max(1.0, max_stop - min_start)
+    max_stop = max((stop - origins[domains[gid]]) / 1000 for gid, (_, stop) in display_times.items())
+    span = max(1.0, max_stop)
     scale = max(0.06, min(2.0, 28000.0 / span))
     nodes = []
     positions = {}
-    per_lane_slots: Dict[Tuple[str, int, int], List[float]] = defaultdict(list)
-    for row in sorted(rows, key=lambda item: (item["_start"], item["_stop"], item["_source_row"])):
+    per_lane_slots: Dict[Tuple[str, int, int], List[int]] = defaultdict(list)
+    ordered = sorted(rows, key=lambda item: (*display_times[item["_graph_id"]], item["_source_row"]))
+    for row in ordered:
         key = (row["_node_id"], row["_device_id"], row["_stream_id"])
+        start, stop = display_times[row["_graph_id"]]
         slots = per_lane_slots[key]
-        slot = next((index for index, stop in enumerate(slots) if row["_start"] >= stop), len(slots))
+        slot = next((index for index, end in enumerate(slots) if start >= end), len(slots))
         if slot == len(slots):
-            slots.append(row["_stop"])
+            slots.append(stop)
         else:
-            slots[slot] = row["_stop"]
+            slots[slot] = stop
         lane = lane_index[key]
         lane_items[lane]["taskCount"] += 1
         lane_items[lane]["height"] = max(lane_items[lane]["height"], 10 + (slot + 1) * 20)
-        origin = node_origins[row["_node_id"]] if multi_node else min_start
-        precise_origin = precise_origins[row["_node_id"]]
-        relative_start = float(dep.execution_time_order_value(row, "start") - precise_origin)
-        relative_stop = float(dep.execution_time_order_value(row, "stop") - precise_origin)
-        if clock_models:
-            start_ns, stop_ns = aligned_times[row["_graph_id"]]
-            relative_start, relative_stop = (start_ns - common_origin) / 1000, (stop_ns - common_origin) / 1000
+        origin = origins[domains[row["_graph_id"]]]
+        relative_start, relative_stop = (start - origin) / 1000, (stop - origin) / 1000
         x = left + relative_start * scale
         y = lane_items[lane]["y"] + 6 + slot * 20
         width = max(4, (relative_stop - relative_start) * scale)
@@ -184,9 +192,9 @@ def build_execution_dependency_model(rows: List[dict], edges: List[dict],
             fill, stroke = ("#ffd9ba", "#b45112") if row["_protocol"]["is_slow"] else ("#e5f2e9", "#45865a")
         label = row.get("event", "") or row.get("event_name", "") or row.get("profiler_task_kind", "")
         record = node_record(row, x, y, width, node_h, fill, stroke, label)
-        record["localTimeOrigin"] = origin
         record["relativeStart"] = relative_start
         record["relativeStop"] = relative_stop
+        record["displayDuration"] = (stop - start) / 1000
         if clock_models:
             record["alignmentEstimatedErrorNs"] = clock_models[(row["_node_id"], row["_device_id"])].estimated_error_ns
         nodes.append(record)
@@ -196,7 +204,7 @@ def build_execution_dependency_model(rows: List[dict], edges: List[dict],
         lane["y"] = y_cursor
         y_cursor += lane["height"] + lane_gap
     # Node y positions need the compacted lane offsets.
-    for row, node in zip(sorted(rows, key=lambda item: (item["_start"], item["_stop"], item["_source_row"])), nodes):
+    for row, node in zip(ordered, nodes):
         key = (row["_node_id"], row["_device_id"], row["_stream_id"])
         old_base = top + lane_index[key] * 38
         node["y"] += lane_items[lane_index[key]]["y"] - old_base
@@ -237,12 +245,15 @@ def build_execution_dependency_model(rows: List[dict], edges: List[dict],
             ),
         })
     return {
-        "kind": "dependency", "layout": "time", "timeOrigin": min_start,
-        "clockLabel": ("Estimated aligned time; clock error estimate {:.3f} us".format(alignment["estimated_error_ns"] / 1000)
-                       if clock_models else "Node-local elapsed time; clocks uncalibrated" if multi_node else "dependency"),
+        "kind": "dependency", "layout": "time", "timeOrigin": 0,
+        "clockLabel": ("Estimated aligned time; max per-device error estimate {:.3f} us".format(alignment["estimated_error_ns"] / 1000)
+                       if clock_models else "Independent elapsed times; clock-domain zeros are not simultaneous" if len(origins) > 1
+                       else "Device lanes aligned to host RAW clock" if raw_nodes else "Profiler-local elapsed time"),
+        "nodeClockDomains": {node: "reference_raw" if clock_models else "local_raw" if node in raw_nodes
+                             else "profiler_local" for node in by_node},
         "clockAlignment": alignment,
         "width": left + span * scale + 100, "height": y_cursor + 70,
-        "contentLeft": left, "timeScale": scale, "timeMin": min_start, "timeMax": max_stop,
+        "contentLeft": left, "timeScale": scale, "timeMin": 0, "timeMax": max_stop,
         "lanes": lane_items, "columns": [], "nodes": nodes, "edges": edge_items,
         "edgeKinds": sorted({edge["kind"] for edge in edge_items}),
     }
@@ -371,7 +382,7 @@ for(const c of Object.values(controls)){c.addEventListener('input',()=>{requestD
 function sx(x){return LABEL+(x-viewX)*xScale}function wx(x){return viewX+(x-LABEL)/xScale}function sy(y){return y+yPan}function visibleX(){return[viewX,viewX+Math.max(1,canvas.clientWidth-LABEL)/xScale]}
 function resize(){const d=window.devicePixelRatio||1;canvas.width=canvas.clientWidth*d;canvas.height=canvas.clientHeight*d;ctx.setTransform(d,0,0,d,0,0);overview.width=overview.clientWidth*d;overview.height=overview.clientHeight*d;octx.setTransform(d,0,0,d,0,0);requestDraw()}window.addEventListener('resize',resize);
 function bounds(){if(model.initialWindow&&!Object.values(controls).some(c=>c.value))return[model.contentLeft,model.width-16];const xs=model.nodes.filter(nodeVisible);if(!xs.length)return[model.contentLeft,model.width-40];return[Math.min(...xs.map(n=>n.x)),Math.max(...xs.map(n=>n.x+n.w))]}
-function fit(){const [a,b]=bounds();viewX=a;xScale=Math.max(.0005,(canvas.clientWidth-LABEL-16)/Math.max(1,b-a));yPan=RULER+(model.observedHostSource?70:8)-(model.lanes[0]?.y||0);requestDraw()}document.getElementById('fit').onclick=fit;
+function fit(){const [a,b]=bounds();viewX=a;xScale=Math.max(.0005,(canvas.clientWidth-LABEL-16)/Math.max(1,b-a));yPan=RULER+8-(model.lanes[0]?.y||0);requestDraw()}document.getElementById('fit').onclick=fit;
 function focusNode(n){if(!n)return;const host=model.observedHostSources?.[n.id];if(host){const a=Math.min(n.x,LABEL+host.startUs*model.timeScale),z=Math.max(n.x+n.w,LABEL+host.stopUs*model.timeScale),span=Math.max(1,z-a),peers=selectedEdges().flatMap(e=>[nodeById.get(e.src),nodeById.get(e.dst)]).filter(Boolean);xScale=Math.max(.0005,(canvas.clientWidth-LABEL-32)/(span*1.1));viewX=a-span*.05;yPan=RULER+80-Math.min(n.y,...peers.map(p=>p.y))}else{xScale=Math.max(xScale,Math.min(12,120/Math.max(4,n.w)));viewX=n.x-(canvas.clientWidth-LABEL)/(2*xScale)+n.w/2;yPan=RULER+80-n.y}requestDraw()}document.getElementById('focus').onclick=()=>focusNode(nodeById.get(selectedId));
 document.getElementById('clearSelection').onclick=()=>setSelected(null);
 function setSelected(id,focus=false,peers=[]){selectedId=id&&nodeById.has(id)?id:null;coincidentIds=selectedId?peers:[];renderDetails();requestDraw();if(focus&&selectedId)focusNode(nodeById.get(selectedId))}
@@ -461,12 +472,10 @@ function selectedEdges(){const w=(model.waits||[]).find(w=>w.wait_graph_id===sel
 function relatedSet(){const out=new Set(selectedId?[selectedId]:[]);for(const e of selectedEdges()){out.add(e.src);out.add(e.dst)}const w=(model.waits||[]).find(w=>w.wait_graph_id===selectedId);for(const id of (w?.candidate_graph_ids||'').split(';'))if(nodeById.has(id))out.add(id);return out}
 function requestDraw(){if(dirty)return;dirty=true;requestAnimationFrame(()=>{dirty=false;draw()})}
 function niceStep(raw){const p=10**Math.floor(Math.log10(Math.max(raw,1e-9))),r=raw/p;return(r<=1?1:r<=2?2:r<=5?5:10)*p}function xToTime(x){return model.timeMin+(x-LABEL)/model.timeScale}function timeToX(t){return LABEL+(t-model.timeMin)*model.timeScale}function timeLabel(us,step){if(Math.abs(us)>=1e6)return(us/1e6).toFixed(step<1e4?4:2)+' s';if(Math.abs(us)>=1e3)return(us/1e3).toFixed(step<10?3:step<100?2:1)+' ms';return us.toFixed(step<1?3:step<10?1:0)+' us'}
-function drawGapHighlights(){for(const n of model.nodes){if(n.gapHighlightUs==null||!nodeVisible(n))continue;const w=n.gapHighlightUs*model.timeScale*xScale;ctx.save();ctx.strokeStyle='#c62828';ctx.lineWidth=2;ctx.setLineDash([4,3]);ctx.strokeRect(sx(n.x)-w,sy(n.y)-3,w,n.h+6);ctx.restore()}}
-function draw(){const W=canvas.clientWidth,H=canvas.clientHeight;ctx.clearRect(0,0,W,H);ctx.fillStyle='#fff';ctx.fillRect(0,0,W,H);drawTracks(W,H);ctx.save();ctx.beginPath();ctx.rect(LABEL,RULER,W-LABEL,H-RULER);ctx.clip();drawTimeGrid(W,H);drawHostPreparation(W,H);drawGapHighlights();drawSelectedEdges();drawNodes(W,H);ctx.restore();drawRuler(W);drawLabels(H);drawOverview()}
+function draw(){const W=canvas.clientWidth,H=canvas.clientHeight;ctx.clearRect(0,0,W,H);ctx.fillStyle='#fff';ctx.fillRect(0,0,W,H);drawTracks(W,H);ctx.save();ctx.beginPath();ctx.rect(LABEL,RULER,W-LABEL,H-RULER);ctx.clip();drawTimeGrid(W,H);drawHostPreparation(W,H);drawSelectedEdges();drawNodes(W,H);ctx.restore();drawRuler(W);drawLabels(H);drawOverview()}
 function drawHostPreparation(W,H){
- const s=model.observedHostSource||model.observedHostSources?.[selectedId];if(!s)return;
- const base=model.graphView==='comparison'?0:model.timeMin;
- const a=sx(s.anchorRelative?LABEL+s.startUs*model.timeScale:timeToX(base+s.startUs)),b=sx(s.anchorRelative?LABEL+s.stopUs*model.timeScale:timeToX(base+s.stopUs)),left=Math.max(LABEL,a),right=Math.min(W,b);
+ const s=model.observedHostSources?.[selectedId];if(!s)return;
+ const a=sx(timeToX(s.startUs)),b=sx(timeToX(s.stopUs)),left=Math.max(LABEL,a),right=Math.min(W,b);
  if(right<=left)return;ctx.save();ctx.fillStyle='#c6282812';
  const prefix=`${s.nodeId}|${s.device}|`;
  for(const lane of model.lanes){if(lane.key.startsWith(prefix))ctx.fillRect(left,sy(lane.y),right-left,lane.height)}
@@ -481,9 +490,9 @@ function drawTracks(W,H){for(let i=0;i<model.lanes.length;i++){const l=model.lan
 function drawTimeGrid(W,H){const [a,b]=visibleX(),usPerPx=1/(model.timeScale*xScale),step=niceStep(usPerPx*120),ta=xToTime(a),tb=xToTime(b),first=Math.ceil(ta/step)*step;ctx.strokeStyle='#e1e5ea';ctx.lineWidth=1;for(let t=first;t<=tb;t+=step){const x=sx(timeToX(t));ctx.beginPath();ctx.moveTo(x,RULER);ctx.lineTo(x,H);ctx.stroke()}}
 function drawRuler(W){ctx.fillStyle='#f8f9fa';ctx.fillRect(0,0,W,RULER);ctx.strokeStyle='#cfd4dc';ctx.beginPath();ctx.moveTo(0,RULER-.5);ctx.lineTo(W,RULER-.5);ctx.stroke();const [a,b]=visibleX(),step=niceStep(1/(model.timeScale*xScale)*120),ta=xToTime(a),tb=xToTime(b),first=Math.ceil(ta/step)*step;ctx.fillStyle='#4c5562';ctx.font='11px Arial';ctx.textBaseline='top';for(let t=first;t<=tb;t+=step){const x=sx(timeToX(t));ctx.fillRect(x,25,1,8);ctx.fillText(timeLabel(model.graphView==='comparison'?t:t-model.timeMin,step),x+4,7)}ctx.fillStyle='#eef1f5';ctx.fillRect(0,0,LABEL,RULER);ctx.fillStyle='#4c5562';ctx.fillText('Tracks',12,10)}
 function drawLabels(H){ctx.fillStyle='#f8f9fa';ctx.fillRect(0,RULER,LABEL,H-RULER);ctx.strokeStyle='#cfd4dc';ctx.beginPath();ctx.moveTo(LABEL-.5,0);ctx.lineTo(LABEL-.5,H);ctx.stroke();ctx.font='12px Arial';ctx.textBaseline='middle';for(const l of model.lanes){const y=sy(l.y);if(y+l.height<RULER||y>H)continue;ctx.fillStyle='#30343b';ctx.fillText(l.label,12,y+Math.min(18,l.height/2));ctx.fillStyle='#7a828e';ctx.font='10px Arial';ctx.fillText(`${l.taskCount||0} tasks`,12,y+Math.min(34,l.height-6));ctx.font='12px Arial'}}
-function projectedDurationWidth(n){return Math.max(0,n.duration||0)*model.timeScale*xScale}function markerNode(n){return n.zeroDuration||projectedDurationWidth(n)<2}
+function durationWidth(n){return Math.max(0,n.displayDuration??n.duration??0)*model.timeScale}function projectedDurationWidth(n){return durationWidth(n)*xScale}function markerNode(n){return n.zeroDuration||projectedDurationWidth(n)<2}
 function drawNodes(W,H){const [a,b]=visibleX(),related=relatedSet(),hasSelection=!!selectedId;ctx.font='10px Arial';ctx.textBaseline='middle';for(const n of model.nodes){if(!nodeVisible(n)||n.x+n.w<a||n.x>b)continue;const y=sy(n.y);if(y+n.h<RULER||y>H)continue;const x=sx(n.x),isMarker=markerNode(n),w=projectedDurationWidth(n),isSel=n.id===selectedId,isRel=related.has(n.id);ctx.globalAlpha=hasSelection&&!isRel?.18:1;ctx.fillStyle=n.fill;ctx.strokeStyle=isSel?'#111':n.diagnosisRole==='candidate'?'#b3261e':n.diagnosisRole==='wait'?'#936400':isRel?'#1967d2':n.stroke;ctx.lineWidth=isSel?3:n.diagnosisRole==='candidate'?2.5:isRel?2:1;if(isMarker){const cy=y+n.h/2,r=isSel?6:4;ctx.beginPath();ctx.moveTo(x,cy-r);ctx.lineTo(x+r,cy);ctx.lineTo(x,cy+r);ctx.lineTo(x-r,cy);ctx.closePath();ctx.fill();ctx.stroke()}else{ctx.fillRect(x,y,w,n.h);ctx.strokeRect(x+.5,y+.5,Math.max(1,w-1),n.h-1);if(w>42){ctx.fillStyle='#202124';ctx.fillText(n.label,x+4,y+n.h/2)}}ctx.globalAlpha=1}}
-function drawSelectedEdges(){if(!selectedId)return;const edges=selectedEdges();ctx.lineWidth=2;for(const e of edges){const s=nodeById.get(e.src),d=nodeById.get(e.dst);if(!s||!d)continue;const x1=sx(s.x+(markerNode(s)?0:Math.max(0,s.duration||0)*model.timeScale)),y1=sy(s.y+s.h/2),x2=sx(d.x),y2=sy(d.y+d.h/2);ctx.strokeStyle=e.color||'#555';ctx.globalAlpha=.9;ctx.beginPath();ctx.moveTo(x1,y1);const bend=Math.max(28,Math.abs(x2-x1)*.38);ctx.bezierCurveTo(x1+bend,y1,x2-bend,y2,x2,y2);ctx.stroke();const ang=Math.atan2(y2-y1,x2-x1),q=6;ctx.fillStyle=e.color||'#555';ctx.beginPath();ctx.moveTo(x2,y2);ctx.lineTo(x2-q*Math.cos(ang-.55),y2-q*Math.sin(ang-.55));ctx.lineTo(x2-q*Math.cos(ang+.55),y2-q*Math.sin(ang+.55));ctx.closePath();ctx.fill()}ctx.globalAlpha=1}
+function drawSelectedEdges(){if(!selectedId)return;const edges=selectedEdges();ctx.lineWidth=2;for(const e of edges){const s=nodeById.get(e.src),d=nodeById.get(e.dst);if(!s||!d)continue;const x1=sx(s.x+(markerNode(s)?0:durationWidth(s))),y1=sy(s.y+s.h/2),x2=sx(d.x),y2=sy(d.y+d.h/2);ctx.strokeStyle=e.color||'#555';ctx.globalAlpha=.9;ctx.beginPath();ctx.moveTo(x1,y1);const bend=Math.max(28,Math.abs(x2-x1)*.38);ctx.bezierCurveTo(x1+bend,y1,x2-bend,y2,x2,y2);ctx.stroke();const ang=Math.atan2(y2-y1,x2-x1),q=6;ctx.fillStyle=e.color||'#555';ctx.beginPath();ctx.moveTo(x2,y2);ctx.lineTo(x2-q*Math.cos(ang-.55),y2-q*Math.sin(ang-.55));ctx.lineTo(x2-q*Math.cos(ang+.55),y2-q*Math.sin(ang+.55));ctx.closePath();ctx.fill()}ctx.globalAlpha=1}
 function hitNodes(clientX,clientY){const r=canvas.getBoundingClientRect(),px=clientX-r.left,py=clientY-r.top,out=[];for(let i=model.nodes.length-1;i>=0;i--){const n=model.nodes[i],y=sy(n.y);if(!nodeVisible(n)||py<y||py>y+n.h)continue;const x=sx(n.x),isMarker=markerNode(n),w=projectedDurationWidth(n),radius=isMarker?6:0;if(px>=x-radius&&px<=x+(isMarker?radius:w))out.push(n)}return out}
 canvas.onmousedown=e=>{canvas.focus();drag={x:e.clientX,y:e.clientY,lastX:e.clientX,lastY:e.clientY,moved:false};canvas.style.cursor='grabbing'};window.onmousemove=e=>{if(drag){const dx=e.clientX-drag.lastX,dy=e.clientY-drag.lastY;if(Math.abs(e.clientX-drag.x)+Math.abs(e.clientY-drag.y)>4)drag.moved=true;viewX-=dx/xScale;yPan+=dy;drag.lastX=e.clientX;drag.lastY=e.clientY;requestDraw();return}hoverPending=e;requestAnimationFrame(()=>{if(!hoverPending)return;const p=hoverPending;hoverPending=null;const ns=hitNodes(p.clientX,p.clientY),n=ns[0];if(n){tip.style.display='block';tip.style.left=Math.min(window.innerWidth-530,p.clientX+12)+'px';tip.style.top=Math.min(window.innerHeight-120,p.clientY+12)+'px';tip.textContent=(ns.length>1?`${ns.length} candidate tasks at this position\n`:'')+n.title}else tip.style.display='none'})};window.onmouseup=e=>{if(!drag)return;const wasMoved=drag.moved;drag=null;canvas.style.cursor='default';if(!wasMoved){const ns=hitNodes(e.clientX,e.clientY);setSelected(ns[0]?.id||null,false,ns.map(n=>n.id))}};canvas.ondblclick=e=>{const ns=hitNodes(e.clientX,e.clientY);if(ns[0])setSelected(ns[0].id,true,ns.map(n=>n.id))};
 canvas.onwheel=e=>{e.preventDefault();const r=canvas.getBoundingClientRect(),mx=e.clientX-r.left;if(e.ctrlKey){const anchor=wx(mx),factor=e.deltaY<0?1.18:.84;xScale=Math.max(.0005,Math.min(24,xScale*factor));viewX=anchor-(mx-LABEL)/xScale}else if(e.shiftKey){viewX+=e.deltaY/xScale}else{viewX+=e.deltaX/xScale;yPan-=e.deltaY}requestDraw()};canvas.onkeydown=e=>{if(e.key==='f'){fit();e.preventDefault()}else if(e.key==='Escape'){setSelected(null)}else if(e.key==='ArrowLeft'){viewX-=80/xScale;requestDraw()}else if(e.key==='ArrowRight'){viewX+=80/xScale;requestDraw()}else if(e.key==='ArrowUp'){yPan+=50;requestDraw()}else if(e.key==='ArrowDown'){yPan-=50;requestDraw()}};

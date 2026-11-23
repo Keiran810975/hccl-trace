@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 
 from . import analyze_waits as waits
 from . import clock_alignment
@@ -25,10 +26,16 @@ def _alignment(directory, rows, *, allow_uncalibrated_clock):
                 if clock is None:
                     raise ValueError("clock evidence does not cover every execution device")
                 for side in ("start", "stop"):
-                    clock.map_ns(waits.ns(row, side))
+                    clock.raw_ns(waits.ns(row, side))
+            for operation in waits.read_csv(directory / "operation_timings.csv"):
+                clock = clocks.get((operation["node_id"], int(operation["device_id"])))
+                if clock is None:
+                    raise ValueError("clock evidence does not cover every displayed operation")
+                for side in ("start_ns", "end_ns"):
+                    clock.raw_ns(int(operation[side]))
             write_json(path, alignment)
         return alignment, None
-    except (OSError, ValueError, KeyError, ArithmeticError) as error:
+    except (OSError, ValueError, KeyError, ArithmeticError, sqlite3.Error) as error:
         if not allow_uncalibrated_clock:
             raise
         return None, str(error)
@@ -91,9 +98,12 @@ def run_pipeline(manifest: Path, output: Path, *, baseline: Path | None = None,
             raise ValueError("no Notify Wait evidence in the selected capture")
         if iteration_map is not None:
             coordinates = rolling.load_coordinates(iteration_map)
+            local_clocks = clock_alignment.local_profiler_models(read_json(directory / "inputs.json"))
+            live["local_clocks"] = local_clocks
             report = rolling.analyze(rows, edges, coordinates, rolling_options,
                                      preparations=rolling.source_events.load_preparations(preparation_map),
-                                     alignment=alignment, compact_unbound=True, graph_validated=True)
+                                     alignment=alignment, local_clocks=local_clocks,
+                                     compact_unbound=True, graph_validated=True)
             path_coverage = {}
             report["cross_node_path_candidates"] = cross_node_path.analyze(
                 rows, edges, coordinates, alignment, rolling_options, coverage=path_coverage)

@@ -87,7 +87,7 @@ def host_source_displays(roots, rows, model, alignment=None):
         except ValueError:
             continue  # Do not paint outside the measured clock coverage.
         result[root["graph_id"]] = dict(nodeId=root["node_id"], rank=root["user_rank"], device=root["device_id"],
-            anchorRelative=True, startUs=shown["relativeStart"] + (begin - device_anchor) / 1000,
+            startUs=shown["relativeStart"] + (begin - device_anchor) / 1000,
             stopUs=shown["relativeStart"] + (end - device_anchor) / 1000,
             increaseNs=(str(root["delta_ns"]) if root.get("delta_ns") is not None else None),
             durationUs=(stop - start) / 1000, startNs=str(start), stopNs=str(stop))
@@ -224,7 +224,12 @@ def _execution_model(directory, rows, edges, normalized, roots, comparisons, rep
     timings = view.read_operation_timings(directory / "operation_timings.csv")
     if timing_scopes is not None:
         timings = [row for row in timings if row["_operation_scope"] in timing_scopes]
-    model = view.build_execution_dependency_model(rows, edges, timings, alignment=alignment)
+    local_clocks = None
+    inputs = directory / "inputs.json"
+    if alignment is None and inputs.is_file():
+        from .clock_alignment import local_profiler_models
+        local_clocks = local_profiler_models(read_json(inputs))
+    model = view.build_execution_dependency_model(rows, edges, timings, alignment=alignment, local_clocks=local_clocks)
     model.update(graphView="execution", issueCount=normalized["quality"]["notify_ambiguity_count"])
     view.attach_diagnosis(model, diagnosis, diagnosis["waits"])
     model["waits"] = diagnosis["waits"]

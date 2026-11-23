@@ -55,12 +55,13 @@ def load_preparations(path):
     return data["preparations"]
 
 
-def preparation_sources(records, rows, edges, coordinates, tasks, options, *, alignment=None):
+def preparation_sources(records, rows, edges, coordinates, tasks, options, *, alignment=None, local_clocks=None):
     """Host preparation is an observed interval, never a fabricated device task."""
     if not records:
         return []
     validate_preparations(records, rows, coordinates)
     clocks = models_from_report(alignment)
+    local_clocks = local_clocks or {}
     lookup = {r["_graph_id"]: r for r in rows}
     rank_rows = defaultdict(list)
     for row in rows:
@@ -105,23 +106,40 @@ def preparation_sources(records, rows, edges, coordinates, tasks, options, *, al
             if (not changed.get("duration_slow") or src["_device_id"] != item["device_id"]
                     or not item["stop_ns"] <= item["api_start_ns"] <= waits.ns(src, "start")):
                 continue
-            if src["_node_id"] == dst["_node_id"]:
-                if not waits.ns(dst, "start") < item["stop_ns"] or waits.ns(src, "stop") > waits.ns(dst, "stop"):
+            sender_key = src["_node_id"], src["_device_id"]
+            receiver_key = dst["_node_id"], dst["_device_id"]
+            same_node = sender_key[0] == receiver_key[0]
+            clock_facts = None
+            if sender_key == receiver_key:
+                hs, he = item["start_ns"], item["stop_ns"]
+                ws, we = (waits.ns(dst, side) for side in ("start", "stop"))
+                es = er = 0
+                domain = "same_profiler_device"
+                if waits.ns(src, "stop") > we:
                     continue
-                overlap = max(0, min(item["stop_ns"], waits.ns(dst, "stop")) - max(item["start_ns"], waits.ns(dst, "start")))
             else:
-                sender = clocks.get((src["_node_id"], src["_device_id"]))
-                receiver = clocks.get((dst["_node_id"], dst["_device_id"]))
+                use_local = same_node and sender_key in local_clocks and receiver_key in local_clocks
+                available = local_clocks if use_local else clocks
+                sender, receiver = available.get(sender_key), available.get(receiver_key)
                 if sender is None or receiver is None:
                     continue
-                hs, he = (sender.map_ns(item[k]) for k in ("start_ns", "stop_ns"))
-                ws, we = (receiver.map_ns(waits.ns(dst, side)) for side in ("start", "stop"))
-                es, er = sender.estimated_error_ns, receiver.estimated_error_ns
-                # The protocol edge supplies the dependency, not an RDMA hardware
-                # completion timestamp. Require overlap beyond both clock margins.
-                if he - es <= ws + er or he + es > we - er:
+                try:
+                    hs, he = (sender.map_ns(item[k]) for k in ("start_ns", "stop_ns"))
+                    ws, we = (receiver.map_ns(waits.ns(dst, side)) for side in ("start", "stop"))
+                    produced = sender.map_ns(waits.ns(src, "stop"))
+                except ValueError:
                     continue
-                overlap = max(0, min(he - es, we - er) - max(hs + es, ws + er))
+                es, er = sender.estimated_error_ns, receiver.estimated_error_ns
+                if produced + es > we - er:
+                    continue
+                domain = "same_node_monotonic_raw" if use_local else "aligned_estimate"
+                clock_facts = dict(preparation_ns=[hs, he], wait_ns=[ws, we],
+                                   sender_error_ns=es, receiver_error_ns=er)
+            # The Notify edge supplies identity, not RDMA hardware completion.
+            if he + es > we - er:
+                continue
+            overlap = max(0, min(he - es, we - er) - max(hs + es, ws + er))
+            if overlap and clock_facts is not None:
                 clock_errors.append(es + er)
             if overlap:
                 supported.append(edge)
@@ -136,10 +154,7 @@ def preparation_sources(records, rows, edges, coordinates, tasks, options, *, al
                     wait_comparison={key: changed.get(key) for key in (
                         "duration_ns", "duration_slow", "reference_count", "reference_iterations",
                         "reference_mean_ns", "reference_mad_ns")},
-                    overlap_ns=overlap, unique_notify_producer=True,
-                    time_domain="same_node" if src["_node_id"] == dst["_node_id"] else "aligned_estimate",
-                    alignment=(None if src["_node_id"] == dst["_node_id"] else dict(
-                        preparation_ns=[hs, he], wait_ns=[ws, we], sender_error_ns=es, receiver_error_ns=er))))
+                    overlap_ns=overlap, unique_notify_producer=True, time_domain=domain, alignment=clock_facts))
         anchor = min(supported, key=lambda e: (waits.ns(lookup[e["src"]], "start"), e["edge_id"])) if supported else None
         candidates = rank_rows[(item["operation_scope"], item["node_id"], item["user_rank"])]
         anchor_row = lookup[anchor["src"]] if anchor else min(candidates, key=lambda r: (waits.ns(r, "start"), r["_graph_id"]))

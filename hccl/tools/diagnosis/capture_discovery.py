@@ -100,8 +100,6 @@ def discover_capture(source, work, *, topology=None, manifest_path=None):
         manifest = load_manifest(selected)
         for node in manifest["nodes"]:
             calls = Path(node.get("calls_dir", str(Path(node["plog_dir"]).parent / "calls")))
-            if not calls.is_absolute():
-                calls = selected.parent / calls
             logs.extend(_sdk_logs(calls))
     else:
         metadata = read_json(root / "capture.json") if (root / "capture.json").is_file() else {}
@@ -117,10 +115,14 @@ def discover_capture(source, work, *, topology=None, manifest_path=None):
             folder = root / "nodes" / name
             node = dict(item, plog_dir=str((root / item["plog_dir"]).resolve()) if "plog_dir" in item else str(folder / "plog"),
                         msprof_db_dir=str((root / item["msprof_db_dir"]).resolve()) if "msprof_db_dir" in item else str(folder / "msprof"))
-            if "clock_probe_files" in node:
-                node["clock_probe_files"] = [str((root / p).resolve()) for p in node["clock_probe_files"]]
-            nodes.append(node)
             calls = root / item["calls_dir"] if "calls_dir" in item else folder / "calls"
+            node["calls_dir"] = str(calls.resolve())
+            for field in ("clock_probe_files", "clock_validation_files"):
+                if field in node:
+                    if not isinstance(node[field], list) or any(not isinstance(p, str) or not p for p in node[field]):
+                        raise ValueError(field + " must be an explicit list of paths")
+                    node[field] = [str((root / p).resolve()) for p in node[field]]
+            nodes.append(node)
             logs.extend(_sdk_logs(calls))
             if (folder / "runtime.json").is_file():
                 runtime = read_json(folder / "runtime.json")
@@ -137,6 +139,8 @@ def discover_capture(source, work, *, topology=None, manifest_path=None):
         manifest = dict(run_id=_name(run_id), nodes=nodes, ranks=ranks, operations=metadata.get("operations", []))
         if "sdk_auxiliary_operation_types" in metadata:
             manifest["sdk_auxiliary_operation_types"] = metadata["sdk_auxiliary_operation_types"]
+        if "clock_alignment_max_error_ns" in metadata:
+            manifest["clock_alignment_max_error_ns"] = metadata["clock_alignment_max_error_ns"]
     if topology:
         explicit = read_json(topology)
         if "ranks" not in explicit:

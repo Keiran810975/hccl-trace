@@ -382,7 +382,7 @@ def _exact_matches(
 ) -> List[ProfilerTask]:
     if semantic.ffts_ctx_id >= 0:
         return []
-    tasks = _group_lookup(profiler_exact_by_key, semantic, semantic.task_id)
+    tasks = profiler_exact_by_key.get(semantic.merge_key, ())
     return [task for task in tasks if _is_compatible_task_kind(semantic, task)]
 
 
@@ -422,50 +422,21 @@ def _phase_conflict_message(
     )
 
 
-def _group_lookup(groups, semantic: SemanticRecord, task_id: int) -> List[ProfilerTask]:
-    key = (semantic.node_id, semantic.device_id, semantic.stream_id, task_id)
-    tasks = groups.get(key, [])
-    if tasks or semantic.node_id:
-        return tasks
-    candidates = [
-        value for candidate_key, value in groups.items()
-        if candidate_key[1:] == (semantic.device_id, semantic.stream_id, task_id)
-    ]
-    return candidates[0] if len(candidates) == 1 else []
-
-
-def _graph_correlation_lookup(graph_correlations, semantic: SemanticRecord):
-    key = (semantic.node_id, semantic.device_id, semantic.pid, semantic.graph_instance_id)
-    correlation = graph_correlations.get(key)
-    if correlation is not None or semantic.node_id:
-        return correlation
-    candidates = [
-        value for candidate_key, value in graph_correlations.items()
-        if candidate_key[1:] == (semantic.device_id, semantic.pid, semantic.graph_instance_id)
-    ]
-    return candidates[0] if len(candidates) == 1 else None
-
-
 def _ffts_ctx_match(profiler_composite_by_execution, graph_correlations, semantic: SemanticRecord):
     if semantic.ffts_ctx_id < 0 or semantic.graph_instance_id < 0:
         return None
-    correlation = _graph_correlation_lookup(graph_correlations, semantic)
+    correlation = graph_correlations.get((semantic.node_id, semantic.device_id, semantic.pid,
+                                          semantic.graph_instance_id))
     if correlation is None:
         return None
     key = (
-        correlation.node_id or semantic.node_id,
+        semantic.node_id,
         semantic.device_id,
         correlation.parent_stream_id,
         correlation.parent_task_id,
         semantic.ffts_ctx_id,
     )
-    tasks = profiler_composite_by_execution.get(key, [])
-    if not tasks and not key[0]:
-        candidates = [
-            value for candidate_key, value in profiler_composite_by_execution.items()
-            if candidate_key[1:] == key[1:]
-        ]
-        tasks = candidates[0] if len(candidates) == 1 else []
+    tasks = profiler_composite_by_execution.get(key, ())
     return (tasks[0], correlation) if len(tasks) == 1 else None
 
 def parse_msprof_inputs(

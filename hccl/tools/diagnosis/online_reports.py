@@ -119,9 +119,10 @@ def _diagnose(source, output, *, epoch, alerts):
 
 
 def run_reports(directory, job_id, capture, snapshots, stop, expected_ranks, *, report_directory, drain_seconds=120,
-                poll_seconds=POLL_SECONDS, parent_pid=None):
+                poll_seconds=POLL_SECONDS, parent_pid=None, slow_tasks_only=False):
     pending, done, tokens_cache = {}, set(), {}
     last_state = {}
+    report_types = {"COMMUNICATION_SLOW"} if slow_tasks_only else SLOW
 
     with (directory/"events.jsonl").open("rb") as events, (report_directory/"diagnostics.jsonl").open(
             "x", encoding="utf-8", buffering=1) as log:
@@ -144,7 +145,7 @@ def run_reports(directory, job_id, capture, snapshots, stop, expected_ranks, *, 
             for event in _complete_lines(events):
                 epoch = event.get("iteration")
                 if (event.get("job_id") != job_id or event.get("stage") != "measured"
-                        or event.get("event_type") not in SLOW or type(epoch) is not int or epoch < 0
+                        or event.get("event_type") not in report_types or type(epoch) is not int or epoch < 0
                         or epoch in done):
                     continue
                 if epoch not in pending and len(pending) >= MAX_PENDING:
@@ -178,13 +179,19 @@ def run_reports(directory, job_id, capture, snapshots, stop, expected_ranks, *, 
                         status(epoch, "waiting_for_all_ranks")
                         continue
                     states = measurement_states(directory/"measurements.jsonl", job_id, epoch, wanted)
-                    if set(states) != wanted or {t for t, s in states.items() if s in SLOW} != set(alerts):
+                    if set(states) != wanted or {t for t, s in states.items() if s in report_types} != set(alerts):
                         status(epoch, "waiting_for_final_online_results")
                         continue
                     report = report_directory/"iterations"/f"iter-{epoch}"
                     status(epoch, "diagnosing", alert_count=len(alerts), trace_source=source_kind)
                     started = True
-                    result = _diagnose(source, report, epoch=epoch, alerts=list(alerts.values()))
+                    if slow_tasks_only:
+                        from .online_slow_tasks import publish
+                        report = report/"slow_tasks.json"
+                        result = publish(source, report, epoch=epoch, alerts=list(alerts.values()),
+                                         trace_source=source_kind)
+                    else:
+                        result = _diagnose(source, report, epoch=epoch, alerts=list(alerts.values()))
                     finish(epoch, "published", alert_count=len(alerts), report=str(report.relative_to(report_directory)),
                            trace_source=source_kind, diagnosis_status=result["diagnosis_status"])
                 except (ValueError, KeyError, TypeError, AttributeError, OSError, RuntimeError) as error:
@@ -200,14 +207,22 @@ def main(argv=None):
     for name in ("directory", "report-directory", "capture", "stop"):
         parser.add_argument("--"+name, type=Path, required=True)
     parser.add_argument("--snapshots", type=Path, default=None)
+    parser.add_argument("--slow-tasks-only", action="store_true")
+    parser.add_argument("--task-batches", type=Path, default=None)
     parser.add_argument("--job-id", required=True)
     parser.add_argument("--expected-ranks", type=int)
     parser.add_argument("--drain-seconds", type=float, required=True)
     parser.add_argument("--parent-pid", type=int)
-    args = parser.parse_args(argv)
+    args = vars(parser.parse_args(argv))
+    task_batches = args.pop("task_batches")
     signal.signal(signal.SIGTERM, signal.default_int_handler)
     try:
-        run_reports(**vars(args))
+        if task_batches is not None:
+            from .online_task_stream import run
+            run(args["directory"]/"events.jsonl", args["report_directory"], task_batches, args["job_id"],
+                args["stop"], drain_seconds=args["drain_seconds"], parent_pid=args["parent_pid"])
+        else:
+            run_reports(**args)
     except KeyboardInterrupt:
         return
 

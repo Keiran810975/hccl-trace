@@ -14,6 +14,7 @@ TIMING_LABELS = {
     "producer_observed_during_wait": "Record 完成于 Wait 期间",
     "producer_release_interval_compatible": "校准后的 Record 区间与 Wait 相容；确切通知时刻未知",
     "cross_node_uncalibrated": "跨节点时钟未校准，仅展示依赖",
+    "same_node_cross_device_uncalibrated": "同机跨设备时钟未校准，仅展示依赖",
     "signal_precedes_wait_start": "Record 早于 Wait 开始，不能直接归因等待增长",
     "record_after_wait_end": "Record 晚于 Wait 结束，时间证据不相容",
     "overlapping_stream_tasks": "同流任务时间重叠，时间证据受限",
@@ -115,19 +116,25 @@ def branch_summary(report, chain):
 
 
 def build_view_model(report):
+    def clock_domain(node):
+        return "{} / Device {}".format(node["node_id"], node["device_id"])
+
     origins = {}
     for node in report["nodes"].values():
-        origins[node["node_id"]] = min(origins.get(node["node_id"], node["start_ns"]), node["start_ns"])
+        key = clock_domain(node)
+        origins[key] = min(origins.get(key, node["start_ns"]), node["start_ns"])
     nodes = {}
     for identifier, node in report["nodes"].items():
         metrics = node["comparison"]
+        key = clock_domain(node)
         nodes[identifier] = dict(node, start_ns=str(node["start_ns"]), stop_ns=str(node["stop_ns"]),
             task_label=TASK_LABELS.get(node["task_kind"], node["task_kind"] or node["event"] or "Task"),
             location=location(node), coordinate=coordinate(node), duration=duration(node["duration_ns"]),
             reference=duration(reference_value(metrics)), delta=duration(metrics.get("delta_ns"), signed=True),
             factor=factor(metrics.get("slowdown_factor")),
-            relative="{} – {}".format(duration(node["start_ns"]-origins[node["node_id"]]),
-                                       duration(node["stop_ns"]-origins[node["node_id"]])))
+            clock_domain=key,
+            relative="{} – {}".format(duration(node["start_ns"]-origins[key]),
+                                       duration(node["stop_ns"]-origins[key])))
     candidates = []
     category_ranks = {}
     for root in report["candidates"]:
@@ -468,9 +475,9 @@ function renderChain(){
   }).join("");
   $("boundaries").innerHTML=chain.boundaries.map(boundary=>`<p class="boundary">证据断点：${esc(model.boundary_labels[boundary.reason]||boundary.reason)}<br><code>${esc(boundary.edge_id||boundary.graph_id||"")}</code></p>`).join("");
   $("edge-count").textContent=`（${chain.node_ids.length} 个任务 / ${chain.edge_ids.length} 条边）`;
-  $("evidence-rows").innerHTML=chain.node_ids.map((id,i)=>{const node=model.nodes[id],hop=i?chain.hops[i-1]:null;return `<tr><td>${i+1}</td><td>${esc(node.location)}<br>${esc(node.event||node.task_kind)}<br><code>${esc(id)}</code> <a href="execution.html#${encodeURIComponent(id)}">定位任务</a><br><small>${esc(node.coordinate)}</small><br><small>节点内相对时间 ${esc(node.relative)}</small><br><code>${esc(node.start_ns)} – ${esc(node.stop_ns)} ns</code></td><td>${esc(node.duration)}<br>${esc(node.reference)}<br>${esc(node.delta)}</td><td>${hop?`${esc(edgeLabel(hop))} · ${esc(hop.confidence)}<br><code>${esc(hop.edge_id)}</code><br>${esc(model.timing_labels[hop.timing_status]||hop.timing_status)}<br><small>${esc(hop.reason)}</small>`:"源头设备锚点"}</td></tr>`;}).join("");
-  const involved=[...new Set(chain.node_ids.map(id=>model.nodes[id].node_id))];
-  $("time-origins").textContent="相对时间仅在各节点内部计算；起点为本报告该节点最早证据任务，不是 iteration 起点。"+involved.map(node=>`${node}: ${model.origins[node]} ns`).join("；");
+  $("evidence-rows").innerHTML=chain.node_ids.map((id,i)=>{const node=model.nodes[id],hop=i?chain.hops[i-1]:null;return `<tr><td>${i+1}</td><td>${esc(node.location)}<br>${esc(node.event||node.task_kind)}<br><code>${esc(id)}</code> <a href="execution.html#${encodeURIComponent(id)}">定位任务</a><br><small>${esc(node.coordinate)}</small><br><small>设备内相对时间 ${esc(node.relative)}</small><br><code>${esc(node.start_ns)} – ${esc(node.stop_ns)} ns</code></td><td>${esc(node.duration)}<br>${esc(node.reference)}<br>${esc(node.delta)}</td><td>${hop?`${esc(edgeLabel(hop))} · ${esc(hop.confidence)}<br><code>${esc(hop.edge_id)}</code><br>${esc(model.timing_labels[hop.timing_status]||hop.timing_status)}<br><small>${esc(hop.reason)}</small>`:"源头设备锚点"}</td></tr>`;}).join("");
+  const involved=[...new Set(chain.node_ids.map(id=>model.nodes[id].clock_domain))];
+  $("time-origins").textContent="相对时间按设备单独计算；各设备的起点不表示同时，也不是 iteration 起点。"+involved.map(key=>`${key}: ${model.origins[key]} ns`).join("；");
 }
 $("candidates").addEventListener("click",event=>{const button=event.target.closest("[data-root]");if(button){selected=Number(button.dataset.root);renderRoot();}});
 $("search").addEventListener("input",applySearch);

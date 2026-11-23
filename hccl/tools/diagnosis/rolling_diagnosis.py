@@ -283,7 +283,7 @@ def compare_tasks(rows, edges, coordinates, options, *, overlapping_copies=froze
 
 
 def analyze(rows, edges, coordinates, options=RollingOptions(), *, preparations=(), alignment=None,
-            compact_unbound=False, graph_validated=False):
+            local_clocks=None, compact_unbound=False, graph_validated=False):
     options.validate()
     coordinates = validate_coordinates(list(coordinates.values()))
     if not graph_validated:
@@ -294,8 +294,10 @@ def analyze(rows, edges, coordinates, options=RollingOptions(), *, preparations=
     tasks = compare_tasks(rows, edges, coordinates, options, overlapping_copies=overlapping,
                           compact_unbound=compact_unbound)
     copy_observations = copy_overlap.explain(pairs, tasks)
-    roots, traces = wait_backtrace.trace_sources(rows, edges, tasks, options, alignment=alignment, graph_validated=True)
-    host_roots = source_events.preparation_sources(preparations, rows, edges, coordinates, tasks, options, alignment=alignment)
+    roots, traces = wait_backtrace.trace_sources(rows, edges, tasks, options, alignment=alignment,
+                                                local_clocks=local_clocks, graph_validated=True)
+    host_roots = source_events.preparation_sources(preparations, rows, edges, coordinates, tasks, options,
+                                                   alignment=alignment, local_clocks=local_clocks)
     roots.extend(host_roots)
     traces_by_wait = {t["wait_graph_id"]: t for t in traces}
     for root in host_roots:

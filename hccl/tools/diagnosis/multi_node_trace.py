@@ -44,10 +44,16 @@ def load_manifest(path: Path) -> dict:
                 raise ValueError("input directory reused across nodes: {}".format(source))
             inputs.add(source)
             node[field] = str(source)
-        if "clock_probe_files" in node:
-            if not isinstance(node["clock_probe_files"], list) or not node["clock_probe_files"]:
-                raise ValueError("clock_probe_files must be a nonempty explicit list")
-            node["clock_probe_files"] = [str((path.parent / filename).resolve()) for filename in node["clock_probe_files"]]
+        if "calls_dir" in node:
+            node["calls_dir"] = str((path.parent / node["calls_dir"]).resolve())
+        for field in ("clock_probe_files", "clock_validation_files"):
+            if field not in node:
+                continue
+            names = node[field]
+            if not isinstance(names, list) or (field == "clock_probe_files" and not names) or any(
+                    not isinstance(filename, str) or not filename for filename in names):
+                raise ValueError(field + " must be an explicit list of paths")
+            node[field] = [str((path.parent / filename).resolve()) for filename in names]
     if not nodes:
         raise ValueError("manifest has no nodes")
     ranks = set()
@@ -62,7 +68,7 @@ def load_manifest(path: Path) -> dict:
         devices.add(endpoint)
     # An operation binding is a capture-owner assertion backed by launch/DB
     # evidence. Equal DB strings alone never create a cross-node scope.
-    seen_members = set()
+    scope_devices = defaultdict(set)
     operation_ids = set()
     for operation in manifest.get("operations", []):
         if not operation["operation_id"] or operation["operation_id"] in operation_ids:
@@ -70,7 +76,7 @@ def load_manifest(path: Path) -> dict:
         operation_ids.add(operation["operation_id"])
         if not operation.get("evidence", "").strip():
             raise ValueError("operation binding requires capture evidence")
-        member_nodes = set()
+        member_devices = defaultdict(set)
         if "participants" in operation:
             participants = operation["participants"]
             if (not participants or len(set(participants)) != len(participants)
@@ -78,16 +84,15 @@ def load_manifest(path: Path) -> dict:
                 raise ValueError("operation participants must be explicit known unique global ranks")
         for member in operation["members"]:
             device = member.get("device_id")
-            endpoint = (member["node_id"], device)
-            key = (member["node_id"], device, member["group_name"], member["op_name"])
-            if (key in seen_members or endpoint in member_nodes
-                    or member["node_id"] not in nodes or not member["group_name"] or not member["op_name"]
-                    or (device is not None and (type(device) is not int or endpoint not in devices))
-                    or (device is not None and (member["node_id"], None, member["group_name"], member["op_name"]) in seen_members)
-                    or (device is None and any(k[0] == key[0] and k[2:] == key[2:] for k in seen_members))):
-                raise ValueError("operation binding is not one-to-one: {}".format(key))
-            member_nodes.add(endpoint)
-            seen_members.add(key)
+            node, group, name = (member[k] for k in ("node_id", "group_name", "op_name"))
+            if (node not in nodes or not group or not name
+                    or (device is not None and (type(device) is not int or (node, device) not in devices))):
+                raise ValueError("invalid operation member: {}".format(member))
+            # A wildcard covers all devices on the node, not just device=None.
+            for existing in (member_devices[node], scope_devices[(node, group, name)]):
+                if device in existing or None in existing or (device is None and existing):
+                    raise ValueError("operation binding is not one-to-one: {}".format(member))
+                existing.add(device)
     return manifest
 
 
@@ -99,7 +104,8 @@ def operation_bindings(manifest: dict):
         evidence[shared] = operation["evidence"]
         for member in operation["members"]:
             local = OperationScopeIdentity(member["group_name"], member["op_name"]).stable_id
-            key = ((member["node_id"], member["device_id"], local) if "device_id" in member else
+            device = member.get("device_id")
+            key = ((member["node_id"], device, local) if device is not None else
                    (member["node_id"], local))
             bindings[key] = shared
     return bindings, evidence

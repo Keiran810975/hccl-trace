@@ -82,7 +82,7 @@ def analyze_capture(capture, output=None, *, mode, baseline=None, topology=None,
         raise DiagnosisError(2, "baseline mode requires --baseline; rolling forbids it")
     if online is not None and without_online:
         raise DiagnosisError(2, "--online and --without-online are mutually exclusive")
-    if online is not None and mode != "rolling":
+    if (online is not None or online_records is not None) and mode != "rolling":
         raise DiagnosisError(2, "--online requires rolling history (do not combine with --baseline)")
     if target_iteration is not None and (mode != "rolling" or not online_records or
             any(a.get("iteration") != target_iteration for a in online_records)):
@@ -162,13 +162,12 @@ def analyze_capture(capture, output=None, *, mode, baseline=None, topology=None,
                 report = live.pop("report")
                 rows, edges = live["graph"]
             if selected is not None:
-                from .clock_alignment import local_profiler_models
                 clock_path = directory / "clock_alignment.json"
                 report, followed = online_followup.focus_report(report, selected,
                     rolling.source_events.load_preparations(current.preparation_map), rows=rows, edges=edges,
                     timings=waits.read_csv(directory / "operation_timings.csv"),
                     alignment=read_json(clock_path) if clock_path.is_file() else None, options=rolling_options,
-                    local_clocks=local_profiler_models(read_json(directory / "inputs.json")) if selected else {})
+                    local_clocks=live["local_clocks"] if selected else {})
             normalized, roots, tasks = normalize(report, mode=mode,
                 run_id=current_capture.manifest["run_id"], rows=rows, edges=edges, pipeline=pipeline,
                 binding_evidence=dict(current.evidence, identity_exports=list(current_capture.identity_exports)),

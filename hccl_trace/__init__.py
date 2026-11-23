@@ -41,6 +41,8 @@ class Trace:
         self.online_probe = online_probe
         self.timing_adapter = timing_adapter
         self.online_token = None
+        self._active_call = False
+        self._failed_completion = False
         self._host_log_ns = self._host_log_writes = 0
         self._online_generations, self._online_pending = {}, []
         runtime = dict(event="runtime", schema_version=1, run_id=run_id, node_id=node_id,
@@ -88,7 +90,12 @@ class Trace:
             self._host_log_ns += time.perf_counter_ns() - start
             self._host_log_writes += 1
 
+    def _check_owner(self):
+        if threading.get_ident() != self._owner_thread:
+            raise ValueError("concurrent trace updates require an explicit framework adapter")
+
     def group(self, name, participants, *, db_group_name=None, communicator_generation=0):
+        self._check_owner()
         members = list(participants)
         if (not isinstance(name, str) or not name or not members
                 or any(type(rank) is not int or rank < 0 for rank in members)
@@ -106,6 +113,7 @@ class Trace:
 
     @contextmanager
     def iteration(self, index, *, stage="measured"):
+        self._check_owner()
         if (self.active_iteration is not None or type(index) is not int or index < 0
                 or stage not in {"warmup", "measured"}):
             raise ValueError("non-nested iteration with explicit warmup/measured stage required")
@@ -142,8 +150,9 @@ class Trace:
 
     def call_collective(self, submit, /, *, wait_for_work=False, preparation_definition=None, **signature):
         """Wrap only the submitting API; run an existing Work.wait outside its Host interval."""
-        if self.online_token is not None:
-            raise ValueError("nested online collectives do not have a single explicit API boundary")
+        self._check_owner()
+        if self._active_call or self.online_token is not None:
+            raise ValueError("nested collectives do not have a single explicit API boundary")
         probe, adapter = self.online_probe, self.timing_adapter
         timing = token = None
         if probe is not None:
@@ -159,6 +168,7 @@ class Trace:
                 timing = adapter.begin(op_type=kind, bucket=signature["call_site"], tensor_bytes=size,
                     dtype=dtype, reduction=reduction, rank=self.rank,
                     participants=self.groups[signature["group"]]["participants"])
+        submitted = False
         try:
             with self._observe_collective(**signature) as item:
                 if probe is not None:
@@ -175,12 +185,15 @@ class Trace:
                     item.update(online_op_counter=token.op_counter,
                                 online_communicator_generation=token.communicator_generation)
                 work = submit()
+            submitted = True
             if wait_for_work and work.wait() is False:
                 raise RuntimeError("collective Work.wait reported failure")
             if timing is not None:
                 adapter.end(token, timing)
             return work
         except BaseException:
+            if submitted:
+                self._failed_completion = True
             if token is not None:
                 probe.error(token)
             raise
@@ -190,26 +203,28 @@ class Trace:
     @contextmanager
     def _observe_collective(self, *, group, call_site, operation_type, element_count, dtype, reduction=None,
                             preparation_start_raw_ns=None):
-        if threading.get_ident() != self._owner_thread:
-            raise ValueError("concurrent submitting threads require an explicit framework adapter; call order is not guessed")
+        self._check_owner()
+        if self._active_call:
+            raise ValueError("nested collectives do not have a single explicit API boundary")
         if self.active_iteration is None or group not in self.groups or not call_site:
             raise ValueError("collective requires an active iteration, registered group and stable call_site")
         if type(element_count) is not int or element_count < 0:
             raise ValueError("element_count must describe the actual input tensor")
         key = group, call_site
         occurrence = self.occurrences.get(key, 0)
-        self.occurrences[key] = occurrence + 1
         stage, iteration = self.active_iteration
         item = dict(event="call", schema_version=1, sequence=self.sequence, node_id=self.node_id,
                     user_rank=self.rank, device_id=self.device, run_id=self.run_id,
                     stage=stage, iteration=iteration, call_site=call_site, occurrence=occurrence,
                     operation_type=operation_type, element_count=element_count, dtype=dtype,
                     reduction=reduction, before=_clocks(), **self.groups[group])
-        self.sequence += 1
         if preparation_start_raw_ns is not None:
             if type(preparation_start_raw_ns) is not int or not 0 <= preparation_start_raw_ns <= item["before"]["raw_ns"]:
                 raise ValueError("preparation start must be an actual earlier raw-clock observation")
             item["preparation_start_raw_ns"] = preparation_start_raw_ns
+        self.occurrences[key] = occurrence + 1
+        self.sequence += 1
+        self._active_call = True
         try:
             yield item
         except BaseException:
@@ -222,6 +237,8 @@ class Trace:
             self.pending.append(item["sequence"])
             if self.online_token is not None:
                 self._online_pending.append(self.online_token)
+        finally:
+            self._active_call = False
 
     def completion_boundary(self):
         """Call only after the user's existing synchronize()/Work completion.
@@ -229,6 +246,9 @@ class Trace:
         This function records the observation; it never performs synchronization.
         The binder also requires every selected DB operation to end by this bound.
         """
+        self._check_owner()
+        if self._failed_completion:
+            raise RuntimeError("cannot mark failed collective completion as successful")
         clocks = _clocks()
         self._write(dict(event="completion", schema_version=1, sequences=list(self.pending), clocks=clocks))
         self.pending.clear()
@@ -240,9 +260,13 @@ class Trace:
                 self.timing_adapter.flush(self.online_probe)
 
     def close(self):
+        self._check_owner()
         try:
             if not self._file.closed:
-                self._write(dict(event="capture_end", schema_version=1, pending_sequences=list(self.pending)))
+                record = dict(event="capture_end", schema_version=1, pending_sequences=list(self.pending))
+                if self._failed_completion:
+                    record["status"] = "failed_completion"
+                self._write(record)
                 self._file.close()
         finally:
             if self.online_probe is not None:

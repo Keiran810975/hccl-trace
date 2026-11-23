@@ -1,8 +1,15 @@
 # HCCL-Trace
 
-HCCL-Trace 排查 Ascend 训练中集合通信的卡住和慢化。**在线**定位到某轮、某次通信和可疑 Rank；
-**离线**把 msprof 的设备任务、HCOMM 的通信语义和训练打点对齐，沿真实依赖查看谁在等谁、慢化传到了哪里。
-单机和多机共用 `hccl-diag analyze`；只分析已有采集不需要 NPU。
+HCCL-Trace 排查 Ascend 训练中的集合通信异常。运行 `hccl-diag online` 后：
+
+1. **训练中分类告警**：识别 H1（Rank 未进入通信）、S1（有调用前延迟证据的慢通信）
+   和 S2（其余已测得的慢通信），报告轮次、通信位置和有证据支持的可疑 Rank。
+2. **自动追查慢通信**：设备 Task 数据就绪后，后台对 S1 回溯入口 Wait 和可核验的上游，
+   对 S2 列出通信内各 Rank 的慢 Task/Wait、所属算法 Step 和下游传播，生成该轮依赖图与传播报告。
+
+**只有第一步不需要等 msprof 封存。** 普通 `capture` 在采集结束后自动接上第二步；
+要在训练仍在跑时看到 Task 或依赖图，需要另外提供相应的已封存输入，见[在线追查模式](#6-在线追查模式)。
+也可用 `hccl-diag analyze` 手动分析已有采集；单机、多机用同一命令，CPU 即可运行。
 
 ## 1. 克隆和准备环境
 
@@ -58,19 +65,24 @@ online_report_output_dir: reports/online-details
 offline_output_dir: reports/offline
 ```
 
-三个目录分别存在线告警及测量日志、在线整轮详细报告、手动离线报告，不能相同或互相包含。
-相对路径以配置文件所在目录为准。默认读取当前目录的 `config.yaml`；
-也可给 `online` 或 `analyze` 加 `--config /path/to/config.yaml`，或设置 `HCCL_TRACE_CONFIG`。
-旧配置没有 `online_report_output_dir` 时使用上面的默认值。默认在各目录下创建 `RUN_ID/`。
-`online -o <新目录>` 只改告警目录，`online --report-output <新目录>` 可单独改详细报告目录。
-`analyze -o <新目录>` 改离线输出目录。原始采集仍由 `capture -o` 单独指定，不覆盖旧产物。
+| 配置项 | 默认放置位置 | 内容 |
+| --- | --- | --- |
+| `online_output_dir` | `reports/online/RUN_ID/` | `events.jsonl` 在线告警；同目录保留 `measurements.jsonl`、`telemetry.jsonl`、`run_health.jsonl` |
+| `online_report_output_dir` | `reports/online-details/RUN_ID/` | `diagnostics.jsonl` 记录追查进度；详细报告放在 `iterations/iter-N/`，快报模式的文件见第 6 节 |
+| `offline_output_dir` | `reports/offline/RUN_ID/` | 手动运行 `hccl-diag analyze` 的报告 |
+
+在线产物写在**收集器所在的机器**，各训练节点不分别生成告警文件。三个配置目录不能相同或互相包含。
+配置加载顺序为 `--config`、`HCCL_TRACE_CONFIG`、当前目录的 `config.yaml`；配置里的相对路径以
+配置文件所在目录为准，缺省项用上表默认值。重复运行请用新的 `RUN_ID`，工具不会覆盖已有报告。
+`online -o`、`online --report-output` 和 `analyze -o` 分别覆盖各自的最终目录，不再追加 `RUN_ID`。
+原始采集目录由 `capture -o` 指定，在线 worker 从 `--capture` 读取；两者都不由输出配置决定。
 
 ## 3. 启动：先跑通 GPT-2 样例
 
 以下以单机 2 Rank 为例。要在线观察时，**先**在终端 A 启动收集器，等它打印监听地址：
 
 ```bash
-hccl-diag online gpt2-001
+hccl-diag online gpt2-001 --config ./config.yaml --expected-ranks 2
 ```
 
 终端 B 在同一仓库目录启动训练，把 `DEVICES` 改成实配 ID：
@@ -90,7 +102,8 @@ hccl-diag capture --run-id "$RUN_ID" -o "runs/$RUN_ID" -- \
 启用 `npu_event` 后，样例默认做 3 个不进入基线的启动步、10 轮预热、20 轮正式训练；
 调整 `--warmup` 时须同步调整收集器的 `--warmup-iterations`。如果需要在运行结束时核查预期覆盖，
 在收集器上加 `--expected-ranks` 和 `--expected-collectives`；后者是全组逻辑通信次数（预热加正式，
-不乘 Rank 数，不含启动步）。收集器留到所有 Rank 正常退出后再用 Ctrl+C 停止。
+不乘 Rank 数，不含启动步）。打开另一个终端可随时看 `tail -F reports/online/gpt2-001/events.jsonl`。
+如需自动追查，训练结束后继续保留收集器，等 msprof 封存和后台报告发布后再用 Ctrl+C 停止。
 
 `capture` 自动打开语义打点和低日志 msprof 采集；不要再套一层 profiler。它会保留设备任务时间线
 和通信绑定需要的 Host API，不采集 AI Core 性能计数器。保存整个 `runs/$RUN_ID`，尤其是
@@ -172,15 +185,20 @@ hccl-diag capture --node "$NODE_ID" --run-id "$RUN_ID" -o "runs/$RUN_ID-$NODE_ID
   examples/gpt2_normal.py --devices "$DEVICES"
 ```
 
-多机仍只启动**一个**在线收集器：在受信私网使用 `hccl-diag online "$RUN_ID" --listen "$COLLECTOR_IP"`，
-采集端统一设置 `HCCL_TRACE_ONLINE_ADDR=$COLLECTOR_IP:7341`。收集器和各训练节点均需事先设置
+多机仍只启动**一个**在线收集器，例如 `hccl-diag online "$RUN_ID" --listen "$COLLECTOR_IP" --expected-ranks 4`。
+要同时检测 Slow，各训练节点统一设置 `HCCL_TRACE_ONLINE_ADDR=$COLLECTOR_IP:7341` 和
+`HCCL_TRACE_ONLINE_TIMING=npu_event`，并使用样例里的计时适配器。收集器和各训练节点均需事先设置
 同一个 `HCCL_TRACE_ONLINE_TOKEN`；不要把 Token 写进配置或日志。连接不加密，不暴露到公网。
 
-训练退出后，转移两份完整采集到分析机，按路径组装并校验；`join` 不修改输入：
+训练退出后，将两份完整采集转移到**收集器可访问**的分析目录，用 `join` 汇集。
+若需要自动报告，汇集目录应与收集器启动时传入的 `--capture` 一致；默认是 `runs/RUN_ID`。
+每个 profiler device 必须有对应的完整 Rank 观测；
+SDK 记录了 `WORLD_SIZE` 时还会核对全组 Rank。 `join` 不修改输入，逐文件校验完成后才发布目的目录：
 
 ```bash
 hccl-diag join "runs/$RUN_ID-node-a" "runs/$RUN_ID-node-b" -o "runs/$RUN_ID"
-hccl-diag analyze "runs/$RUN_ID"
+# 此时在线收集器会自动处理已告警的轮；无需再跑 analyze。
+# 如需另出一份离线报告，才运行：hccl-diag analyze "runs/$RUN_ID"
 ```
 
 无可信校时时不跨节点比较绝对时间。确需跨钟顺序时，采集前用
@@ -188,7 +206,12 @@ hccl-diag analyze "runs/$RUN_ID"
 `hccl-diag clock-probe probe --phase before/after`（每次填写一个 phase），用各子命令
 `--help` 查看地址、节点名和采集 ID 参数。把探针文件放进各自采集目录，在其
 `capture.json` 的对应 `nodes` 条目中用 `clock_probe_files` 声明相对路径；`join` 会保留。
-分析时加 `--require-clock-alignment` 可要求校时通过，否则只使用有依据的时钟范围，不推算网卡真实传输时间。
+参考端的 `serve --timeout` 需要覆盖训练、profiler 结束和采后探针。分析时加
+`--require-clock-alignment` 可要求校时通过；没有跨机校时证据时，Timeline 各节点分别以本地起点显示，
+同机设备缺少有效校时时也各用自己的起点，
+不能把相同横坐标当成同时发生。Notify 配对由端点身份和通道顺序决定，校时只用于核验时间关系。
+跨设备比较需考虑两端误差；缺少可靠时钟或精确生产者时，保留能验证的依赖，不猜测实际阻塞时长。
+RDMA 提交任务不是网卡传输完成事件。
 
 按次取数试用：知道目标调用在 msprof 中的精确通信组、调用名和 profiler device ID 后，可以运行：
 
@@ -206,23 +229,42 @@ S1 用 `s1-upstream`，另取设备开工前 1 秒；S2 首次分析后可再运
 这是手动取数入口，不自动订阅 Slow 告警，不做语义关联或溯源，也不把导出成功认作数据齐全。
 没有目标或没有 Task 时以 JSON 状态区分；`coverage_verified` 为 false 代表覆盖未认证。
 
-## 6. 自动生成慢化轮的详细报告
+## 6. 在线追查模式
 
-`hccl-diag online RUN_ID` 默认开启后台报告。Hang/Slow 仍立即写入 `events.jsonl`；
-只有测量到 Slow 才排队构图，Hang 不触发完整图。同一正式轮的多个慢桶共用一次构图和一份报告。
-所有 Rank 的轮次边界、已完成的设备 Task 和该轮各通信的在线判定都到齐后，独立 CPU 进程再处理，
+| 启动方式（均从 `hccl-diag online RUN_ID` 开始） | 设备数据来源 | 分型之后生成什么 |
+| --- | --- | --- |
+| 默认，或加 `--capture PATH` | 采集结束后封存的 DB、语义日志和 SDK 日志；多机先 `join` | S1/S2 整轮依赖图及传播报告三件套 |
+| 加 `--iteration-snapshots PATH` | 外部生产端提供的全 Rank 封存轮次快照 | 同上；快照齐全时可在训练结束前发布 |
+| 加 `--slow-tasks-only` | 同上两种封存输入，可配合 `--iteration-snapshots` | 只输出 S2 的 `iterations/iter-N/slow_tasks.json`，不构图 |
+| 加 `--task-batches PATH` | 外部生产端提供的、已精确关联的 Rank Task 批次 | 只输出 S2 的增量首报 `slow_tasks.jsonl`，不构图 |
+| 加 `--no-detailed-reports` | 不读设备 Task | 仅告警和测量日志 |
+
+以上模式不改变 H1/S1/S2 分类。**默认详细报告也包含慢 Task/Step，不必加快报开关。**
+但快报是详细报告的替代模式：当前一次收集器运行不会自动「先发增量首报、再补依赖图」。
+手动 `slice-collop` 里的 30 秒等待不是在线 worker 的定时导出策略。
+
+**默认详细追查**
+
+H1 只写告警，不尝试给未完成的通信构图。只有正式轮的 Slow 才排队，同一轮的多个慢桶共用一份图和报告。
+所有 Rank 的轮次边界、已完成的设备 Task 和该轮各通信的在线状态都到齐后，独立 CPU 进程再处理，
 不持有收集器的接收锁，训练也无需等待报告。优先用 SDK 记录的 `WORLD_SIZE` 核对整轮覆盖，
 旧日志没有这个字段时，在收集器上指定 `--expected-ranks`。
 
-- `online_report_output_dir/RUN_ID/diagnostics.jsonl` 记录等待、诊断、已发布或失败，保留所用采集来源。
+- `online_report_output_dir/RUN_ID/diagnostics.jsonl` 记录进度。
+  `waiting_for_sealed_trace` 表示还没有可读的封存输入；`waiting_for_all_ranks` 表示 Rank 覆盖不全；
+  `waiting_for_final_online_results` 表示该轮通信状态未齐。看到 `published` 再按该行的 `report` 路径打开产物；
+  `failed` 或 `unfinished_on_shutdown` 不会撤回已写出的分类告警。
 - 在同一详细报告目录下生成 `iterations/iter-N/execution.html`、`root_causes.json`、`propagation.html`。
+  在 JSON 的 `online_followup.alerts` 按告警看明细：S1 看准备区间、可能晚开工的 Rank 和 Wait 上游；
+  S2 看 `slow_tasks_by_rank`（同位置历史均值的至少两倍）及 `downstream_propagation`。
+  证据齐全时还可展示接收端跨机协议区间；它不等于逐笔 RDMA 硬件传输时间。
   图按每个 Rank 的本地轮次起止裁出该轮所有**已采到**的设备 Task 和证据支持的边，
   包括正常桶；必要的上游端点可以超出目标轮。只保留最近至多 10 个连续正式轮作为分析历史，
   没有可比历史或校时证据时不猜测。后台满时记录 `skipped_queue_full`，保留原告警。
 - 默认输入是 `runs/RUN_ID`。自定义目录（包括多机合并后的目录）在启动收集器时传
   `--capture /path/to/assembled-capture`。标准 `hccl-diag capture` 的 msprof 汇总 DB 只在采集封存后
   用于这条路径，因此可以自动出报告，但这并不意味着训练过程中已有实时设备 Task 流。
-  采集封存或多机 `join` 后，可用 `tail -f reports/online-details/RUN_ID/diagnostics.jsonl` 等到发布。
+  采集封存或多机 `join` 后，可用 `tail -F reports/online-details/RUN_ID/diagnostics.jsonl` 等到发布。
 - 如果部署环境已有兼容且验证过的训练中分段导出器，可启动
   `hccl-diag online RUN_ID --iteration-snapshots /path/to/spool`。生产者须先准备与普通采集同结构的
   `/path/to/spool/iter-N/`，含全 Rank 的已封存 DB、语义日志、完整 SDK 日志及目标轮结束标记，
@@ -235,8 +277,55 @@ S1 用 `s1-upstream`，另取设备开工前 1 秒；S2 首次分析后可再运
 
   此模式在训练仍在继续时即可处理已封存的轮。本仓没有为所有 CANN 版本实现训练中的设备 Task 导出器，
   不读取仍在更新的 DB，也不把 Host 提交或 Rank 总耗时当作设备 Task 完成。默认启用的标准采集回退仍然可用。
-- 只要快告警时用 `--no-detailed-reports`。关闭收集器后，后台最多等待
-  `--report-drain-seconds`（默认 120 秒）；缺失的输入不会生成完整图。
+- Ctrl+C 停止收集器后，后台排空预算由 `--report-drain-seconds` 控制（默认 120 秒）。
+  多机传输、汇集或大型诊断耗时较长时，先等 `published` 再停收集器，不要只依赖排空时间。
+
+**只看 S2 慢 Task/step**：启动时加 `--slow-tasks-only`，例如：
+
+```bash
+hccl-diag online gpt2-001 --expected-ranks 8 --slow-tasks-only --report-drain-seconds 240
+```
+
+Hang/Slow 告警不变；后台只对 S2 涉及的通信出快报，不构建依赖边、不生成 HTML 或传播报告。
+在 `online_report_output_dir/RUN_ID/diagnostics.jsonl` 看到 `published` 后，打开对应
+`iterations/iter-N/slow_tasks.json`。`alerts[].tasks_by_rank` 分列 Task 和 Wait，包含
+phase/step、stream/task ID、本地设备时间、实际耗时、历史参考及慢化百分比。
+同 Rank、同位置唯一匹配，至少需要 3 个有效历史样本，增量达到 100% 才列入。
+没有精确 step、依赖关系才能关联的未标注任务，以及历史不足的任务只计入覆盖，不猜测慢化和物理根因。
+快报是纯耗时观测，不执行基于前序间隙、Copy 重叠或依赖关系的完整分析，内容可能与详细报告不同。
+
+该模式仍需要已封存的设备 Task 数据。训练期间要看结果，应同时提供上述
+`--iteration-snapshots`，每份快照须带目标轮和可比较的历史。普通 msprof 采集则等最终 DB
+封存（多机需要汇集），不会从在线 CollOp 总时长推算内部 Task。
+
+**增量首报（需要预关联数据输入）**：
+
+```bash
+hccl-diag online gpt2-001 --expected-ranks 8 --task-batches /path/to/task-batches
+tail -f reports/online-details/gpt2-001/slow_tasks.jsonl
+```
+
+与 `--capture`、`--iteration-snapshots` 是不同输入模式，不混用。S2 告警出现后，每个 Rank 的
+目标调用一旦就绪便独立发布；按绝对增量最多展示 3 条慢 Task 和 3 条慢 Wait，不等其他 Rank，
+也不生成图。5 秒仍缺输入时会报告待补 Rank，最多再等待到告警被处理后 60 秒或 worker 关闭。
+`observed_latency_ms` 从 worker 读到告警算起，不是设备执行到告警的总时延。
+
+输入由可信的采集/关联端写到 `iter-N/rank-R.json`，临时文件写完后原子替换。
+外层字段为 `schema_version: 1`、`run_id`、`iteration`、`rank`、`node_id`、`device_id`、
+`source: "exact_device_task_association"`、`complete: true` 和 `operations` 数组。
+每次可追加该 Rank 新完成的调用，保留已发布的调用不变；`complete` 只说明文件中每个调用的
+设备 Task 已完成且归属明确，不要求整轮齐全。单文件上限 2 MiB，只需提供希望覆盖的通信。
+每个调用写 `communicator_id`、`communicator_generation`、`op_counter`、`bucket_id`、
+`occurrence`、`op_type`、`tensor_bytes`、`dtype`、`reduction`、`host_entry_ts` 及 `tasks`。
+Task 必须提供唯一的 `execution_id`，`stream_id`、`task_id`、同一设备时钟域的整数
+`start_ns`/`stop_ns`，以及 `algorithm`、`phase`、`step`、`slice`、`event`、
+`semantic`、`task_kind`、`peer_rank`、`size_bytes`。仅写有明确语义位置的真实设备 Task。
+缺失的 slice、peer 或大小写 `-1`，不填猜测值。
+
+首报核对当前告警的调用身份和 Rank 提交记录，从前 10 个正式轮中找同 Rank、同通信布局的历史，
+最多取 5 个有效样本（至少 3 个）。不使用注入真值，不将找不到历史解释为正常。
+仓库目前没有把普通 `msprof` 采集自动转换成运行中批次的生产端；未提供批次时不会静默降级成
+以 Host 提交计时，也不会从最终 DB 临时全量提取。5 秒是首报目标，不是对上游导出延迟的保证。
 
 ## 7. 看报告
 
@@ -249,10 +338,16 @@ S1 用 `s1-upstream`，另取设备开工前 1 秒；S2 首次分析后可再运
 | H1：有 Rank 在时限内未进入，而且心跳/计数能证实 | `NOT_ENTERED_HANG` |
 | S1：慢化并且有该 Rank 的独立 Host 准备延迟证据 | `COMPUTATION_SLOW` |
 | S2：通信慢化，尚不能凭在线耗时判定物理原因 | `COMMUNICATION_SLOW` |
+| 全部 Rank 已进入，但超时且没有完成证据，不能定位原因 | `STALLED_UNKNOWN` |
+| 遥测或设备计时不完整，不能确认类别 | `INCOMPLETE_DATA` |
 | 参考不完整或不稳定，不能计算慢化 | `INSUFFICIENT_BASELINE` |
 
-`R=(Tmax-Tbase)/Tbase`，严格 `R>2` 才报慢；`P=(Tmax-Tmin)/(Tmax-Tbase)`。
-T 是各 Rank 的观测耗时，不是跨机绝对时间。只有在训练同步点读回并收齐计时后才能判断 S1/S2。
+`R=(Tmax-Tbase)/Tbase`，严格 `R>1` 才报慢，即耗时增量超过100%（总耗时超过历史基线两倍）；
+刚好增长100%不报慢。`P=(Tmax-Tmin)/(Tmax-Tbase)`。
+T 是各 Rank 的观测耗时，不是跨机绝对时间。用样例的 NPU Event 计时，须在现有同步点读回、
+收齐全 Rank 数据并建立同位置基线后才能判断 S1/S2。`P>0.6` 本身不构成 S1：还需要唯一最短耗时的
+Rank 同时有独立的 Host 准备延迟证据，已知的同钟进入顺序也不能与之矛盾。过慢化门槛但未证实 S1
+时归为 S2；S2 标签不证明是 RoCE、SDMA 或其他某一种物理原因。
 `measurements.jsonl` 包括正常、异常和证据不足的通信；`telemetry.jsonl` 保存原始帧；
 `run_health.jsonl` 用于看是否丢帧、预热是否齐全以及计时覆盖。健康门禁不代表诊断准确率。
 

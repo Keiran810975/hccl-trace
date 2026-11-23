@@ -152,6 +152,10 @@ def add_arguments(parser):
     reports = parser.add_mutually_exclusive_group()
     reports.add_argument("--no-detailed-reports", action="store_true", help="only write online Hang/Slow alerts")
     reports.add_argument("--report-output", type=Path, help="override online_report_output_dir/RUN_ID")
+    parser.add_argument("--slow-tasks-only", action="store_true",
+                        help="publish S2 task/step observations without dependency graphs or propagation")
+    parser.add_argument("--task-batches", type=Path,
+                        help="read sealed, exactly bound Rank task batches for incremental S2 first reports")
     parser.add_argument("--report-drain-seconds", type=float, default=120,
                         help="maximum time to drain iteration reports when the collector stops")
 
@@ -172,6 +176,10 @@ def _report_worker(args, output, report_output, job_id):
                    "--parent-pid", str(os.getpid())]
         if args.iteration_snapshots is not None:
             command += ["--snapshots", str(args.iteration_snapshots.resolve())]
+        if args.slow_tasks_only:
+            command += ["--slow-tasks-only"]
+        if args.task_batches is not None:
+            command += ["--task-batches", str(args.task_batches.resolve())]
         if args.expected_ranks is not None:
             command += ["--expected-ranks", str(args.expected_ranks)]
         with subprocess.Popen(command, start_new_session=os.name == "posix") as worker:
@@ -207,12 +215,20 @@ def run(args):
     from .multi_node_trace import _name
 
     job_id = _name(args.run_id)
+    if args.slow_tasks_only and args.no_detailed_reports:
+        raise ValueError("--slow-tasks-only requires the background report worker")
+    if args.task_batches is not None and (args.no_detailed_reports or args.iteration_snapshots is not None
+                                          or args.capture is not None):
+        raise ValueError("--task-batches is a separate task-only input; do not combine capture or disable reports")
     paths = load_paths(args.config)
     output = args.output or paths.for_run("online", job_id)
     report_output = None
     if not args.no_detailed_reports:
         report_output = args.report_output or paths.for_run("online_reports", job_id)
         require_separate(output, report_output)
+        if args.task_batches is not None:
+            require_separate(output, args.task_batches)
+            require_separate(report_output, args.task_batches)
         if report_output.exists() or report_output.is_symlink():
             raise FileExistsError("refusing to reuse online report directory: " + str(report_output))
     if any(v is not None and v < 1 for v in (args.expected_ranks, args.expected_collectives)):

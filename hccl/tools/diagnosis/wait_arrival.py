@@ -13,7 +13,10 @@ def local_origins(rows, clocks):
         clock = clocks.get((row["_node_id"], row["_device_id"]))
         if clock is not None and row.get("_operation_scope"):
             key = row["_operation_scope"], row["_node_id"]
-            start = waits.ns(row, "start") - clock.profiler_to_raw_offset_ns
+            try:
+                start = clock.raw_ns(waits.ns(row, "start"))
+            except ValueError:
+                continue
             origins[key] = min(origins.get(key, start), start)
     return origins
 
@@ -46,17 +49,19 @@ def observe(wait, producer, task, nodes, syncs, clocks, quantization, origins, *
 
     def raw(row, side):
         clock = clocks[(row["_node_id"], row["_device_id"])]
-        clock.map_ns(waits.ns(row, side))
-        return waits.ns(row, side) - clock.profiler_to_raw_offset_ns
+        return clock.raw_ns(waits.ns(row, side))
 
     def uncertainty(p, w):
         keys = [(r["_node_id"], r["_device_id"]) for r in (p, w)]
         return 0 if keys[0] == keys[1] else sum(quantization[k] for k in keys)
 
     # Do not explain a logically paired but temporally contradictory channel.
-    if any(raw(p, "start") - uncertainty(p, w) > raw(w, "stop")
-           or raw(p, "stop") + uncertainty(p, w) <= raw(w, "start") for p, w in pairs):
-        return None
+    try:
+        if any(raw(p, "start") - uncertainty(p, w) > raw(w, "stop")
+               or raw(p, "stop") + uncertainty(p, w) <= raw(w, "start") for p, w in pairs):
+            return None
+    except ValueError:
+        return None  # The optional arrival observation cannot extend clock coverage.
 
     def offset(row, side):
         return Decimal(raw(row, side) - origins[(row["_operation_scope"], row["_node_id"])])

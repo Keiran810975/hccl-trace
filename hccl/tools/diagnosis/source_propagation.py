@@ -54,10 +54,12 @@ def timing_check(edge, src, dst):
         return "ffts_not_complete_hardware_dag"
     if src["node_id"] != dst["node_id"]:
         return "cross_node_uncalibrated"
-    if edge["kind"] == "direct_stream_order_observed":
-        return "compatible_stream_order" if src["stop_ns"] <= dst["start_ns"] else "overlapping_stream_tasks"
     if src["task_kind"] == "rdma":
         return "rdma_submission_not_completion"
+    if src["device_id"] != dst["device_id"]:
+        return "same_node_cross_device_uncalibrated"
+    if edge["kind"] == "direct_stream_order_observed":
+        return "compatible_stream_order" if src["stop_ns"] <= dst["start_ns"] else "overlapping_stream_tasks"
     if src["stop_ns"] > dst["stop_ns"]:
         return "record_after_wait_end"
     if src["stop_ns"] <= dst["start_ns"]:
@@ -131,7 +133,7 @@ def build_report(rows, edges, candidates, comparisons=(), *, primary_source_cand
                     timing = root.get("dependency_timing", {}).get(identifier)
                     valid_timing = (timing and timing.get("wait_graph_id") == dst["graph_id"]
                                     and timing.get("producer_graph_id") == src["graph_id"]
-                                    and timing.get("timing_domain") == "same_node_monotonic_raw"
+                                    and timing.get("timing_domain") in {"same_node_monotonic_raw", "same_profiler_device"}
                                     and src["node_id"] == dst["node_id"]
                                     and timing.get("producer_profiler_interval_ns") == [src["start_ns"], src["stop_ns"]]
                                     and timing.get("wait_profiler_interval_ns") == [dst["start_ns"], dst["stop_ns"]]

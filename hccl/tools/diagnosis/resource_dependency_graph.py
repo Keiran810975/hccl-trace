@@ -298,19 +298,22 @@ def _timing_metrics(
         # Doorbell completion is not remote data completion. Keep local wait
         # duration without presenting a network/compute delay decomposition.
         metrics["timing_status"] = "same_node_rdma_completion_unmeasured"
-    elif record.get("_node_id") == wait.get("_node_id"):
+    elif record["_node_id"] == wait["_node_id"] and record["_device_id"] == wait["_device_id"]:
         record_stop = execution.execution_time_order_value(record, "stop")
-        remote_block = min(
-            wait_span,
-            max(Decimal(0), record_stop - wait_start),
-        )
-        metrics["remote_block_ns"] = _decimal_ns(remote_block)
-        metrics["post_signal_ns"] = _decimal_ns(wait_span - remote_block)
-        metrics["timing_status"] = "same_node_observed"
+        if record_stop <= wait_stop:
+            remote_block = max(Decimal(0), record_stop - wait_start)
+            metrics["remote_block_ns"] = _decimal_ns(remote_block)
+            metrics["post_signal_ns"] = _decimal_ns(wait_span - remote_block)
+            metrics["timing_status"] = "same_device_observed"
+        else:
+            metrics["timing_status"] = "incompatible_notify_timestamps"
+    elif record["_node_id"] == wait["_node_id"]:
+        metrics["timing_status"] = "same_node_cross_device_uncalibrated"
     if (
         downstream_row is not None
         and downstream_row.get("_node_kind", "resource") == "resource"
-        and downstream_row.get("_node_id") == wait.get("_node_id")
+        and downstream_row["_node_id"] == wait["_node_id"]
+        and downstream_row["_device_id"] == wait["_device_id"]
     ):
         handoff = max(
             Decimal(0),

@@ -35,7 +35,7 @@ def _coordinate(call):
     return tuple(call[k] for k in ("group_id", "stage", "iteration", "call_site", "occurrence"))
 
 
-def from_observations(target, manifest, observations, inventory, coordinates, *, lookback=10):
+def from_observations(target, manifest, observations, inventory, coordinates, *, lookback=10, locations=None):
     windows = {}
     points = {}
     target_locations = set()
@@ -59,6 +59,10 @@ def from_observations(target, manifest, observations, inventory, coordinates, *,
         target_locations.update(_coordinate(c) for c in target_calls)
     if len(windows) != len(manifest["ranks"]) or not target_locations:
         raise ValueError("target iteration is missing Rank coverage or collective calls")
+    if locations is not None:
+        if not locations or not locations <= target_locations:
+            raise ValueError("requested collective is missing from the closed iteration")
+        target_locations = locations
     common = set.intersection(*(set(markers) for markers in windows.values()))
     first = target
     while first - 1 in common and first > target - lookback:
